@@ -1,0 +1,21 @@
+Table 1 
+Fornax Structural Parameters Derived with the MCMC Method for Different Profile Models.
+
+
+Parameter	King	Exponential	Plummer	Sersic	Bate15	B06	
+alpha_2000	2^h39^m53^s	2^h39^m53^s	2^h39^m53^s	2^h39^m53^s	2^h39^m52^s	2^h39^m52^s	
+delta_2000	-34deg30'32"	-34deg30'21"	-34deg30'25"	-34deg30'32"	-34deg30'39"	-34deg30'49"	
+Ellipticity	0.31 +or- 0.002	0.31 +or- 0.002	0.29 +or- 0.002	0.31 +or- 0.002	0.31 +or- 0.01	0.30 +or- 0.01	
+Position angle	42.deg2 +or- 0.deg2	43.deg2 +or- 0.deg2	42.deg7 +or- 0.deg3	42.deg3 +or- 0.deg2	41.deg6 +or- 0.deg2	46.deg8 +or- 1.deg6	
+Sersic r_s	cdots	cdots	cdots	16.'4 +or- 0.'2	14.'5 +or- 0.'1	17.'3 +or- 0.'2	
+Sersic index m	cdots	cdots	cdots	0.80 +or- 0.006	0.78 +or- 0.005	0.71 +or- 0.01	
+Exponential r_e	cdots	11.'8 +or- 0.'04	cdots	cdots	cdots	11.'0 +or- 0.'1	
+Plummer r_p	cdots	cdots	19.'9 +or- 0.'06	cdots	cdots	19.'6 +or- 0.'1	
+King r_t	77.'5 +or- 0.'4	cdots	cdots	cdots	69.'7 +or- 0.'3	69.'1 +or- 0.'4	
+King r_c	20.'3 +or- 0.'1	cdots	cdots	cdots	14.'6 +or- 0.'1	17.'3 +or- 0.'2	
+2D Half-light r_h	20.'8	19.'8	19.'4	20.'1	17.'0 (King)	18.'1 (King)	
+					17.'2 (Sersic)	18.'6 (Sersic)	
+						18.'5 (Exp.)	
+${\chi }_{\mathrm{reduced}}^{2}$	1.89	2.04	2.54	1.41	
+Note.
+The last two columns refers to the structural parameters derived by Bate et al. (2015) (Bate15) and Battaglia et al. (2006) (B06).

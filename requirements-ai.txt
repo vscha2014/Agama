@@ -1,0 +1,11 @@
+# Lightweight AI-development venv (.venv-ai) for documentation analysis,
+# static inspection, and small checks. See doc/ai/05_development_environment.md.
+# Production/runtime deps (torch, botorch, gpytorch, scikit-learn, agama)
+# are NOT installed here — they live in the production Docker image.
+numpy
+scipy
+pandas
+matplotlib
+pyyaml
+pypdf
+pytest

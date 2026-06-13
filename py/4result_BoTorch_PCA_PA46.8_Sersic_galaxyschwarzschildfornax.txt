@@ -1,0 +1,1836 @@
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt
+# Label:  RESULT-ERR(1): incl=87.5, suffix=p1, host=galaxyschwarzschildfornax
+# Time:   2026-06-10 18:34:46
+# Lines:  36
+# HASH:8d266035a0ce2fa62b4ef3a2f380ed99
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p1
+# Start: 2026-06-10 18:34:36.427571
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 5
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+
+Данных для incl=87.5 недостаточно (0 < 10).
+Запускаем bootstrap из ближайшего наклонения...
+  Bootstrap не дал результатов.
+  Генерируем случайные начальные точки (LHS)...
+
+  [random init] Генерация 10 случайных точек (Latin Hypercube)
+    #         Q        gh        rh      rho0
+  ---------------------------------------------
+    1    1.4615    1.0167      2.1427  108.5177
+    2    1.7126    1.5953      1.7681   74.4644
+    3    0.0814    0.3029      3.4009   66.5143
+    4    1.8753    0.9245      2.4311  115.3467
+    5    0.8758    0.6711      0.7498   56.0912
+    6    0.7671    0.0747      2.8101   95.4023
+    7    1.1877    1.2870      2.9937   77.9850
+    8    2.4566    1.1447      1.0497   48.3483
+    9    0.4036    0.5893      1.3414   38.0514
+   10    2.0657    0.4392      1.5162   90.4610
+
+  [1/10] Вычисление penalty...
+
+  [2/10] Вычисление penalty...
+
+  [3/10] Вычисление penalty...
+
+  [4/10] Вычисление penalty...
+
+  [5/10] Вычисление penalty...
+
+  [6/10] Вычисление penalty...
+
+  [7/10] Вычисление penalty...
+
+  [8/10] Вычисление penalty...
+
+  [9/10] Вычисление penalty...
+
+  [10/10] Вычисление penalty...
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt
+# Label:  RESUME-PRE: incl=87.5, suffix=p0, host=galaxyschwarzschildfornax
+# Time:   2026-06-12 13:44:39
+# Lines:  150
+# HASH:59a70af8a723b4dca6c332db85539f74
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p0
+# Start: 2026-06-10 20:03:25.180395
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 5
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+
+Данных для incl=87.5 недостаточно (0 < 10).
+Запускаем bootstrap из ближайшего наклонения...
+
+  Bootstrap дал 12 точек (из incl=85.00°, dist=2.5°)
+  Только bootstrap: 12 точек
+Загружено строк (incl=87.5): 12
+Диапазон penalty: [0.8016, 0.8408]
+Адаптивный penalty cutoff: 0.8322 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.8321836960216749: 10
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена на основе bootstrap (incl=85.00° → 87.50°):
+=======================================================
+  PC1:  0.694  cumul= 0.694  ███████████████████████████
+  PC2:  0.305  cumul= 0.999  ████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-4.901, 4.298]
+  PC2: [-4.744, 3.660]
+  PC3: [-2.646, 2.583]
+
+Проверка обратного преобразования:
+  Q    : [0.2631, 0.2647]
+  gh   : [0.0003, 0.0023]
+  rh   : [2.2509, 2.3144]
+  rho0 : [86.3467, 87.1379]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p0.pkl
+
+Исторических точек для GP: 10
+Y (target): min=-0.8322, max=-0.8016
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-4.90, 4.30] x ...# Checkpoint не найден, запуск с нуля
+
+Добавление априорной точки (лучшая из исторических):
+  Q=0.26430152342818, gh=0.002137412142033, rh=2.298812507814743, rho0=86.47672710712295
+  PCA-координаты априорной точки: [-1.62988568  0.17341676 -0.14572119]
+  Вычисление penalty для априорной точки...
+  Априорная точка добавлена. Penalty=0.827634
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 1/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.801567  (лучшее из истории)
+    Размер TR         = 0.6000
+
+--- Итерация 2/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.806608  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 3/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.781518  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 4/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.810950  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 5/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.828346  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 6/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.821728  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 7/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.842545  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 8/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.828334  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 9/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.811217  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 10/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.847512  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 11/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.807538  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 12/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.816132  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 13/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.811496  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 14/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.822309  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 15/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.818152  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+  [PCA] Обновление PCA на итерации 15...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 8
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt: 28 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt: 28 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt: 28 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 84
+    Из буфера своего процесса:    15
+    Итого точек для PCA:          99
+    После фильтра penalty≤2.0: 99 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.6159  cumul=0.6159
+    PC2: 0.3819  cumul=0.9978
+    PC3: 0.0020  cumul=0.9998
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-4.901, 4.298] → [-6.519, 4.189]
+    PC2: [-4.744, 3.660] → [-4.883, 4.770]
+    PC3: [-2.646, 2.583] → [-2.859, 2.633]
+  [PCA update] Готово. Вариант: А, точек: 99
+  [PCA] Обновление завершено. Точек в буфере: 15
+
+--- Итерация 16/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.823910  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 17/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.796953  (из предыдущей итерации)
+    Размер TR         = 0.0375
+#  [TuRBO] TR сужена → length = 0.0187
+--- Итерация 18/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.798061  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.820726  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt
+# Label:  RESUME-PRE: incl=87.5, suffix=p1, host=galaxyschwarzschildfornax
+# Time:   2026-06-12 13:44:39
+# Lines:  150
+# HASH:24ca526ed733595bf65bad5b7226824d
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p1
+# Start: 2026-06-10 20:03:25.399963
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 5
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+
+Данных для incl=87.5 недостаточно (0 < 10).
+Запускаем bootstrap из ближайшего наклонения...
+
+  Bootstrap дал 12 точек (из incl=85.00°, dist=2.5°)
+  Только bootstrap: 12 точек
+Загружено строк (incl=87.5): 12
+Диапазон penalty: [0.8016, 0.8408]
+Адаптивный penalty cutoff: 0.8322 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.8321836960216749: 10
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена на основе bootstrap (incl=85.00° → 87.50°):
+=======================================================
+  PC1:  0.694  cumul= 0.694  ███████████████████████████
+  PC2:  0.305  cumul= 0.999  ████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-4.901, 4.298]
+  PC2: [-4.744, 3.660]
+  PC3: [-2.646, 2.583]
+
+Проверка обратного преобразования:
+  Q    : [0.2631, 0.2647]
+  gh   : [0.0003, 0.0023]
+  rh   : [2.2509, 2.3144]
+  rho0 : [86.3467, 87.1379]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p1.pkl
+
+Исторических точек для GP: 10
+Y (target): min=-0.8322, max=-0.8016
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-4.90, 4.30] x ...# Checkpoint не найден, запуск с нуля
+
+Добавление априорной точки (лучшая из исторических):
+  Q=0.26430152342818, gh=0.002137412142033, rh=2.298812507814743, rho0=86.47672710712295
+  PCA-координаты априорной точки: [-1.62988568  0.17341676 -0.14572119]
+  Вычисление penalty для априорной точки...
+  Априорная точка добавлена. Penalty=0.827634
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 1/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.801567  (лучшее из истории)
+    Размер TR         = 0.6000
+
+--- Итерация 2/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.806615  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 3/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.794473  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 4/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.801761  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 5/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.824485  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 6/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.818113  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 7/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.853741  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 8/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.837641  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 9/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.825511  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 10/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.850903  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 11/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.804350  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 12/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.824354  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 13/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.812439  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 14/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.830768  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 15/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.817572  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+  [PCA] Обновление PCA на итерации 15...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 8
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt: 28 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt: 27 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt: 27 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 82
+    Из буфера своего процесса:    15
+    Итого точек для PCA:          97
+    После фильтра penalty≤2.0: 97 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.6167  cumul=0.6167
+    PC2: 0.3811  cumul=0.9978
+    PC3: 0.0020  cumul=0.9998
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-4.901, 4.298] → [-6.488, 4.194]
+    PC2: [-4.744, 3.660] → [-4.860, 4.811]
+    PC3: [-2.646, 2.583] → [-2.857, 2.632]
+  [PCA update] Готово. Вариант: А, точек: 97
+  [PCA] Обновление завершено. Точек в буфере: 15
+
+--- Итерация 16/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.836521  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 17/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.794473
+    Предыдущий target = -0.801084  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 18/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.787285  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.825576  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt
+# Label:  RESUME-PRE: incl=87.5, suffix=p2, host=galaxyschwarzschildfornax
+# Time:   2026-06-12 13:44:39
+# Lines:  150
+# HASH:2d3640055b02887be9fb8030af8853b3
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p2
+# Start: 2026-06-10 20:03:25.287946
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 5
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+
+Данных для incl=87.5 недостаточно (0 < 10).
+Запускаем bootstrap из ближайшего наклонения...
+
+  Bootstrap дал 12 точек (из incl=85.00°, dist=2.5°)
+  Только bootstrap: 12 точек
+Загружено строк (incl=87.5): 12
+Диапазон penalty: [0.8016, 0.8408]
+Адаптивный penalty cutoff: 0.8322 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.8321836960216749: 10
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена на основе bootstrap (incl=85.00° → 87.50°):
+=======================================================
+  PC1:  0.694  cumul= 0.694  ███████████████████████████
+  PC2:  0.305  cumul= 0.999  ████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-4.901, 4.298]
+  PC2: [-4.744, 3.660]
+  PC3: [-2.646, 2.583]
+
+Проверка обратного преобразования:
+  Q    : [0.2631, 0.2647]
+  gh   : [0.0003, 0.0023]
+  rh   : [2.2509, 2.3144]
+  rho0 : [86.3467, 87.1379]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p2.pkl
+
+Исторических точек для GP: 10
+Y (target): min=-0.8322, max=-0.8016
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-4.90, 4.30] x ...# Checkpoint не найден, запуск с нуля
+
+Добавление априорной точки (лучшая из исторических):
+  Q=0.26430152342818, gh=0.002137412142033, rh=2.298812507814743, rho0=86.47672710712295
+  PCA-координаты априорной точки: [-1.62988568  0.17341676 -0.14572119]
+  Вычисление penalty для априорной точки...
+  Априорная точка добавлена. Penalty=0.827634
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 1/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.801567  (лучшее из истории)
+    Размер TR         = 0.6000
+
+--- Итерация 2/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.806513  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 3/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.794238  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 4/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.802365  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 5/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.824627  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 6/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.821678  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 7/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.853283  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 8/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.838430  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 9/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.824532  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 10/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.867138  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 11/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.805027  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 12/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.825090  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 13/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.813314  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 14/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.831207  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 15/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.817813  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+  [PCA] Обновление PCA на итерации 15...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 8
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt: 28 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt: 28 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt: 27 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 83
+    Из буфера своего процесса:    15
+    Итого точек для PCA:          98
+    После фильтра penalty≤2.0: 98 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.6167  cumul=0.6167
+    PC2: 0.3811  cumul=0.9978
+    PC3: 0.0020  cumul=0.9998
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-4.901, 4.298] → [-6.505, 4.191]
+    PC2: [-4.744, 3.660] → [-4.872, 4.795]
+    PC3: [-2.646, 2.583] → [-2.857, 2.633]
+  [PCA update] Готово. Вариант: А, точек: 98
+  [PCA] Обновление завершено. Точек в буфере: 15
+
+--- Итерация 16/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.821372  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 17/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.794238
+    Предыдущий target = -0.795800  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 18/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.789862  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.825362  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt
+# Label:  RESUME-PRE: incl=87.5, suffix=p3, host=galaxyschwarzschildfornax
+# Time:   2026-06-12 13:44:39
+# Lines:  150
+# HASH:227f6de76313f1149b17eb4a99aebf9b
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p3
+# Start: 2026-06-10 20:03:25.368153
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 5
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+
+Данных для incl=87.5 недостаточно (0 < 10).
+Запускаем bootstrap из ближайшего наклонения...
+
+  Bootstrap дал 12 точек (из incl=85.00°, dist=2.5°)
+  Только bootstrap: 12 точек
+Загружено строк (incl=87.5): 12
+Диапазон penalty: [0.8016, 0.8408]
+Адаптивный penalty cutoff: 0.8322 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.8321836960216749: 10
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена на основе bootstrap (incl=85.00° → 87.50°):
+=======================================================
+  PC1:  0.694  cumul= 0.694  ███████████████████████████
+  PC2:  0.305  cumul= 0.999  ████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-4.901, 4.298]
+  PC2: [-4.744, 3.660]
+  PC3: [-2.646, 2.583]
+
+Проверка обратного преобразования:
+  Q    : [0.2631, 0.2647]
+  gh   : [0.0003, 0.0023]
+  rh   : [2.2509, 2.3144]
+  rho0 : [86.3467, 87.1379]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p3.pkl
+
+Исторических точек для GP: 10
+Y (target): min=-0.8322, max=-0.8016
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-4.90, 4.30] x ...# Checkpoint не найден, запуск с нуля
+
+Добавление априорной точки (лучшая из исторических):
+  Q=0.26430152342818, gh=0.002137412142033, rh=2.298812507814743, rho0=86.47672710712295
+  PCA-координаты априорной точки: [-1.62988568  0.17341676 -0.14572119]
+  Вычисление penalty для априорной точки...
+  Априорная точка добавлена. Penalty=0.827634
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 1/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.801567  (лучшее из истории)
+    Размер TR         = 0.6000
+
+--- Итерация 2/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.801567
+    Предыдущий target = -0.806463  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 3/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.798857  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 4/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.812228  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 5/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.821681  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 6/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.826978  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 7/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.855612  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 8/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.835645  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 9/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.820732  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 10/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.850570  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 11/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.817959  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 12/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.819903  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 13/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.808673  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 14/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.832994  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 15/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.817903  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+  [PCA] Обновление PCA на итерации 15...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 8
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt: 27 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt: 27 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt: 27 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 81
+    Из буфера своего процесса:    15
+    Итого точек для PCA:          96
+    После фильтра penalty≤2.0: 96 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.6196  cumul=0.6196
+    PC2: 0.3782  cumul=0.9978
+    PC3: 0.0020  cumul=0.9998
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-4.901, 4.298] → [-6.463, 4.204]
+    PC2: [-4.744, 3.660] → [-4.885, 4.786]
+    PC3: [-2.646, 2.583] → [-2.858, 2.632]
+  [PCA update] Готово. Вариант: А, точек: 96
+  [PCA] Обновление завершено. Точек в буфере: 15
+
+--- Итерация 16/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.821556  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 17/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.798857
+    Предыдущий target = -0.801642  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 18/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.787169  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.827819  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt
+# Label:  RESULT-OK: incl=87.5, suffix=p1, host=galaxyschwarzschildfornax
+# Time:   2026-06-13 06:35:37
+# Lines:  180
+# HASH:c1d00b5df464322f987e2c4e31663e71
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p1
+# Start: 2026-06-12 13:45:56.244005
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 6
+  4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+Загружено строк (incl=87.5): 124
+Диапазон penalty: [0.7815, 0.8671]
+Адаптивный penalty cutoff: 0.8086 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.808630361580826: 37
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена (взвешенная, 4 параметра):
+=======================================================
+  PC1:  0.595  cumul= 0.595  ███████████████████████
+  PC2:  0.404  cumul= 0.999  ████████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-6.479, 3.780]
+  PC2: [-4.730, 4.099]
+  PC3: [-2.609, 2.592]
+
+Проверка обратного преобразования:
+  Q    : [0.2630, 0.2650]
+  gh   : [-0.0000, 0.0021]
+  rh   : [2.2410, 2.2988]
+  rho0 : [86.4768, 87.1801]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p1.pkl
+
+Исторических точек для GP: 37
+Y (target): min=-0.8082, max=-0.7815
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-6.48, 3.78] x ...
+============================================================
+ВОЗОБНОВЛЕНИЕ С CHECKPOINT на galaxyschwarzschildfornax_p1
+============================================================
+  Файл:            checkpoint_galaxyschwarzschildfornax_p1.pkl
+  Сохранён:        2026-06-11T19:38:49.584111
+  Итерация старта: 19/40
+  Точек в истории: 29
+  Лучший target:   -0.787285
+  TR length:       0.0375
+  Вычислений halo: 31
+============================================================
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.787285  (лучшее из истории)
+    Размер TR         = 0.0375
+
+--- Итерация 20/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.824065  (из предыдущей итерации)
+    Размер TR         = 0.0375
+#  [TuRBO] TR сужена → length = 0.0187
+--- Итерация 21/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.812511  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 22/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.829089  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 23/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.805691  (из предыдущей итерации)
+    Размер TR         = 0.0187
+#  [TuRBO] TR сужена → length = 0.0094
+--- Итерация 24/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.844149  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 25/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.839241  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 26/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.831802  (из предыдущей итерации)
+    Размер TR         = 0.0094
+#  [TuRBO] TR сужена → length = 0.0047  [TuRBO-PCA] TR схлопнулась — перезапуск
+
+--- Итерация 27/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.795166  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 28/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.820527  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 29/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.795685  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 30/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.813110  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+  [PCA] Обновление PCA на итерации 30...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 9
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt: 11 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt: 12 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt: 11 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 158
+    Из буфера своего процесса:    12
+    Итого точек для PCA:          170
+    После фильтра penalty≤2.0: 170 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.5872  cumul=0.5872
+    PC2: 0.3376  cumul=0.9248
+    PC3: 0.0725  cumul=0.9973
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-6.479, 3.780] → [-6.582, 4.729]
+    PC2: [-4.730, 4.099] → [-4.259, 5.506]
+    PC3: [-2.609, 2.592] → [-3.306, 3.696]
+  [PCA update] Готово. Вариант: А, точек: 170
+  [PCA] Обновление завершено. Точек в буфере: 12
+
+--- Итерация 31/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.832055  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 32/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.844826  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 33/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.787285
+    Предыдущий target = -0.812085  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 34/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.786787  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 35/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.800606  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 36/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.828375  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 37/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.821805  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 38/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.834730  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 39/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.841764  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 40/40 на galaxyschwarzschildfornax_p1 ---
+    Лучший target     = -0.786787
+    Предыдущий target = -0.820236  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+============================================================
+РЕЗУЛЬТАТ TuRBO-PCA:
+============================================================
+  PC-координаты: [-0.93969388 -0.6549082  -0.34855116]
+  incl    = 87.50
+  Q       = 0.264714
+  gh      = 0.000058
+  rh      = 2.257558
+  rho0    = 87.205093
+  Upsilon = 0.704879
+  penalty = 0.786787
+
+Всего вычислений целевой функции: 53
+Всего оптимизаций Upsilon: 595
+============================================================
+# End: 2026-06-13 06:35:30.047219
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt
+# Label:  RESULT-OK: incl=87.5, suffix=p2, host=galaxyschwarzschildfornax
+# Time:   2026-06-13 06:36:07
+# Lines:  180
+# HASH:58db778b2459d4d496997525fe0014fb
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p2
+# Start: 2026-06-12 13:45:56.348467
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 6
+  4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+Загружено строк (incl=87.5): 124
+Диапазон penalty: [0.7815, 0.8671]
+Адаптивный penalty cutoff: 0.8086 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.808630361580826: 37
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена (взвешенная, 4 параметра):
+=======================================================
+  PC1:  0.595  cumul= 0.595  ███████████████████████
+  PC2:  0.404  cumul= 0.999  ████████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-6.479, 3.780]
+  PC2: [-4.730, 4.099]
+  PC3: [-2.609, 2.592]
+
+Проверка обратного преобразования:
+  Q    : [0.2630, 0.2650]
+  gh   : [-0.0000, 0.0021]
+  rh   : [2.2410, 2.2988]
+  rho0 : [86.4768, 87.1801]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p2.pkl
+
+Исторических точек для GP: 37
+Y (target): min=-0.8082, max=-0.7815
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-6.48, 3.78] x ...
+============================================================
+ВОЗОБНОВЛЕНИЕ С CHECKPOINT на galaxyschwarzschildfornax_p2
+============================================================
+  Файл:            checkpoint_galaxyschwarzschildfornax_p2.pkl
+  Сохранён:        2026-06-11T19:39:06.171779
+  Итерация старта: 19/40
+  Точек в истории: 29
+  Лучший target:   -0.789862
+  TR length:       0.0375
+  Вычислений halo: 31
+============================================================
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.789862  (лучшее из истории)
+    Размер TR         = 0.0375
+
+--- Итерация 20/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.797630  (из предыдущей итерации)
+    Размер TR         = 0.0375
+#  [TuRBO] TR сужена → length = 0.0187
+--- Итерация 21/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.790062  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 22/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.825402  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 23/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.798922  (из предыдущей итерации)
+    Размер TR         = 0.0187
+#  [TuRBO] TR сужена → length = 0.0094
+--- Итерация 24/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.845651  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 25/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.840400  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 26/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.789862
+    Предыдущий target = -0.816582  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 27/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.778593  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 28/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.810203  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 29/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.782626  (из предыдущей итерации)
+    Размер TR         = 0.0094
+#  [TuRBO] TR сужена → length = 0.0047  [TuRBO-PCA] TR схлопнулась — перезапуск
+
+--- Итерация 30/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.810529  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+  [PCA] Обновление PCA на итерации 30...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 9
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt: 11 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt: 11 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt: 11 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 157
+    Из буфера своего процесса:    12
+    Итого точек для PCA:          169
+    После фильтра penalty≤2.0: 169 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.5873  cumul=0.5873
+    PC2: 0.3377  cumul=0.9250
+    PC3: 0.0723  cumul=0.9973
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-6.479, 3.780] → [-6.582, 4.721]
+    PC2: [-4.730, 4.099] → [-4.256, 5.500]
+    PC3: [-2.609, 2.592] → [-3.308, 3.689]
+  [PCA update] Готово. Вариант: А, точек: 169
+  [PCA] Обновление завершено. Точек в буфере: 12
+
+--- Итерация 31/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.819261  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 32/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.841889  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 33/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.809696  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 34/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.786230  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 35/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.799913  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 36/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.822108  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 37/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.799868  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 38/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.839365  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 39/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.815869  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 40/40 на galaxyschwarzschildfornax_p2 ---
+    Лучший target     = -0.778593
+    Предыдущий target = -0.799291  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+============================================================
+РЕЗУЛЬТАТ TuRBO-PCA:
+============================================================
+  PC-координаты: [-3.86911784  2.14433426  1.1296072 ]
+  incl    = 87.50
+  Q       = 0.266682
+  gh      = 0.000000
+  rh      = 2.330645
+  rho0    = 87.828719
+  Upsilon = 0.686321
+  penalty = 0.778593
+
+Всего вычислений целевой функции: 53
+Всего оптимизаций Upsilon: 568
+============================================================
+# End: 2026-06-13 06:36:00.658054
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt
+# Label:  RESULT-OK: incl=87.5, suffix=p3, host=galaxyschwarzschildfornax
+# Time:   2026-06-13 06:36:27
+# Lines:  180
+# HASH:a1a4139fbec99cba824d35ed653b73b5
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p3
+# Start: 2026-06-12 13:45:55.973111
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 6
+  4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+Загружено строк (incl=87.5): 124
+Диапазон penalty: [0.7815, 0.8671]
+Адаптивный penalty cutoff: 0.8086 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.808630361580826: 37
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена (взвешенная, 4 параметра):
+=======================================================
+  PC1:  0.595  cumul= 0.595  ███████████████████████
+  PC2:  0.404  cumul= 0.999  ████████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-6.479, 3.780]
+  PC2: [-4.730, 4.099]
+  PC3: [-2.609, 2.592]
+
+Проверка обратного преобразования:
+  Q    : [0.2630, 0.2650]
+  gh   : [-0.0000, 0.0021]
+  rh   : [2.2410, 2.2988]
+  rho0 : [86.4768, 87.1801]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p3.pkl
+
+Исторических точек для GP: 37
+Y (target): min=-0.8082, max=-0.7815
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-6.48, 3.78] x ...
+============================================================
+ВОЗОБНОВЛЕНИЕ С CHECKPOINT на galaxyschwarzschildfornax_p3
+============================================================
+  Файл:            checkpoint_galaxyschwarzschildfornax_p3.pkl
+  Сохранён:        2026-06-11T19:38:41.669272
+  Итерация старта: 19/40
+  Точек в истории: 29
+  Лучший target:   -0.787169
+  TR length:       0.0375
+  Вычислений halo: 31
+============================================================
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.787169  (лучшее из истории)
+    Размер TR         = 0.0375
+
+--- Итерация 20/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.820055  (из предыдущей итерации)
+    Размер TR         = 0.0375
+#  [TuRBO] TR сужена → length = 0.0187
+--- Итерация 21/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.813533  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 22/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.827433  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 23/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.798683  (из предыдущей итерации)
+    Размер TR         = 0.0187
+#  [TuRBO] TR сужена → length = 0.0094
+--- Итерация 24/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.834073  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 25/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.839674  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 26/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.833347  (из предыдущей итерации)
+    Размер TR         = 0.0094
+#  [TuRBO] TR сужена → length = 0.0047  [TuRBO-PCA] TR схлопнулась — перезапуск
+
+--- Итерация 27/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.802544  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 28/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.822023  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 29/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.805139  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 30/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.814325  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+  [PCA] Обновление PCA на итерации 30...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 9
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt: 12 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt: 12 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt: 11 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 159
+    Из буфера своего процесса:    12
+    Итого точек для PCA:          171
+    После фильтра penalty≤2.0: 171 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.5871  cumul=0.5871
+    PC2: 0.3363  cumul=0.9234
+    PC3: 0.0736  cumul=0.9970
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-6.479, 3.780] → [-6.573, 4.743]
+    PC2: [-4.730, 4.099] → [-4.256, 5.512]
+    PC3: [-2.609, 2.592] → [-3.317, 3.686]
+  [PCA update] Готово. Вариант: А, точек: 171
+  [PCA] Обновление завершено. Точек в буфере: 12
+
+--- Итерация 31/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.828369  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 32/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.845154  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 33/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.810124  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 34/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.794032  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 35/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.800551  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 36/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.818552  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 37/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.821346  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 38/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.837470  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 39/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.832368  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 40/40 на galaxyschwarzschildfornax_p3 ---
+    Лучший target     = -0.787169
+    Предыдущий target = -0.817304  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+============================================================
+РЕЗУЛЬТАТ TuRBO-PCA:
+============================================================
+  PC-координаты: [-0.58338511 -0.65438068 -0.23370184]
+  incl    = 87.50
+  Q       = 0.264501
+  gh      = 0.000257
+  rh      = 2.256959
+  rho0    = 87.176271
+  Upsilon = 0.707139
+  penalty = 0.787169
+
+Всего вычислений целевой функции: 53
+Всего оптимизаций Upsilon: 586
+============================================================
+# End: 2026-06-13 06:36:19.520409
+
+# ============================================================
+# Добавлено из: /home/gala/agama-work/4result_BoTorch_PCA_Sersic_galaxyschwarzschildfornax_p0.txt
+# Label:  RESULT-OK: incl=87.5, suffix=p0, host=galaxyschwarzschildfornax
+# Time:   2026-06-13 06:47:17
+# Lines:  180
+# HASH:a24573ebde9890f56c2f12d17e936a4d
+# ============================================================
+# TuRBO-PCA Optimization Log
+# Server: galaxyschwarzschildfornax_p0
+# Start: 2026-06-12 13:45:56.680301
+# storage_patterns: ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_*.txt']
+# host_patterns:    ['4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt', '4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p*.txt']
+# Iterations planned: 40
+# PCA components: 3
+# Target fraction: 0.3
+# Expand bounds by: 2.5
+
+
+============================================================
+ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF
+============================================================
+
+Прочитано файлов: 6
+  4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+  4UpsBoTorch_Sersic.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+  4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+Загружено строк (incl=87.5): 124
+Диапазон penalty: [0.7815, 0.8671]
+Адаптивный penalty cutoff: 0.8086 (оставляем 30% лучших точек)
+
+============================================================
+ПОСТРОЕНИЕ PCA-МОДЕЛИ
+============================================================
+Точек с penalty ≤ 0.808630361580826: 37
+Используется логарифмическое масштабирование для rh и rho0
+
+=======================================================
+PCA-модель построена (взвешенная, 4 параметра):
+=======================================================
+  PC1:  0.595  cumul= 0.595  ███████████████████████
+  PC2:  0.404  cumul= 0.999  ████████████████
+  PC3:  0.001  cumul= 1.000  
+  Итого объяснено: 1.0000
+
+Границы в PCA-пространстве:
+  PC1: [-6.479, 3.780]
+  PC2: [-4.730, 4.099]
+  PC3: [-2.609, 2.592]
+
+Проверка обратного преобразования:
+  Q    : [0.2630, 0.2650]
+  gh   : [-0.0000, 0.0021]
+  rh   : [2.2410, 2.2988]
+  rho0 : [86.4768, 87.1801]
+
+Модель сохранена в pca_model_weighted_galaxyschwarzschildfornax_p0.pkl
+
+Исторических точек для GP: 37
+Y (target): min=-0.8082, max=-0.7815
+# TuRBO инициализирован:#  n_components = 3#  length_init = 0.6#  PCA bounds: [-6.48, 3.78] x ...
+============================================================
+ВОЗОБНОВЛЕНИЕ С CHECKPOINT на galaxyschwarzschildfornax_p0
+============================================================
+  Файл:            checkpoint_galaxyschwarzschildfornax_p0.pkl
+  Сохранён:        2026-06-11T19:53:03.340079
+  Итерация старта: 19/40
+  Точек в истории: 29
+  Лучший target:   -0.781518
+  TR length:       0.0187
+  Вычислений halo: 31
+============================================================
+
+============================================================
+ЗАПУСК TuRBO-PCA: 40 итераций
+============================================================
+
+--- Итерация 19/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.781518  (лучшее из истории)
+    Размер TR         = 0.0187
+
+--- Итерация 20/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.819420  (из предыдущей итерации)
+    Размер TR         = 0.0187
+#  [TuRBO] TR сужена → length = 0.0094
+--- Итерация 21/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.800086  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 22/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.823527  (из предыдущей итерации)
+    Размер TR         = 0.0094
+
+--- Итерация 23/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.807946  (из предыдущей итерации)
+    Размер TR         = 0.0094
+#  [TuRBO] TR сужена → length = 0.0047  [TuRBO-PCA] TR схлопнулась — перезапуск
+
+--- Итерация 24/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.843568  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 25/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.837529  (из предыдущей итерации)
+    Размер TR         = 0.6000
+
+--- Итерация 26/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.835075  (из предыдущей итерации)
+    Размер TR         = 0.6000
+#  [TuRBO] TR сужена → length = 0.3000
+--- Итерация 27/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.800698  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 28/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.822458  (из предыдущей итерации)
+    Размер TR         = 0.3000
+
+--- Итерация 29/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.797212  (из предыдущей итерации)
+    Размер TR         = 0.3000
+#  [TuRBO] TR сужена → length = 0.1500
+--- Итерация 30/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.820339  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+  [PCA] Обновление PCA на итерации 30...
+
+  [PCA update] Источники данных:
+    Режим А: все файлы (кроме своего) + текущий буфер
+    Прочитано файлов: 9
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax.txt: 124 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p3.txt: 12 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p2.txt: 12 строк
+      4UpsBoTorch_PCA_Sersic_galaxyschwarzschildfornax_p1.txt: 12 строк
+      4UpsBoTorch_Sersic.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_tycho_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray_p0.txt: 0 строк
+      4UpsBoTorch_PCA_Sersic_gray.txt: 0 строк
+    Из файлов (все кроме своего): 160
+    Из буфера своего процесса:    12
+    Итого точек для PCA:          172
+    После фильтра penalty≤2.0: 172 точек
+
+  [PCA update] Обновлённая дисперсия:
+    PC1: 0.5870  cumul=0.5870
+    PC2: 0.3363  cumul=0.9233
+    PC3: 0.0737  cumul=0.9970
+
+  [PCA update] Изменение границ PCA:
+    PC1: [-6.479, 3.780] → [-6.581, 4.750]
+    PC2: [-4.730, 4.099] → [-4.259, 5.520]
+    PC3: [-2.609, 2.592] → [-3.317, 3.691]
+  [PCA update] Готово. Вариант: А, точек: 172
+  [PCA] Обновление завершено. Точек в буфере: 12
+
+--- Итерация 31/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.833092  (из предыдущей итерации)
+    Размер TR         = 0.1500
+
+--- Итерация 32/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.845116  (из предыдущей итерации)
+    Размер TR         = 0.1500
+#  [TuRBO] TR сужена → length = 0.0750
+--- Итерация 33/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.805414  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 34/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.788290  (из предыдущей итерации)
+    Размер TR         = 0.0750
+
+--- Итерация 35/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.801052  (из предыдущей итерации)
+    Размер TR         = 0.0750
+#  [TuRBO] TR сужена → length = 0.0375
+--- Итерация 36/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.821472  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 37/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.821583  (из предыдущей итерации)
+    Размер TR         = 0.0375
+
+--- Итерация 38/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.846844  (из предыдущей итерации)
+    Размер TR         = 0.0375
+#  [TuRBO] TR сужена → length = 0.0187
+--- Итерация 39/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.831551  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+--- Итерация 40/40 на galaxyschwarzschildfornax_p0 ---
+    Лучший target     = -0.781518
+    Предыдущий target = -0.822056  (из предыдущей итерации)
+    Размер TR         = 0.0187
+
+============================================================
+РЕЗУЛЬТАТ TuRBO-PCA:
+============================================================
+  PC-координаты: [-0.38925925 -0.52218623 -0.22290788]
+  incl    = 87.50
+  Q       = 0.264447
+  gh      = 0.000383
+  rh      = 2.258662
+  rho0    = 87.132270
+  Upsilon = 0.706325
+  penalty = 0.781518
+
+Всего вычислений целевой функции: 53
+Всего оптимизаций Upsilon: 590
+============================================================
+# End: 2026-06-13 06:47:09.060984
