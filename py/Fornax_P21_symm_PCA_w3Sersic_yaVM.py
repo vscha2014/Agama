@@ -215,7 +215,7 @@ sc=numpy.pi*D/180
 xy_a2vleP_P21  = numpy.zeros(2*len(P21), 
     dtype=[('x','float64'),('y_','float64'),('a2','float64'),('vl','float64'),('err_v','float64'),('prob','float64')])
 for i in range(len(P21)):
-    X = sc*(P21[i,1]-P21_ra)
+    X = sc*(P21[i,1]-P21_ra)*numpy.cos(P21_de*numpy.pi/180)
     Y = sc*(P21[i,2]-P21_de)
     xy_a2vleP_P21[2*i]['x'] = cosgamma*X - singamma*Y
     xy_a2vleP_P21[2*i]['y_'] = singamma*X + cosgamma*Y
