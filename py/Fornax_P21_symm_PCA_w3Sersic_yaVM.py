@@ -27,6 +27,7 @@ from sklearn.decomposition import PCA
 import pickle
 import socket
 import glob
+import time
 
 # BoTorch / GPyTorch
 from botorch.models import SingleTaskGP
@@ -407,6 +408,92 @@ def params_to_pca_fixed(params_dict, model_data):
     X_scaled = scaler.transform(X_transformed)
     pc_coords = pca.transform(X_scaled)
     return pc_coords[0, :pca.n_components_]
+
+# ==============================================================
+#  РЕЗЕРВИРОВАНИЕ РАСЧЁТНЫХ ТОЧЕК (превентивная защита от дублей)
+# ==============================================================
+# Параллельные процессы одной VM делят общий /workspace. Перед дорогой
+# оценкой penalty процесс «резервирует» точку в стабильном физическом
+# пространстве параметров (Q, gh, rh, rho0) — единственном, общем для всех
+# процессов (PCA у каждого своё и дрейфует). Резервация = маленький файл в
+# каталоге reservations_i<incl>/. Активность определяется по mtime + TTL:
+# если процесс умер во время расчёта, его резервация протухает и точку снова
+# можно занять. Дедупликации РЕЗУЛЬТАТОВ не происходит — это только защита
+# от одновременного пересчёта одной точки (AGENTS §10: превентивно).
+_RESV_PARAM_NAMES = ['Q', 'gh', 'rh', 'rho0']
+
+def reservation_dir(incl):
+    d = f"reservations_i{incl}"
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def reservation_dist_norm(p1, p2, bounds_original):
+    """Евклидово расстояние между точками в нормированном по bounds
+    пространстве параметров (каждая ось масштабируется своим диапазоном)."""
+    s = 0.0
+    for name in _RESV_PARAM_NAMES:
+        lo, hi = bounds_original[name]
+        rng = (hi - lo) or 1.0
+        s += ((p1[name] - p2[name]) / rng) ** 2
+    return s ** 0.5
+
+def read_active_reservations(resv_dir, ttl_sec, exclude_suffix=None):
+    """Возвращает список активных (не протухших) резерваций других процессов:
+    [{'params': {...}, 'suffix': str, 'mtime': float, 'path': str}, ...]."""
+    now = time.time()
+    out = []
+    for fp in glob.glob(os.path.join(resv_dir, '*.resv')):
+        try:
+            mt = os.path.getmtime(fp)
+        except OSError:
+            continue
+        if now - mt > ttl_sec:
+            continue
+        try:
+            with open(fp) as f:
+                parts = f.read().split()
+        except OSError:
+            continue
+        if len(parts) < 5:
+            continue
+        sfx = parts[4]
+        if exclude_suffix is not None and sfx == exclude_suffix:
+            continue
+        try:
+            params = {
+                'Q':    float(parts[0]),
+                'gh':   float(parts[1]),
+                'rh':   float(parts[2]),
+                'rho0': float(parts[3]),
+            }
+        except ValueError:
+            continue
+        out.append({'params': params, 'suffix': sfx,
+                    'mtime': mt, 'path': fp})
+    return out
+
+def reserve_point(resv_dir, suffix, params):
+    """Атомарно создаёт файл-резервацию. Имя уникально (suffix+pid+время),
+    поэтому коллизий имён нет. Возвращает путь к файлу резервации."""
+    fname = f"{suffix}_{os.getpid()}_{int(time.time() * 1e6)}.resv"
+    fp = os.path.join(resv_dir, fname)
+    fd = os.open(fp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, (
+            f"{params['Q']:.15g} {params['gh']:.15g} "
+            f"{params['rh']:.15g} {params['rho0']:.15g} {suffix}\n"
+        ).encode())
+    finally:
+        os.close(fd)
+    return fp
+
+def release_reservation(fp):
+    if not fp:
+        return
+    try:
+        os.remove(fp)
+    except OSError:
+        pass
 
 massSt    = 14.0
 scaleRst  =  sc*16.4/60
@@ -1616,7 +1703,7 @@ class TuRBO_PCA_Fixed:
             with open(self.output_file, 'a') as f:
                 f.write(f"#  [TuRBO] TR сужена → length = {self.length:.4f}")
     
-    def suggest(self, X_obs, Y_obs):
+    def suggest(self, X_obs, Y_obs, X_pending=None):
         best_idx = Y_obs.argmax()
         x_center = X_obs[best_idx]
         tr_bounds = self._tr_bounds(x_center)
@@ -1624,10 +1711,13 @@ class TuRBO_PCA_Fixed:
         model = self._fit_gp(X_obs, Y_obs)
         model.eval()
         
+        # X_pending — точки, которые другие процессы уже считают (резервации).
+        # q-acquisition штатно уводит предложение в сторону от них.
         acqf = qLogNoisyExpectedImprovement(
             model=model,
             X_baseline=X_obs,
             prune_baseline=True,
+            X_pending=X_pending,
         )
         
         X_next, _ = optimize_acqf(
@@ -2112,7 +2202,11 @@ def run_pca_optimization(
     resume=True,
     pca_update_interval=15,
     seed_patterns=None,      # архивные паттерны (PA46.8) для начальных точек
-    seed_from_pa468=False    # включить seed из архива (penalty пересчитывается)
+    seed_from_pa468=False,   # включить seed из архива (penalty пересчитывается)
+    reserve_points=True,     # резервировать точки (защита от дублей внутри VM)
+    reserve_eps=0.02,        # порог «одинаковости» в нормированном простр-ве
+    reserve_ttl_sec=7200,    # TTL резервации (протухание после смерти процесса)
+    reserve_max_retries=8    # сколько раз возмущать кандидат при коллизии
 ):
     global best_overall_Upsilon, best_overall_target, number_of_find_w_U
     global number_of_h_IC_lw, hostname_proc
@@ -2158,6 +2252,12 @@ def run_pca_optimization(
         'rh':  (0.5,  3.5),
         'rho0':(34.0, 120.0),
     }
+
+    # --- Каталог резерваций (общий для процессов одной VM) ---
+    resv_dir = reservation_dir(incl) if reserve_points else None
+    if reserve_points:
+        _write(f"\nРезервирование точек включено: dir={resv_dir}, "
+               f"eps={reserve_eps}, ttl={reserve_ttl_sec}s")
 
     # ==============================================================
     # ШАГ 1: ЗАГРУЗКА ДАННЫХ через load_fresh_data_from_files
@@ -2607,17 +2707,67 @@ def run_pca_optimization(
         _write(f"    Размер TR         = {turbo.length:.4f}")
 
         # --- Предложение новой точки ---
-        X_next    = turbo.suggest(X_obs, Y_obs)
+        # --- Резервации других процессов (точки «под оценкой») ---
+        active_resv = (read_active_reservations(
+                           resv_dir, reserve_ttl_sec,
+                           exclude_suffix=hostname_proc)
+                       if reserve_points else [])
+
+        # Переводим чужие резервации в текущее PCA-пространство → X_pending,
+        # чтобы acquisition штатно уводил предложение в сторону от них.
+        X_pending = None
+        if active_resv:
+            pend = []
+            for r in active_resv:
+                try:
+                    pend.append(params_to_pca_fixed(r['params'], model_data))
+                except Exception:
+                    pass
+            if pend:
+                X_pending = torch.tensor(numpy.array(pend),
+                                         dtype=dtype, device=device)
+
+        # --- Предложение новой точки ---
+        X_next    = turbo.suggest(X_obs, Y_obs, X_pending=X_pending)
         pc_coords = X_next[0].cpu().numpy()
+        new_params_i = pca_to_params_fixed(pc_coords, model_data, bounds_original)
+
+        # --- Жёсткая страховка: если предложение всё же слишком близко к
+        #     чужой резервации, возмущаем кандидат в пределах TR ---
+        if reserve_points and active_resv:
+            attempt = 0
+            while (attempt < reserve_max_retries
+                   and any(reservation_dist_norm(new_params_i, r['params'],
+                                                  bounds_original) < reserve_eps
+                           for r in active_resv)):
+                attempt += 1
+                jitter    = proc_rng.normal(scale=0.1 * turbo.length,
+                                            size=pc_coords.shape)
+                pc_coords = pc_coords + jitter
+                new_params_i = pca_to_params_fixed(pc_coords, model_data,
+                                                   bounds_original)
+            if attempt > 0:
+                _write(f"    [reserve] кандидат сдвинут за {attempt} попыток "
+                       f"(избегаем дублей с {len(active_resv)} активными "
+                       f"резервациями)")
+            # Синхронизируем тензор X_next с возможным возмущением
+            X_next = torch.tensor([pc_coords], dtype=dtype, device=device)
+
+        # --- Резервируем выбранную точку до дорогого расчёта ---
+        resv_fp = (reserve_point(resv_dir, hostname_proc, new_params_i)
+                   if reserve_points else None)
 
         # --- Вычисление целевой функции ---
-        y_next = halo_IC_lib_weights_pca_fixed(
-            pc_coords, model_data, bounds_original,
-            densityStars, datasets, alphah, betah
-        )
+        try:
+            y_next = halo_IC_lib_weights_pca_fixed(
+                pc_coords, model_data, bounds_original,
+                densityStars, datasets, alphah, betah
+            )
+        finally:
+            # Результат уже записан в UpsFile — резервацию можно снять
+            release_reservation(resv_fp)
 
         # --- Сохраняем в буфер ---
-        new_params_i = pca_to_params_fixed(pc_coords, model_data, bounds_original)
         new_points_params.append(new_params_i)
         new_points_penalty.append(-y_next)   # penalty = -y_next
 

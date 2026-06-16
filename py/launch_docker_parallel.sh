@@ -330,6 +330,9 @@ log "ШАГ 1: Подготовка файлов"
 
 rm -f "${WORK_DIR}"/.done_*
 rm -f "${WORK_DIR}"/.upload_lock
+# Резервации точек прошлого запуска (от мёртвых процессов) — чистим,
+# чтобы они не блокировали точки в новом запуске.
+rm -rf "${WORK_DIR}"/reservations_i*
 
 declare -A PROC_FLAGS
 

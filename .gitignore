@@ -18,3 +18,4 @@ xcode/*
 Makefile.local
 .venv-ai/
 doc/ai/_tmp/
+py/reservations_i*/
