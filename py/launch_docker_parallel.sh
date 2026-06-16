@@ -5,8 +5,12 @@ set -euo pipefail
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="agama:latest"
 N_VCPU=$(nproc)
-N_PROC=4
-THREADS_PER_PROC=$((N_VCPU / N_PROC))
+# Число параллельных процессов на VM.
+# По умолчанию авто-выбор: ~1 процесс на 4 vCPU (на 32 vCPU → 8 процессов),
+# но не меньше 1. Переопределяется через --nproc=N или переменную N_PROC.
+_NPROC_AUTO=$(( N_VCPU / 4 ))
+[ "$_NPROC_AUTO" -lt 1 ] && _NPROC_AUTO=1
+N_PROC="${N_PROC:-$_NPROC_AUTO}"
 
 # --- Разбор аргументов ---
 INCL="90.0"
@@ -18,6 +22,7 @@ CALC_SCRIPT="${CALC_SCRIPT:-Fornax_P21_symm_PCA_w3Sersic_yaVM.py}"
 for arg in "$@"; do
     case $arg in
         --incl=*)      INCL="${arg#*=}"        ;;
+        --nproc=*)     N_PROC="${arg#*=}"      ;;
         --resume)      RESUME=1                ;;
         --no-shutdown) DO_SHUTDOWN=0           ;;
         --script=*)    CALC_SCRIPT="${arg#*=}" ;;
@@ -33,8 +38,33 @@ HOSTNAME_ENV="$(hostname)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 REMOTE_DIR="galAgama"
 
-SUFFIXES=("p0" "p1" "p2" "p3")
-CPU_RANGES=("0-7" "8-15" "16-23" "24-31")
+# --- Валидация и авто-раскладка процессов по ядрам ---
+if ! [[ "$N_PROC" =~ ^[0-9]+$ ]] || [ "$N_PROC" -lt 1 ]; then
+    echo "ОШИБКА: N_PROC должно быть целым >= 1 (получено: '$N_PROC')" >&2
+    exit 1
+fi
+if [ "$N_PROC" -gt "$N_VCPU" ]; then
+    echo "ОШИБКА: N_PROC=$N_PROC превышает число vCPU=$N_VCPU" >&2
+    exit 1
+fi
+
+# Делим N_VCPU ядер между N_PROC процессами непрерывными диапазонами.
+# Остаток (N_VCPU % N_PROC) раздаётся первым процессам по +1 ядру,
+# чтобы лишние ядра не простаивали. THREADS_ARR[i] = размер диапазона
+# процесса i (число OMP-потоков для него).
+declare -a SUFFIXES CPU_RANGES THREADS_ARR
+_base=$((N_VCPU / N_PROC))
+_rem=$((N_VCPU % N_PROC))
+_start=0
+for ((i = 0; i < N_PROC; i++)); do
+    _size=$_base
+    [ "$i" -lt "$_rem" ] && _size=$((_base + 1))
+    _end=$((_start + _size - 1))
+    SUFFIXES[i]="p${i}"
+    CPU_RANGES[i]="${_start}-${_end}"
+    THREADS_ARR[i]=$_size
+    _start=$((_end + 1))
+done
 
 LOGFILE="${WORK_DIR}/launch_i${INCL}_${TIMESTAMP}.log"
 
@@ -218,6 +248,7 @@ run_container() {
     local sfx="$1"
     local cpu_start="$2"
     local cpu_end="$3"
+    local threads="$4"
     local flags="${PROC_FLAGS[$sfx]}"
     local proc_log="${WORK_DIR}/log_${sfx}_i${INCL}_${TIMESTAMP}.log"
     local exit_code=0
@@ -241,12 +272,12 @@ run_container() {
         -e NTFY_TOPIC="${NTFY_TOPIC}" \
         -e NTFY_SERVER="${NTFY_SERVER}" \
         \
-        -e OMP_NUM_THREADS="${THREADS_PER_PROC}" \
+        -e OMP_NUM_THREADS="${threads}" \
         -e OMP_PROC_BIND="close" \
         -e OMP_PLACES="cores" \
-        -e MKL_NUM_THREADS="${THREADS_PER_PROC}" \
-        -e OPENBLAS_NUM_THREADS="${THREADS_PER_PROC}" \
-        -e NUMEXPR_NUM_THREADS="${THREADS_PER_PROC}" \
+        -e MKL_NUM_THREADS="${threads}" \
+        -e OPENBLAS_NUM_THREADS="${threads}" \
+        -e NUMEXPR_NUM_THREADS="${threads}" \
         \
         -w /workspace \
         "${IMAGE}" \
@@ -307,7 +338,8 @@ log "  resume           = $RESUME"
 log "  shutdown         = $DO_SHUTDOWN"
 log "  vCPU всего       = $N_VCPU"
 log "  Процессов        = $N_PROC"
-log "  Потоков/процесс  = $THREADS_PER_PROC"
+log "  Раскладка ядер   = ${CPU_RANGES[*]}"
+log "  Потоков/процесс  = ${THREADS_ARR[*]}"
 log "======================================================"
 
 [ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
@@ -406,7 +438,7 @@ for i in $(seq 0 $((N_PROC - 1))); do
     cpu_s="${CPU_RANGES[$i]%%-*}"
     cpu_e="${CPU_RANGES[$i]##*-}"
     # run_container запускается в фоне
-    run_container "$sfx" "$cpu_s" "$cpu_e" &
+    run_container "$sfx" "$cpu_s" "$cpu_e" "${THREADS_ARR[$i]}" &
     PIDS[$i]=$!
     log "  PID ${PIDS[$i]} → процесс $sfx"
 done
