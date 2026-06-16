@@ -2382,8 +2382,12 @@ def run_pca_optimization(
 
     _write("\n" + "=" * 55)
     if bootstrap_results:
-        _write(f"PCA-модель построена на основе bootstrap "
-               f"(incl={nearest_incl_used:.2f}° → {incl:.2f}°):")
+        if nearest_incl_used is not None:
+            _write(f"PCA-модель построена на основе bootstrap "
+                   f"(incl={nearest_incl_used:.2f}° → {incl:.2f}°):")
+        else:
+            _write(f"PCA-модель построена на основе bootstrap "
+                   f"(incl={incl:.2f}°):")
     else:
         _write("PCA-модель построена (взвешенная, 4 параметра):")
     _write("=" * 55)
@@ -2438,10 +2442,14 @@ def run_pca_optimization(
 
     # --- Уведомление о bootstrap ---
     if bootstrap_results:
+        if nearest_incl_used is not None:
+            _src_txt = (f"incl={incl:.2f}° (из {nearest_incl_used:.2f}°, "
+                        f"dist={dist_used:.1f}°)\n")
+        else:
+            _src_txt = f"incl={incl:.2f}°\n"
         send_notification(
             f"PCA-модель построена на bootstrap\n"
-            f"incl={incl:.2f}° (из {nearest_incl_used:.2f}°, "
-            f"dist={dist_used:.1f}°)\n"
+            f"{_src_txt}"
             f"Точек: {len(data_good)}, "
             f"n_components={n_comp_actual}",
             title=f"Galaxy {hostname_proc}: PCA готова",

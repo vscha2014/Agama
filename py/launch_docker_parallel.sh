@@ -38,18 +38,17 @@ CPU_RANGES=("0-7" "8-15" "16-23" "24-31")
 
 LOGFILE="${WORK_DIR}/launch_i${INCL}_${TIMESTAMP}.log"
 
+# PID главной оболочки и флаг уже запланированного выключения.
+# MAIN_PID нужен, чтобы EXIT-trap НЕ срабатывал в фоновых подоболочках
+# (run_container, flock-подоболочки), а только в главном процессе.
+MAIN_PID=$$
+SHUTDOWN_DONE=0
+
 # ==============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================================================
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"
-}
-
-die() {
-    log "ОШИБКА: $*"
-    notify "ОШИБКА на ${HOSTNAME_ENV}: $*" "urgent"
-    [ $DO_SHUTDOWN -eq 1 ] && sudo shutdown -h +2 &
-    exit 1
 }
 
 notify() {
@@ -60,6 +59,50 @@ notify() {
         -H "Priority: ${priority}" \
         -d "$msg" \
         "${NTFY_SERVER}/${NTFY_TOPIC}" || true
+}
+
+# --------------------------------------------------------------
+# schedule_shutdown: единственная точка выключения VM.
+# Идемпотентна (SHUTDOWN_DONE) — повторные вызовы игнорируются.
+# --------------------------------------------------------------
+schedule_shutdown() {
+    local delay="$1"
+    local reason="$2"
+    if [ "$DO_SHUTDOWN" -ne 1 ]; then
+        log "Выключение пропущено (--no-shutdown): ${reason}"
+        return 0
+    fi
+    if [ "$SHUTDOWN_DONE" -eq 1 ]; then
+        return 0
+    fi
+    SHUTDOWN_DONE=1
+    log "Выключение VM через ${delay} мин (${reason})..."
+    upload_to_yadisk "$LOGFILE" || true
+    sudo shutdown -h +"$delay" "AGAMA: ${reason}" || true
+}
+
+# --------------------------------------------------------------
+# on_exit: EXIT-trap. Гарантирует выключение VM, даже если скрипт
+# аварийно прервался (set -euo pipefail) до штатного ШАГа 6.
+# Работает только в главной оболочке — фоновые подоболочки
+# (контейнеры, flock) пропускаются по сравнению BASHPID с MAIN_PID.
+# --------------------------------------------------------------
+on_exit() {
+    local code=$?
+    [ "${BASHPID:-$$}" = "$MAIN_PID" ] || return 0
+    if [ "$SHUTDOWN_DONE" -eq 0 ]; then
+        log "Аварийное завершение скрипта (код ${code}) — принудительное выключение VM"
+        notify "Аварийное завершение скрипта на ${HOSTNAME_ENV} (код ${code})" "urgent"
+        schedule_shutdown 5 "аварийное завершение скрипта (код ${code})"
+    fi
+}
+trap on_exit EXIT
+
+die() {
+    log "ОШИБКА: $*"
+    notify "ОШИБКА на ${HOSTNAME_ENV}: $*" "urgent"
+    schedule_shutdown 2 "критическая ошибка: $*"
+    exit 1
 }
 
 # --------------------------------------------------------------
@@ -462,13 +505,10 @@ notify \
 # ==============================================================
 # ШАГ 6: ВЫКЛЮЧЕНИЕ VM
 # ==============================================================
-if [ $DO_SHUTDOWN -eq 1 ]; then
-    delay=$([ $FAILED -eq 0 ] && echo 1 || echo 5)
-    log "Выключение VM через ${delay} мин..."
-    upload_to_yadisk "$LOGFILE"
-    sudo shutdown -h +"$delay" "AGAMA расчёт завершён"
+if [ $FAILED -eq 0 ]; then
+    schedule_shutdown 1 "расчёт завершён успешно (incl=${INCL})"
 else
-    log "Выключение пропущено (--no-shutdown)"
+    schedule_shutdown 5 "расчёт завершён с ошибками: ${FAILED}/${N_PROC} (incl=${INCL})"
 fi
 
 [ $FAILED -eq 0 ] && exit 0 || exit 1
