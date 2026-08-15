@@ -28,7 +28,7 @@ doc/*.odp
 py/4Ups*txt
 py/*log
 py/mass_histogram*pdf
-analise/*
+py/analise/
 
 # Артефакты эксперимента orblib_exp (Fornax_P21_PCA_w3Sersic_orblib_exp.py).
 # Новые имена НЕ совпадают с закоммиченными примерами 4Ups*/4result*.
