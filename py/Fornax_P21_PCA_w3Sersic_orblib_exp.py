@@ -15,6 +15,7 @@ import datetime
 import requests
 import subprocess
 import os
+import hashlib
 import argparse
 import numpy
 import torch
@@ -63,6 +64,23 @@ parser.add_argument('--init-from-pa468', dest='seed_from_pa468',
                          'как источник НАЧАЛЬНЫХ точек (penalty пересчитывается '
                          'с корректной геометрией). Penalty из этих файлов НЕ '
                          'попадают в PCA-модель напрямую.')
+# --- Параметры эксперимента (новый скрипт) ---
+parser.add_argument('--no-double', action='store_true',
+                    help='ОТКЛЮЧИТЬ удвоение данных (X,Y,vl)->(-X,-Y,-vl). '
+                         'По умолчанию удвоение включено (как в проде).')
+parser.add_argument('--n-bin', dest='n_bin', type=int, default=250,
+                    help='Число звёзд на апертуру (разбиение). По умолчанию 250.')
+parser.add_argument('--gh-id', dest='gh_id', type=int, default=0,
+                    help='Реализация возмущения GH-коэффициентов в пределах ошибок. '
+                         '0 = номинал (пока реализован только 0).')
+parser.add_argument('--ser-id', dest='ser_id', type=int, default=0,
+                    help='Реализация возмущения параметров Серсика в пределах ошибок. '
+                         '0 = номинал (пока реализован только 0).')
+parser.add_argument('--save-orblib', action='store_true',
+                    help='Сохранять библиотеку орбит (matrices+ic) для каждой модели '
+                         '(savez_compressed, локально в --orblib-dir).')
+parser.add_argument('--orblib-dir', dest='orblib_dir', type=str, default='orblib',
+                    help='Каталог для файлов библиотек орбит. По умолчанию ./orblib.')
 args = parser.parse_args()
 
 if args.n_threads is not None:
@@ -71,28 +89,57 @@ if args.n_threads is not None:
     os.environ['MKL_NUM_THREADS']      = str(args.n_threads)
     os.environ['OPENBLAS_NUM_THREADS'] = str(args.n_threads)
 
-# Формируем идентификатор процесса:
+# Формируем идентификатор процесса и эксперимента:
 # hostname_proc берётся из переменной окружения (передаётся из контейнера)
-# suffix переопределяет hostname_proc для параллельных процессов
+# suffix переопределяет процесс для параллельных запусков
 _hostname_env = os.environ.get('HOSTNAME_SUFFIX', socket.gethostname())
-if args.suffix is not None:
-    hostname_proc = f"{_hostname_env}_{args.suffix}"
-else:
-    hostname_proc = f"{_hostname_env}_p0"
+_proc = args.suffix if args.suffix is not None else 'p0'
+
+# --- Параметры эксперимента (отличают НЕсравнимые между собой прогоны) ---
+DOUBLE      = not args.no_double     # True = удвоение (X,Y,vl)->(-X,-Y,-vl), как в проде
+N_BIN       = args.n_bin             # звёзд на апертуру (разбиение)
+GH_ID       = args.gh_id             # 0 = номинальные GH; >0 = реализация возмущения (future)
+SER_ID      = args.ser_id            # 0 = номинальный Серсик; >0 = реализация возмущения (future)
+SAVE_ORBLIB = args.save_orblib       # сохранять библиотеку орбит для каждой модели
+ORBLIB_DIR  = args.orblib_dir
+orblib_counter = 0                   # сквозной счётчик сохранённых библиотек орбит
+
+# Пункты 3-4 (возмущение GH / Серсика) — задел для дальнейшей доработки.
+# Пока реализован только номинал (id=0); запуск с id>0 дал бы результат,
+# ИДЕНТИЧНЫЙ номиналу, но под другим тегом — это ввело бы в заблуждение.
+if GH_ID != 0 or SER_ID != 0:
+    raise NotImplementedError(
+        "Возмущение GH (gh_id>0) и Серсика (ser_id>0) ещё не реализовано. "
+        "Идентификатор их резервирует для дальнейшей доработки. "
+        "Сейчас запускайте только с gh_id=0 и ser_id=0.")
+
+if SAVE_ORBLIB:
+    os.makedirs(ORBLIB_DIR, exist_ok=True)
+
+# Идентификатор эксперимента: кодирует (1) удвоение, (2) число звёзд/апертуру,
+# (3) реализацию GH, (4) реализацию Серсика. incl остаётся столбцом данных и
+# фильтруется в коде (как в проде), в имя файла не входит.
+EXP_ID = f"d{int(DOUBLE)}_nb{N_BIN}_gh{GH_ID}_ser{SER_ID}"
+
+# hostname_proc несёт идентичность эксперимента → ВСЕ производные файлы
+# (out/log/checkpoint/diagnose) автоматически изолированы по эксперименту,
+# а пулинг PCA объединяет только сравнимые прогоны.
+hostname_proc = f"{_hostname_env}_{EXP_ID}_{_proc}"
 
 print(f"Идентификатор процесса: {hostname_proc}")
+print(f"Эксперимент: double={DOUBLE}, n_bin={N_BIN}, gh_id={GH_ID}, "
+      f"ser_id={SER_ID}, save_orblib={SAVE_ORBLIB}")
 
-#files = ['4UpsBoTorch_Sersic.txt', '4UpsBoTorch_PCA_Sersic_gray.txt','4UpsBoTorch_PCA_Sersic_tycho.txt',
-#         '4UpsBoTorch_Sersic_iota.txt']
-# ###
+# Файлы своего сервера (не перезаписываются при синке) — того же эксперимента
 host_patterns = [
-    f"4UpsBoTorch_PCA_Sersic_{_hostname_env}.txt",
-    f"4UpsBoTorch_PCA_Sersic_{_hostname_env}_p*.txt",
+    f"out_{_hostname_env}_{EXP_ID}.txt",
+    f"out_{_hostname_env}_{EXP_ID}_p*.txt",
 ]
 
-storage_patterns= [
-    "4UpsBoTorch_Sersic.txt",
-    "4UpsBoTorch_PCA_Sersic_*.txt"
+# Пул для PCA/синка: все процессы (любой хост) ТОГО ЖЕ эксперимента.
+# Разделители '_' в EXP_ID защищают от ложных совпадений (nb250 != nb2500).
+storage_patterns = [
+    f"out_*_{EXP_ID}_*.txt",
 ]
 
 # Архивные файлы со СТАРОЙ (неверной) геометрией posang=46.8, q_ap=0.7.
@@ -105,9 +152,13 @@ seed_patterns = [
 ]
 
 
-# Добавлен суффикс hostname_proc к файлам
-UpsFile = f"4UpsBoTorch_PCA_Sersic_{hostname_proc}.txt"
-torchFile_result = f"4result_BoTorch_PCA_Sersic_{hostname_proc}.txt"
+# Имена файлов несут тег эксперимента.
+# out_  — ОСНОВНОЙ файл истории (по строке на модель), его читают параллельные
+#         процессы для пулинга PCA.
+# log_  — человекочитаемый диагностический лог (_write). Не читается никем
+#         для вычислений; полезен для отладки.
+UpsFile = f"out_{hostname_proc}.txt"
+torchFile_result = f"log_{hostname_proc}.txt"
 
 cutoff_start=2.0
 
@@ -213,24 +264,29 @@ P21[:,6] = P21[:,6]/vscale
 P21=P21[numpy.where(P21[:,9]>0)[0],:]
 
 sc=numpy.pi*D/180
-xy_a2vleP_P21  = numpy.zeros(2*len(P21), 
+xy_a2vleP_P21  = numpy.zeros((2 if DOUBLE else 1)*len(P21), 
     dtype=[('x','float64'),('y_','float64'),('a2','float64'),('vl','float64'),('err_v','float64'),('prob','float64')])
 for i in range(len(P21)):
     X = sc*(P21[i,1]-P21_ra)*numpy.cos(P21_de*numpy.pi/180)
     Y = sc*(P21[i,2]-P21_de)
-    xy_a2vleP_P21[2*i]['x'] = cosgamma*X - singamma*Y
-    xy_a2vleP_P21[2*i]['y_'] = singamma*X + cosgamma*Y
-    xy_a2vleP_P21[2*i]['a2'] = xy_a2vleP_P21[2*i]['x']**2 + xy_a2vleP_P21[2*i]['y_']**2/q_ap2
-    xy_a2vleP_P21[2*i]['vl'] = P21[i,5]-P21_vl
-    xy_a2vleP_P21[2*i]['err_v'] = P21[i,6] 
-    xy_a2vleP_P21[2*i]['prob'] = P21[i,9]
+    k0 = 2*i if DOUBLE else i
+    xy_a2vleP_P21[k0]['x'] = cosgamma*X - singamma*Y
+    xy_a2vleP_P21[k0]['y_'] = singamma*X + cosgamma*Y
+    xy_a2vleP_P21[k0]['a2'] = xy_a2vleP_P21[k0]['x']**2 + xy_a2vleP_P21[k0]['y_']**2/q_ap2
+    xy_a2vleP_P21[k0]['vl'] = P21[i,5]-P21_vl
+    xy_a2vleP_P21[k0]['err_v'] = P21[i,6] 
+    xy_a2vleP_P21[k0]['prob'] = P21[i,9]
     
-    xy_a2vleP_P21[2*i+1]['x']  = - xy_a2vleP_P21[2*i]['x']
-    xy_a2vleP_P21[2*i+1]['y_'] = - xy_a2vleP_P21[2*i]['y_'] 
-    xy_a2vleP_P21[2*i+1]['a2'] = xy_a2vleP_P21[2*i]['a2'] 
-    xy_a2vleP_P21[2*i+1]['vl'] = - xy_a2vleP_P21[2*i]['vl']
-    xy_a2vleP_P21[2*i+1]['err_v'] = xy_a2vleP_P21[2*i]['err_v'] 
-    xy_a2vleP_P21[2*i+1]['prob']  = xy_a2vleP_P21[2*i]['prob']
+    # Удвоение данных (симметризация): зеркальная точка (-X,-Y,-vl).
+    # Отключается флагом --no-double для оценки смещения результата.
+    if DOUBLE:
+        k1 = 2*i+1
+        xy_a2vleP_P21[k1]['x']  = - xy_a2vleP_P21[k0]['x']
+        xy_a2vleP_P21[k1]['y_'] = - xy_a2vleP_P21[k0]['y_'] 
+        xy_a2vleP_P21[k1]['a2'] = xy_a2vleP_P21[k0]['a2'] 
+        xy_a2vleP_P21[k1]['vl'] = - xy_a2vleP_P21[k0]['vl']
+        xy_a2vleP_P21[k1]['err_v'] = xy_a2vleP_P21[k0]['err_v'] 
+        xy_a2vleP_P21[k1]['prob']  = xy_a2vleP_P21[k0]['prob']
 
 xy_a2vleP_P21.sort(order='a2')
 
@@ -251,7 +307,7 @@ for i in range(len(xy_a2vleP_P21)):
     err_P21[i]  = xy_a2vleP_P21[i]['err_v']
     prob_P21[i] = xy_a2vleP_P21[i]['prob']
 
-n_bin = 250
+n_bin = N_BIN
 tg1 = q_ap*numpy.tan(numpy.pi/8)
 ct2 = q_ap/numpy.tan(numpy.pi/8)
 bound_circR      = [[],[],[],[],[],[],[],[],[]]
@@ -711,7 +767,6 @@ def sync_to_yadisk(local_dir='.', remote_dir='galAgama',
     files_to_sync = [
         UpsFile,
         torchFile_result,
-        f"pca_model_weighted_{hostname_proc}.pkl",
         f"checkpoint_{hostname_proc}.pkl",
         f"diagnose_pca_space_{hostname_proc}.txt"
     ]
@@ -949,7 +1004,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     regul=1.,
                                     # НОВЫЙ параметр: прямые параметры без PCA
                                     direct_params=None):
-    global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent
+    global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent, orblib_counter
     
    # --- РЕЖИМ БЕЗ PCA: direct_params передан напрямую ---
     if direct_params is not None:
@@ -1014,10 +1069,11 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         sample_time_s = time.perf_counter() - _t_sample
         
         _t_orbit = time.perf_counter()
+        inttime = pot_gal.Tcirc(ic) * intTime
         matrices = agama.orbit(
             potential=pot_gal, 
             ic=ic, 
-            time=pot_gal.Tcirc(ic) * intTime, 
+            time=inttime, 
             Omega=0.0,
             targets=[d.target for d in datasets], 
             trajsize=trajsize
@@ -1026,7 +1082,61 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         matrices = matrices[:-1]
         print(f"  [orbitlib] sample={sample_time_s:.1f}s orbit={orbit_time_s:.1f}s "
               f"(numOrbits={numOrbits}, trajsize={trajsize}, intTime={intTime})")
-        
+
+        # --- Сохранение библиотеки орбит (matrices + ic) ---
+        # Имя КОНТЕНТ-АДРЕСНОЕ по физике модели: (incl, удвоение, n_bin,
+        # ser_id) + хэш параметров ГАЛО (Q, gh, rh, rho0). НЕ включает:
+        #   * gh_id  — проекционные матрицы не зависят от GH-коэффициентов
+        #              наблюдений (те меняют лишь cons_val/cons_err датасета) →
+        #              библиотека переиспользуема для любых gh_id;
+        #   * hostname — чтобы библиотеки разных процессов объединялись (union),
+        #              а точки-дубликаты дедуплицировались.
+        # Орбитные IC стохастичны (RNG AGAMA) → для одних параметров содержимое
+        # у разных процессов различается; берём первую готовую (skip-if-exists),
+        # одной реализации достаточно. Запись атомарная (tmp + os.replace).
+        orblib_save_info = None
+        if SAVE_ORBLIB:
+            orblib_counter += 1
+            _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
+            _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
+            _ol_name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
+                        f"_ser{SER_ID}_{_phash}.npz")
+            _ol_path = os.path.join(ORBLIB_DIR, _ol_name)
+            if os.path.exists(_ol_path):
+                _ol_mb = os.path.getsize(_ol_path) / 1e6
+                orblib_save_info = (_ol_name, _ol_mb, 0.0)
+                print(f"  [orblib] уже есть {_ol_name} ({_ol_mb:.1f} MB) — сохранение пропущено")
+            else:
+                _t_ol  = time.perf_counter()
+                _ol_tmp = f"{_ol_path}.{os.getpid()}.tmp"
+                try:
+                    # Файл-объект → numpy НЕ добавляет .npz к имени (детерминировано)
+                    with open(_ol_tmp, 'wb') as _fh:
+                        numpy.savez_compressed(
+                            _fh,
+                            ic           = ic.astype(numpy.float32),
+                            inttime      = numpy.asarray(inttime, dtype=numpy.float32),
+                            matrix_dens  = numpy.asarray(matrices[0], dtype=numpy.float32),
+                            matrix_kinem = numpy.asarray(matrices[1], dtype=numpy.float32),
+                            Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
+                            numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
+                            gridv=gridv, degree=degree, ghorder=ghorder,
+                            n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID,
+                        )
+                    os.replace(_ol_tmp, _ol_path)   # атомарная публикация
+                    _ol_dt = time.perf_counter() - _t_ol
+                    _ol_mb = os.path.getsize(_ol_path) / 1e6
+                    orblib_save_info = (_ol_name, _ol_mb, _ol_dt)
+                    print(f"  [orblib] saved {_ol_name} ({_ol_mb:.1f} MB, {_ol_dt:.1f}s, "
+                          f"dens={numpy.shape(matrices[0])} kinem={numpy.shape(matrices[1])})")
+                except Exception as _e:
+                    print(f"  [orblib] ОШИБКА сохранения {_ol_name}: {_e}")
+                    if os.path.exists(_ol_tmp):
+                        try:
+                            os.remove(_ol_tmp)
+                        except OSError:
+                            pass
+
     except Exception as e:
         print(f"  Ошибка при создании модели: {e}")
         return -1e6
@@ -1160,6 +1270,10 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                 f"orbit_s={orbit_time_s:.6f} "
                 f"total_s={sample_time_s + orbit_time_s:.6f} "
                 f"(numOrbits={numOrbits} trajsize={trajsize} intTime={intTime})\n")
+        if orblib_save_info is not None:
+            f.write(f"# orblib saved: {orblib_save_info[0]} "
+                    f"size_MB={orblib_save_info[1]:.3f} "
+                    f"save_s={orblib_save_info[2]:.3f}\n")
         f.write("# End of history\n\n")
     
     print("4UpsBoTorch writed")
@@ -2851,10 +2965,10 @@ def run_pca_optimization(
         'data_good':        data_good,
         'weights':          weights,
     }
-    pkl_file = f"pca_model_weighted_{hostname_proc}.pkl"
-    with open(pkl_file, 'wb') as f:
-        pickle.dump(model_data, f)
-    _write(f"\nМодель сохранена в {pkl_file}")
+    # PCA-модель НЕ сохраняется на диск: она не читается ни при восстановлении
+    # из checkpoint (там X_obs/Y_obs/turbo), ни параллельными процессами (те
+    # читают историю out_*.txt). model_data используется только в памяти.
+    _write("\nPCA-модель построена (в памяти, без сохранения на диск)")
 
 
     # --- Уведомление о bootstrap ---

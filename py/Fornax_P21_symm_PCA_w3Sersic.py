@@ -27,7 +27,6 @@ from sklearn.decomposition import PCA
 import pickle
 import socket
 import glob
-import time
 
 # BoTorch / GPyTorch
 from botorch.models import SingleTaskGP
@@ -55,22 +54,7 @@ parser.add_argument('--suffix', type=str, default=None,
                     help='Суффикс для файлов результатов '
                          '(например: p0, p1). '
                          'По умолчанию используется hostname_p0.')
-parser.add_argument('--n_threads', type=int, default=None,
-                    help='Число потоков OpenMP для AGAMA')
-parser.add_argument('--init-from-pa468', dest='seed_from_pa468',
-                    action='store_true',
-                    help='Использовать архивные файлы 4UpsBoTorch_PCA_PA46.8_Sersic_* '
-                         'как источник НАЧАЛЬНЫХ точек (penalty пересчитывается '
-                         'с корректной геометрией). Penalty из этих файлов НЕ '
-                         'попадают в PCA-модель напрямую.')
 args = parser.parse_args()
-
-if args.n_threads is not None:
-    # Ограничиваем OpenMP ДО импорта agama
-    os.environ['OMP_NUM_THREADS']      = str(args.n_threads)
-    os.environ['MKL_NUM_THREADS']      = str(args.n_threads)
-    os.environ['OPENBLAS_NUM_THREADS'] = str(args.n_threads)
-
 # Формируем идентификатор процесса:
 # hostname_proc берётся из переменной окружения (передаётся из контейнера)
 # suffix переопределяет hostname_proc для параллельных процессов
@@ -95,15 +79,9 @@ storage_patterns= [
     "4UpsBoTorch_PCA_Sersic_*.txt"
 ]
 
-# Архивные файлы со СТАРОЙ (неверной) геометрией posang=46.8, q_ap=0.7.
-# Используются ТОЛЬКО как источник кандидатов-параметров для начальных точек
-# (penalty пересчитывается с корректной геометрией). Эти паттерны намеренно
-# отделены от storage_patterns/host_patterns, чтобы устаревшие penalty никогда
-# не попадали в PCA-модель напрямую. Активируется флагом --init-from-pa468.
-seed_patterns = [
-    "4UpsBoTorch_PCA_PA46.8_Sersic_*.txt",
+fallback_patterns = [
+    "4UpsBoTorch_PCA_PA46.8_Sersic*.txt",
 ]
-
 
 # Добавлен суффикс hostname_proc к файлам
 UpsFile = f"4UpsBoTorch_PCA_Sersic_{hostname_proc}.txt"
@@ -184,9 +162,9 @@ D = D_O22
 #incl      = 90.0
 beta      = incl * numpy.pi/180
 alpha     = 0.0 
-posang    = 42.3   # Sersic, Wang et al. 2019 (https://doi.org/10.3847/1538-4357/ab31a9), 42.3 +/- 0.2 deg; old 46.8 = Battaglia et al. 2006
+posang    = 42.3 # 4Sersic, Wang et al 2019  https://doi.org/10.3847/1538-4357/ab31a9 # 46.8 old Battaglia, G., Tolstoy, E., Helmi, A., et al. 2006, A&A, 459, 423
 gamma2 =  (posang - 90.0) * numpy.pi/180
-q_ap      = 1 - 0.31   # 1 - Ellipticity, Wang et al. 2019 (Ellipticity = 0.31 +/- 0.002); old 0.7
+q_ap      = 1 - 0.31  #  0.7 old !!!
 
 sinbeta = numpy.sin(beta)
 cosbeta = numpy.cos(beta)
@@ -337,6 +315,340 @@ for i in range(1,len(bound_circR)) :
                                 )) )
         sectAPP.extend(addAPP)
 
+
+def find_nearest_incl_data_fallback(fallback_patterns,
+                                     target_incl,
+                                     min_points=5,
+                                     timeout=300):
+    """
+    Fallback-поиск начальных точек в файлах другого posang
+    (например 4UpsBoTorch_PCA_PA46.8_Sersic*).
+    
+    Penalty из этих файлов НЕ используется для PCA —
+    только для выбора кандидатов на пересчёт.
+    
+    Возвращает:
+        candidates : list of dict {'Q','gh','rh','rho0'}
+                     отсортированных по penalty (для приоритизации)
+        source_info: str — описание источника
+    """
+    print("\n  [fallback] Поиск в fallback-файлах:")
+    for p in fallback_patterns:
+        print(f"    {p}")
+
+    # --- Скачиваем fallback-файлы с Яндекс.Диска ---
+    try:
+        result = subprocess.run(
+            ['rclone', 'lsf', f"{RCLONE_REMOTE}:galAgama/"],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if result.returncode == 0:
+            remote_files = [f.strip() for f in result.stdout.splitlines()]
+            for remote_fname in remote_files:
+                matches = any(
+                    glob.fnmatch.fnmatch(remote_fname, os.path.basename(p))
+                    for p in fallback_patterns
+                )
+                if not matches:
+                    continue
+                local_path = remote_fname
+                remote_path = f"{RCLONE_REMOTE}:galAgama/{remote_fname}"
+                cmd = ['rclone', 'copyto', remote_path, local_path,
+                       '--stats-one-line', '--ignore-times']
+                try:
+                    subprocess.run(cmd, capture_output=True,
+                                   text=True, timeout=timeout)
+                    if os.path.exists(local_path):
+                        size = os.path.getsize(local_path)
+                        print(f"  [fallback] ↓ {remote_fname} "
+                              f"({size/1024:.1f} KB)")
+                except Exception as e:
+                    print(f"  [fallback] ✗ {remote_fname}: {e}")
+    except Exception as e:
+        print(f"  [fallback] Ошибка доступа к яндексу: {e}")
+
+    # --- Читаем все fallback-файлы ---
+    all_files = []
+    for pattern in fallback_patterns:
+        for f in glob.glob(pattern):
+            if f not in all_files:
+                all_files.append(f)
+
+    if not all_files:
+        print("  [fallback] Файлы не найдены")
+        return [], "нет fallback-файлов"
+
+    print(f"  [fallback] Найдено файлов: {len(all_files)}")
+    for f in all_files:
+        print(f"    {f}")
+
+    # --- Читаем строки ---
+    all_rows = []
+    file_counts = {}
+    for filepath in all_files:
+        count = 0
+        try:
+            with open(filepath, 'r') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 7:
+                        continue
+                    try:
+                        row = [float(p) for p in parts[:7]]
+                        # incl, Q, gh, rh, rho0, Upsilon, penalty
+                        if row[3] <= 0 or row[4] <= 0:
+                            continue
+                        if row[6] >= 1e5:
+                            continue
+                        all_rows.append(row)
+                        count += 1
+                    except ValueError:
+                        continue
+        except FileNotFoundError:
+            pass
+        file_counts[filepath] = count
+        print(f"    {filepath}: {count} строк")
+
+    if not all_rows:
+        print("  [fallback] Файлы пусты")
+        return [], "fallback-файлы пусты"
+
+    data_all = numpy.array(all_rows)
+    print(f"  [fallback] Итого строк: {len(data_all)}")
+
+    # --- Ищем ближайшее наклонение ---
+    unique_incls = numpy.unique(numpy.round(data_all[:, 0], 2))
+    print(f"  [fallback] Наклонения в файлах: {unique_incls}")
+
+    dists = numpy.abs(unique_incls - target_incl)
+    order = numpy.argsort(dists)
+
+    selected_data = None
+    nearest_incl  = None
+    dist_val      = float('inf')
+
+    for idx in order:
+        candidate_incl = unique_incls[idx]
+        mask           = numpy.abs(data_all[:, 0] - candidate_incl) < 0.01
+        candidate_data = data_all[mask]
+        if len(candidate_data) >= min_points:
+            selected_data = candidate_data
+            nearest_incl  = float(candidate_incl)
+            dist_val      = float(dists[idx])
+            break
+
+    if selected_data is None and len(unique_incls) > 0:
+        # Берём ближайшее даже если мало точек
+        best_idx      = order[0]
+        nearest_incl  = float(unique_incls[best_idx])
+        dist_val      = float(dists[best_idx])
+        mask          = numpy.abs(data_all[:, 0] - nearest_incl) < 0.01
+        selected_data = data_all[mask]
+
+    if selected_data is None or len(selected_data) == 0:
+        print("  [fallback] Нет подходящих данных")
+        return [], "нет данных в fallback-файлах"
+
+    print(f"  [fallback] Выбрано incl={nearest_incl:.2f}° "
+          f"(dist={dist_val:.2f}°, {len(selected_data)} точек)")
+
+    # --- Сортируем по penalty и формируем кандидатов ---
+    # ВАЖНО: penalty из fallback-файлов используется ТОЛЬКО
+    # для сортировки/приоритизации, не для PCA!
+    sorted_data = selected_data[numpy.argsort(selected_data[:, 6])]
+
+    candidates = []
+    for row in sorted_data:
+        candidates.append({
+            'Q':    float(row[1]),
+            'gh':   float(row[2]),
+            'rh':   float(row[3]),
+            'rho0': float(row[4]),
+            # penalty сохраняем только для информации
+            '_penalty_ref': float(row[6]),
+            '_incl_ref':    float(row[0]),
+        })
+
+    source_info = (f"fallback: {[os.path.basename(f) for f in all_files]}, "
+                   f"incl={nearest_incl:.2f}° (dist={dist_val:.1f}°)")
+
+    print(f"  [fallback] Кандидатов: {len(candidates)}")
+    print(f"  [fallback] Источник: {source_info}")
+
+    return candidates, source_info
+
+def bootstrap_from_fallback(fallback_patterns,
+                             target_incl,
+                             bounds_original,
+                             n_bootstrap=10,
+                             penalty_cutoff_frac=0.5,
+                             strategy='best_diverse',
+                             output_file=None):
+    """
+    Bootstrap начальных точек из fallback-файлов (другой posang).
+    
+    Penalty из fallback-файлов используется ТОЛЬКО для выбора кандидатов.
+    Для каждого кандидата penalty ПЕРЕСЧИТЫВАЕТСЯ для текущего incl/posang.
+    
+    Возвращает:
+        bootstrap_results : list of dict
+            [{'params': {...}, 'penalty': float}, ...]
+    """
+    if output_file is None:
+        output_file = torchFile_result
+
+    def _write(text):
+        print(text)
+        with open(output_file, 'a') as f:
+            f.write(text + '\n')
+
+    _write("\n" + "=" * 60)
+    _write("FALLBACK BOOTSTRAP из файлов другого posang")
+    _write(f"target incl={target_incl:.2f}°")
+    _write("=" * 60)
+    _write("ВНИМАНИЕ: penalty из fallback-файлов используется")
+    _write("          ТОЛЬКО для выбора кандидатов!")
+    _write("          Для PCA penalty будет ПЕРЕСЧИТАН.")
+    _write("=" * 60)
+
+    # --- Получаем кандидатов ---
+    candidates_all, source_info = find_nearest_incl_data_fallback(
+        fallback_patterns = fallback_patterns,
+        target_incl       = target_incl,
+    )
+
+    if not candidates_all:
+        _write("  [fallback bootstrap] Нет кандидатов")
+        return []
+
+    _write(f"\n  Источник: {source_info}")
+    _write(f"  Всего кандидатов: {len(candidates_all)}")
+
+    # --- Выбираем n_bootstrap кандидатов ---
+    # Стратегия: половина лучших по ref-penalty + половина равномерных
+    n_pool = max(n_bootstrap,
+                 int(len(candidates_all) * penalty_cutoff_frac))
+    n_pool = min(n_pool, len(candidates_all))
+    pool   = candidates_all[:n_pool]   # уже отсортированы по penalty
+
+    if strategy == 'best_diverse':
+        n_best = max(1, n_bootstrap // 2)
+        n_div  = n_bootstrap - n_best
+        best_part = pool[:n_best]
+        if n_div > 0 and len(pool) > n_best:
+            rest    = pool[n_best:]
+            indices = numpy.linspace(0, len(rest) - 1,
+                                     n_div, dtype=int)
+            div_part = [rest[i] for i in indices]
+            selected = best_part + div_part
+        else:
+            selected = best_part
+    elif strategy == 'best':
+        selected = pool[:n_bootstrap]
+    else:
+        indices  = numpy.linspace(0, len(pool) - 1,
+                                  n_bootstrap, dtype=int)
+        selected = [pool[i] for i in indices]
+
+    _write(f"\n  Выбрано кандидатов: {len(selected)}")
+    _write(f"  {'#':>3s}  {'Q':>8s}  {'gh':>8s}  "
+           f"{'rh':>8s}  {'rho0':>8s}  {'ref_pen':>10s}  {'ref_incl':>8s}")
+    _write(f"  {'-'*65}")
+    for i, c in enumerate(selected):
+        _write(f"  {i+1:3d}  {c['Q']:8.4f}  {c['gh']:8.4f}  "
+               f"{c['rh']:8.4f}  {c['rho0']:8.4f}  "
+               f"{c.get('_penalty_ref', 0):10.4f}  "
+               f"{c.get('_incl_ref', 0):8.2f}")
+
+    # --- Пересчёт penalty для текущего incl/posang ---
+    _write(f"\n  Пересчёт penalty для incl={target_incl:.2f}°...")
+    _write("  (используются текущие datasets и densityStars)")
+
+    bootstrap_results = []
+    n_success = 0
+    n_failed  = 0
+
+    for i, cand in enumerate(selected):
+        params = {
+            'Q':    cand['Q'],
+            'gh':   cand['gh'],
+            'rh':   cand['rh'],
+            'rho0': cand['rho0'],
+        }
+        _write(f"\n  [{i+1}/{len(selected)}] "
+               f"Q={params['Q']:.4f}, gh={params['gh']:.4f}, "
+               f"rh={params['rh']:.4f}, rho0={params['rho0']:.4f} "
+               f"(ref_pen={cand.get('_penalty_ref',0):.4f}, "
+               f"ref_incl={cand.get('_incl_ref',0):.2f}°)")
+
+        # Проверка границ
+        in_bounds = all(
+            bounds_original[name][0] <= params[name] <= bounds_original[name][1]
+            for name in ['Q', 'gh', 'rh', 'rho0']
+        )
+        if not in_bounds:
+            _write("    ✗ Параметры вне границ, пропускаем")
+            n_failed += 1
+            continue
+
+        # Пересчёт penalty (direct_params — без PCA)
+        try:
+            y_val = halo_IC_lib_weights_pca_fixed(
+                pc_coords     = numpy.array([params['Q'], params['gh'],
+                                             params['rh'], params['rho0']]),
+                model_data    = None,
+                bounds_original = bounds_original,
+                densityStars  = densityStars,
+                datasets      = datasets,
+                alphah        = alphah,
+                betah         = betah,
+                direct_params = params,   # ← прямая передача без PCA
+            )
+            penalty = -y_val
+
+            if numpy.isfinite(penalty) and penalty < 1e5:
+                bootstrap_results.append({
+                    'params':       params,
+                    'penalty':      penalty,
+                    'penalty_ref':  cand.get('_penalty_ref', None),
+                    'incl_ref':     cand.get('_incl_ref',    None),
+                })
+                n_success += 1
+                ref_pen = cand.get('_penalty_ref', float('nan'))
+                _write(f"    ✓ penalty={penalty:.6f} "
+                       f"(ref={ref_pen:.4f}, "
+                       f"delta={penalty-ref_pen:+.4f})")
+            else:
+                _write(f"    ✗ penalty={penalty:.6f} (невалидное)")
+                n_failed += 1
+
+        except Exception as e:
+            _write(f"    ✗ Ошибка: {e}")
+            n_failed += 1
+
+    _write(f"\n  Fallback bootstrap завершён: "
+           f"успешно={n_success}, ошибок={n_failed}")
+
+    if bootstrap_results:
+        best_pen = min(r['penalty'] for r in bootstrap_results)
+        _write(f"  Лучший penalty: {best_pen:.6f}")
+
+        send_notification(
+            f"Fallback bootstrap завершён\n"
+            f"incl={target_incl:.2f}°\n"
+            f"Источник: {source_info}\n"
+            f"Успешно: {n_success}/{len(selected)}\n"
+            f"Лучший penalty: {best_pen:.6f}",
+            title=f"Galaxy {hostname_proc}: Fallback Bootstrap",
+            priority='default',
+            tags=['white_check_mark']
+        )
+
+    return bootstrap_results
+
 # ==============================================================
 #  КЛАСС WeightedScaler
 # ==============================================================
@@ -409,119 +721,6 @@ def params_to_pca_fixed(params_dict, model_data):
     pc_coords = pca.transform(X_scaled)
     return pc_coords[0, :pca.n_components_]
 
-# ==============================================================
-#  РЕЗЕРВИРОВАНИЕ РАСЧЁТНЫХ ТОЧЕК (превентивная защита от дублей)
-# ==============================================================
-# Параллельные процессы одной VM делят общий /workspace. Перед дорогой
-# оценкой penalty процесс «резервирует» точку в стабильном физическом
-# пространстве параметров (Q, gh, rh, rho0) — единственном, общем для всех
-# процессов (PCA у каждого своё и дрейфует). Резервация = маленький файл в
-# каталоге reservations_i<incl>/. Активность определяется по mtime + TTL:
-# если процесс умер во время расчёта, его резервация протухает и точку снова
-# можно занять. Дедупликации РЕЗУЛЬТАТОВ не происходит — это только защита
-# от одновременного пересчёта одной точки (AGENTS §10: превентивно).
-_RESV_PARAM_NAMES = ['Q', 'gh', 'rh', 'rho0']
-
-def reservation_dir(incl):
-    d = f"reservations_i{incl}"
-    os.makedirs(d, exist_ok=True)
-    return d
-
-def reservation_dist_norm(p1, p2, bounds_original):
-    """Евклидово расстояние между точками в нормированном по bounds
-    пространстве параметров (каждая ось масштабируется своим диапазоном)."""
-    s = 0.0
-    for name in _RESV_PARAM_NAMES:
-        lo, hi = bounds_original[name]
-        rng = (hi - lo) or 1.0
-        s += ((p1[name] - p2[name]) / rng) ** 2
-    return s ** 0.5
-
-def read_active_reservations(resv_dir, ttl_sec, exclude_suffix=None):
-    """Возвращает список активных (не протухших) резерваций других процессов:
-    [{'params': {...}, 'suffix': str, 'mtime': float, 'path': str}, ...]."""
-    now = time.time()
-    out = []
-    for fp in glob.glob(os.path.join(resv_dir, '*.resv')):
-        try:
-            mt = os.path.getmtime(fp)
-        except OSError:
-            continue
-        if now - mt > ttl_sec:
-            continue
-        try:
-            with open(fp) as f:
-                parts = f.read().split()
-        except OSError:
-            continue
-        if len(parts) < 5:
-            continue
-        sfx = parts[4]
-        if exclude_suffix is not None and sfx == exclude_suffix:
-            continue
-        try:
-            params = {
-                'Q':    float(parts[0]),
-                'gh':   float(parts[1]),
-                'rh':   float(parts[2]),
-                'rho0': float(parts[3]),
-            }
-        except ValueError:
-            continue
-        out.append({'params': params, 'suffix': sfx,
-                    'mtime': mt, 'path': fp})
-    return out
-
-def reserve_point(resv_dir, suffix, params):
-    """Атомарно создаёт файл-резервацию. Имя уникально (suffix+pid+время),
-    поэтому коллизий имён нет. Возвращает путь к файлу резервации."""
-    fname = f"{suffix}_{os.getpid()}_{int(time.time() * 1e6)}.resv"
-    fp = os.path.join(resv_dir, fname)
-    fd = os.open(fp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    try:
-        os.write(fd, (
-            f"{params['Q']:.15g} {params['gh']:.15g} "
-            f"{params['rh']:.15g} {params['rho0']:.15g} {suffix}\n"
-        ).encode())
-    finally:
-        os.close(fd)
-    return fp
-
-def release_reservation(fp):
-    if not fp:
-        return
-    try:
-        os.remove(fp)
-    except OSError:
-        pass
-
-def _try_reserve_candidate(params, resv_dir, reserve_eps,
-                           reserve_ttl_sec, bounds_original):
-    """Превентивное резервирование кандидата в фазе начальных точек.
-
-    Возвращает (resv_fp, skip):
-      - skip=True  — точку уже считает другой процесс, кандидат пропускаем;
-      - resv_fp    — путь к файлу-резервации (снять через release_reservation)
-                     или None, если резервирование выключено (resv_dir is None).
-
-    Резервирует в физическом пространстве (Q, gh, rh, rho0) — том же, что
-    использует основной цикл TuRBO (AGENTS §10: превентивно, без дедупа
-    результатов).
-    """
-    if resv_dir is None:
-        return None, False
-    active = read_active_reservations(resv_dir, reserve_ttl_sec,
-                                      exclude_suffix=hostname_proc)
-    for r in active:
-        if reservation_dist_norm(params, r['params'],
-                                 bounds_original) < reserve_eps:
-            return None, True
-    try:
-        fp = reserve_point(resv_dir, hostname_proc, params)
-    except Exception:
-        fp = None
-    return fp, False
-
 massSt    = 14.0
 scaleRst  =  sc*16.4/60
 
@@ -534,12 +733,13 @@ Upsilon_upper = 1.6
 #  ОПТИМИЗАЦИЯ Brent-поиска по Upsilon (включена постоянно).
 #  п.1 — адаптивная узкая скобка вокруг предсказанного Upsilon* (медиана недавних
 #        найденных значений) + откат к полному диапазону, если минимум на краю.
+#  п.2 — толеранс Brent UPS_XATOL=5e-3 (был 1e-3; penalty у минимума плоский,
+#        ошибка записываемого penalty ~0.015 < 2% pen_sigma KDE).
 #  п.3 — субдискретизация орбит во ВНУТРЕННЕМ поиске + один продуктивный full-solve
 #        на полной библиотеке в найденной точке: он даёт контрактно-точный penalty
 #        и НЕ попадает в историю оптимизации Upsilon (вызывается в обход logger).
-#  п.2 — толеранс Brent по Upsilon. Был 1e-3 (избыточно: penalty у минимума плоский,
-#        Δpenalty < 1e-3 на последних пробах). 5e-3 даёт ошибку penalty ~0.015
-#        (<2% pen_sigma KDE) и срезает 2-3 хвостовые пробы.
+#        RNG подвыборки локальный: не трогает ни глобальный numpy seed, ни AGAMA
+#        orbit RNG (контракт §7).
 #  Обоснование на данных: doc/ai/questions_for_pi.md (Q15).
 # ----------------------------------------------------------------------------
 UPS_XATOL          = 5e-3   # толеранс Brent по Upsilon (M/L)
@@ -547,7 +747,7 @@ UPS_BRACKET_DELTA  = 0.1    # полуширина адаптивной скоб
 UPS_BRACKET_NMED   = 8      # сколько последних Upsilon* усреднять (медиана)
 UPS_SUBSAMPLE_FRAC = 0.25   # доля орбит для внутреннего поиска (0 < frac < 1)
 
-#  Скользящая история найденных Upsilon* (используется для предсказания скобки, п.1).
+#  Скользящая история найденных Upsilon* (для предсказания скобки, п.1).
 _ups_recent = []
 
 Sersic_m  = 0.80
@@ -560,29 +760,7 @@ degree    = 2
 symmetry  = 't'
 usehist   = 0
 variant   = 'Hist' if usehist else 'GH'
-# RNG policy:
-#  - torch (BoTorch acquisition) gets an INDEPENDENT per-process seed, drawn from
-#    OS entropy mixed with the process id (hostname_proc) and logged below. This
-#    decorrelates the candidate proposals of parallel workers (helps avoid
-#    duplicate evaluations — see Goal 0).
-#  - the numpy generator is NOT seeded per-process here; the only numpy-random
-#    consumer that must be reproducible (the GH-moment error bootstrap below) is
-#    explicitly seeded with seed=42 right before it, so the observation-error
-#    realization is IDENTICAL in every process (comparable penalties).
-#  - NB: neither seed affects AGAMA orbit-IC sampling: densityStars.sample() uses
-#    AGAMA's own internal RNG (agama.setRandomSeed, not called) → orbit libraries
-#    are identical across processes regardless of these seeds.
-_seed_seq    = numpy.random.SeedSequence(entropy=None,
-                                         spawn_key=(abs(hash(hostname_proc)) % (2**32),))
-process_seed = int(_seed_seq.generate_state(1)[0])
-torch.manual_seed(process_seed)
-# Per-process RNG for OPTIMIZER SEEDING (initial points only, not physics):
-# distinct per process AND per host (process_seed mixes in hostname_proc), so
-# parallel workers pick DIFFERENT initial points for a not-yet-explored incl
-# instead of recomputing identical ones (Goal 0: avoid duplicate calculations).
-proc_rng = numpy.random.default_rng(process_seed)
-print(f"[seed] process={hostname_proc} torch seed={process_seed} "
-      f"(numpy GH-bootstrap fixed at 42; AGAMA orbit RNG не затронут)")
+numpy.random.seed(42)
 numpy.set_printoptions(precision=8, linewidth=200, suppress=True)
 
 densityParams = dict(
@@ -630,12 +808,6 @@ ghm_moments_P21 = agama.ghMoments(degree=degree, gridv=gridv, matrix=datacube_P2
 
 n_boot = 100
 bootxv_P21  = numpy.vstack([xv_P21] * n_boot)
-# Fixed seed=42: the observation-error realization (Monte-Carlo resampling of the
-# measured velocities) must be IDENTICAL in every parallel process, so that the
-# resulting GH-moment errors — and hence penalties — are comparable between
-# workers. (This is the only numpy-random consumer here; LHS uses its own RNG,
-# torch/BoTorch is decorrelated per-process — see RNG policy comment above.)
-numpy.random.seed(42)
 diffbootVZ  = numpy.hstack([err_P21] * n_boot) * numpy.random.normal(size=len(bootxv_P21))
 bootxv_P21[:,4] += -diffbootVZ*sinbeta
 bootxv_P21[:,5] += diffbootVZ*cosbeta
@@ -750,8 +922,7 @@ def sync_to_yadisk(local_dir='.', remote_dir='galAgama',
 def load_from_yadisk(storage_patterns, host_patterns,
                      local_dir='.', remote_dir='galAgama',
                      timeout=300, 
-                     force_update=False,
-                     notify=True):
+                     force_update=False):
     """
     Скачивает файлы с Яндекс.Диска по паттернам.
     storage_patterns: паттерны для поиска в хранилище
@@ -759,8 +930,6 @@ def load_from_yadisk(storage_patterns, host_patterns,
     force_update:     True — принудительно перезаписывать локальные файлы
                       (используется при старте скрипта для получения свежих данных)
     """
-    
-    
     # Получаем список файлов в удалённой папке
     try:
         result = subprocess.run(
@@ -770,23 +939,21 @@ def load_from_yadisk(storage_patterns, host_patterns,
         if result.returncode != 0:
             msg = f"  [yadisk] Ошибка получения списка: {result.stderr[:100]}"
             print(msg)
-            if notify:
-                send_notification(msg,
+            send_notification(msg,
                 title=f"Galaxy {hostname_proc}: Файлы не прочитаны с яндекса",
                 priority='urgent',
-                tags=['warning', 'rotating_light'] )
+                tags=['warning', 'rotating_light'])
             return
         remote_files = [f.strip() for f in result.stdout.splitlines()]
     except Exception as e:
         msg = f"  [yadisk] Недоступен: {e}"
-        if notify:
-            send_notification(msg,
+        send_notification(msg,
             title=f"Galaxy {hostname_proc}: Файлы не прочитаны с яндекса",
             priority='urgent',
-            tags=['warning', 'rotating_light'] )
+            tags=['warning', 'rotating_light'])
         print(msg)
         return
-    
+
     # Файлы своего сервера — не перезаписываем НИКОГДА
     own_files = set()
     for pattern in host_patterns:
@@ -798,11 +965,11 @@ def load_from_yadisk(storage_patterns, host_patterns,
     if force_update:
         print(f"  [yadisk] force_update=True: "
               f"перезаписываем устаревшие файлы "
-           f"(защищены свои: {own_files})")
-    
-    # Скачиваем файлы по паттернам storage_patterns
+              f"(защищены свои: {own_files})")
+
     downloaded = 0
     skipped    = 0
+
     for remote_fname in remote_files:
         # Проверяем совпадение с паттернами хранилища
         matches_storage = any(
@@ -811,7 +978,7 @@ def load_from_yadisk(storage_patterns, host_patterns,
         )
         if not matches_storage:
             continue
-        
+
         # Свои файлы не перезаписываем никогда
         if remote_fname in own_files:
             skipped += 1
@@ -823,7 +990,7 @@ def load_from_yadisk(storage_patterns, host_patterns,
         if os.path.exists(local_path) and not force_update:
             skipped += 1
             continue
-        
+
         # Скачиваем
         remote_path = f"{RCLONE_REMOTE}:{remote_dir}/{remote_fname}"
         cmd = ['rclone', 'copyto', remote_path, remote_fname,
@@ -831,6 +998,7 @@ def load_from_yadisk(storage_patterns, host_patterns,
         if force_update:
             # Перезаписать даже если время совпадает
             cmd.append('--ignore-times')
+
         try:
             result = subprocess.run(
                 cmd,
@@ -852,11 +1020,10 @@ def load_from_yadisk(storage_patterns, host_patterns,
     msg = (f"  [yadisk] Скачано/обновлено: {downloaded}, "
            f"пропущено: {skipped}")
     print(msg)
-    if notify:
-        send_notification(msg,
-            title=f"Galaxy {hostname_proc}: Файлы прочитаны с яндекса",
-            priority='high',
-            tags=['white_check_mark'])
+    send_notification(msg,
+        title=f"Galaxy {hostname_proc}: Файлы прочитаны с яндекса",
+        priority='high',
+        tags=['white_check_mark'])
 
 def save_checkpoint(X_obs, Y_obs, turbo, iteration,
                                 sync=True):
@@ -946,7 +1113,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     densityStars, datasets, alphah, betah,
                                     Upsilon_lower=0.1, Upsilon_upper=1.6,
                                     numOrbits=100000, trajsize=1000, intTime=100.,
-                                    regul=1.,
+                                    regul=1.0,
                                     # НОВЫЙ параметр: прямые параметры без PCA
                                     direct_params=None):
     global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent
@@ -962,8 +1129,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         print(f"  [direct] Q={params['Q']:.4f}, gh={params['gh']:.4f}, "
               f"rh={params['rh']:.4f}, rho0={params['rho0']:.4f}")
         # pc_coords используется только для логирования
-#        pc_coords_log = numpy.array([params['Q'], params['gh'],
-#                                      params['rh'], params['rho0']])
+        pc_coords_log = numpy.array([params['Q'], params['gh'],
+                                      params['rh'], params['rho0']])
     else:
         # --- ОБЫЧНЫЙ РЕЖИМ: через PCA ---
         if model_data is None:
@@ -979,13 +1146,14 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         except Exception as e:
             print(f"  Ошибка при переводе в PCA-координаты: {e}. Пропускаем точку.")
             return -1e6
- 
-    Q = params['Q']
-    gh = params['gh']
-    rh = params['rh']
+        
+#        pc_coords_log = pc_coords
+    
+    Q    = params['Q']
+    gh   = params['gh']
+    rh   = params['rh']
     rho0 = params['rho0']
     
-#    print(f"PCA coords: {pc_coords}")
     print(f"  → Q={Q:.4f}, gh={gh:.4f}, rh={rh:.4f}, rho0={rho0:.4f}")
     
     try:
@@ -1007,13 +1175,10 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             lmax=4, mmax=0, gridSizeR=23
         )
         
-        _t_sample = time.perf_counter()
         ic = numpy.vstack((
             densityStars.sample(int(numOrbits), potential=pot_gal)[0]
         ))
-        sample_time_s = time.perf_counter() - _t_sample
         
-        _t_orbit = time.perf_counter()
         matrices = agama.orbit(
             potential=pot_gal, 
             ic=ic, 
@@ -1022,10 +1187,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             targets=[d.target for d in datasets], 
             trajsize=trajsize
         )
-        orbit_time_s = time.perf_counter() - _t_orbit
         matrices = matrices[:-1]
-        print(f"  [orbitlib] sample={sample_time_s:.1f}s orbit={orbit_time_s:.1f}s "
-              f"(numOrbits={numOrbits}, trajsize={trajsize}, intTime={intTime})")
         
     except Exception as e:
         print(f"  Ошибка при создании модели: {e}")
@@ -1038,38 +1200,27 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
     totalMass = 1.0
     pen_reg = 2. * regul * numpy.ones(numOrbits) * numOrbits / totalMass**2
     
-    # Времена solveOpt по каждой пробе Upsilon. Копятся в памяти и пишутся
-    # на диск ОДИН раз после минимизации (как и история Upsilon), чтобы не
-    # дёргать диск на каждой итерации solveOpt.
-    solveopt_times = []
-    
-    def _eval_penalty(Upsilon, mats, pen_reg_loc, record=True):
+    def _eval_penalty(Upsilon, mats, pen_reg_loc):
         global number_of_find_w_U
-        _ups_val = float(numpy.ravel(numpy.asarray(Upsilon))[0])
         try:
             matrix = [d.getOrbitMatrix(m, Upsilon).T for d, m in zip(datasets, mats)]
-            _t_solve = time.perf_counter()
             weights = agama.solveOpt(matrix=matrix, rhs=rhs, rpenq=pen_cons, xpenq=pen_reg_loc) * mult
-            if record:
-                solveopt_times.append((_ups_val, time.perf_counter() - _t_solve))
             superpositions = [weights.dot(m) for m in mats]
             penalties = [d.getPenalty(s, Upsilon) for d, s in zip(datasets, superpositions)]
             pen = numpy.sum(penalties[1])
             number_of_find_w_U += 1
             return pen
         except Exception as e:
-            if record:
-                solveopt_times.append((_ups_val, float('nan')))
             msg = f"Error with parameters: {params}, Upsilon: {Upsilon},\n Error: {e}"
             print(msg)
             with open(UpsFile, 'a') as f:
                 f.write("#" + msg)
             return 1e6
 
-    # --- п.3: субдискретизация орбит для ВНУТРЕННЕГО поиска ---
+    # --- п.3: субдискретизация орбит для ВНУТРЕННЕГО поиска (RNG локальный) ---
     if 0.0 < UPS_SUBSAMPLE_FRAC < 1.0:
         n_sub = min(numOrbits, max(1000, int(numOrbits * UPS_SUBSAMPLE_FRAC)))
-        sub_idx = proc_rng.choice(numOrbits, size=n_sub, replace=False)
+        sub_idx = numpy.random.default_rng().choice(numOrbits, size=n_sub, replace=False)
         mats_search    = [m[sub_idx] for m in matrices]
         pen_reg_search = 2. * regul * numpy.ones(n_sub) * n_sub / totalMass**2
         print(f"  [subsample] внутренний поиск на {n_sub}/{numOrbits} орбитах")
@@ -1077,7 +1228,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         mats_search, pen_reg_search = matrices, pen_reg
 
     def find_weights_Ups(Upsilon):
-        return _eval_penalty(Upsilon, mats_search, pen_reg_search, record=True)
+        return _eval_penalty(Upsilon, mats_search, pen_reg_search)
 
     logger = FunctionLogger(find_weights_Ups)
 
@@ -1113,7 +1264,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
     #     точке. Даёт контрактно-точный penalty (полные numOrbits). Вызывается
     #     напрямую, в обход logger → НЕ попадает в историю оптимизации Upsilon. ---
     if mats_search is not matrices:
-        min_pen = float(_eval_penalty(min_Ups, matrices, pen_reg, record=True))
+        min_pen = float(_eval_penalty(min_Ups, matrices, pen_reg))
         print(f"  [subsample] финальный продуктивный full-solve: penalty={min_pen:.6f}")
     else:
         min_pen = float(min_penalty_Ups.fun)
@@ -1145,29 +1296,12 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             else:
                 upsilon_str = " ".join([f"{x:.15f}" for x in numpy.atleast_1d(upsilon)])
             f.write(f"# {i:4d}: [{upsilon_str}] -> {func_val:.15f}\n")
-        # --- Времена solveOpt (батч-запись, всё в комментариях) ---
-        f.write("# solveOpt times (s) per Upsilon probe:\n")
-        for i, (ups_val, dt) in enumerate(solveopt_times):
-            f.write(f"# T {i:4d}: Upsilon={ups_val:.15f} solveOpt_s={dt:.6f}\n")
-        _valid = numpy.array([dt for _, dt in solveopt_times if dt == dt])
-        if _valid.size:
-            f.write(f"# solveOpt summary: n={_valid.size} "
-                    f"total_s={_valid.sum():.6f} mean_s={_valid.mean():.6f} "
-                    f"median_s={numpy.median(_valid):.6f} "
-                    f"min_s={_valid.min():.6f} max_s={_valid.max():.6f}\n")
-        # --- Времена построения библиотеки орбит (доминирующая стоимость оценки) ---
-        f.write(f"# orbitlib times (s): sample_s={sample_time_s:.6f} "
-                f"orbit_s={orbit_time_s:.6f} "
-                f"total_s={sample_time_s + orbit_time_s:.6f} "
-                f"(numOrbits={numOrbits} trajsize={trajsize} intTime={intTime})\n")
         f.write("# End of history\n\n")
     
     print("4UpsBoTorch writed")
     logger.clear_history()
     print("logger history cleaned")
     return -min_pen
-
-
 # ==============================================================
 #  ПОИСК БЛИЖАЙШЕГО НАКЛОНЕНИЯ И BOOTSTRAP НАЧАЛЬНЫХ ТОЧЕК
 # ==============================================================
@@ -1270,8 +1404,7 @@ def find_nearest_incl_data(storage_patterns, host_patterns,
 
 def select_bootstrap_candidates(data_nearest, n_bootstrap,
                                  penalty_cutoff_frac=0.5,
-                                 strategy='best_diverse',
-                                 rng=None):
+                                 strategy='best_diverse'):
     """
     Выбирает n_bootstrap кандидатов из data_nearest для пересчёта.
     
@@ -1290,20 +1423,7 @@ def select_bootstrap_candidates(data_nearest, n_bootstrap,
     n_pool = min(n_pool, len(data_sorted))
     pool   = data_sorted[:n_pool]
 
-    if rng is not None and len(pool) > n_bootstrap:
-        # Per-process decorrelation (Goal 0): each parallel worker draws a
-        # DIFFERENT subset from the good pool (weighted toward lower penalty),
-        # so processes don't recompute identical initial points. Falls back to
-        # the deterministic strategies below when rng is None or the pool is
-        # too small to differentiate workers.
-        ranks    = numpy.arange(len(pool))
-        weights  = numpy.exp(-ranks / max(1.0, len(pool) / 3.0))
-        weights /= weights.sum()
-        sel_idx  = numpy.sort(rng.choice(len(pool), size=n_bootstrap,
-                                         replace=False, p=weights))
-        selected = pool[sel_idx]
-
-    elif strategy == 'best':
+    if strategy == 'best':
         selected = pool[:n_bootstrap]
 
     elif strategy == 'best_diverse':
@@ -1343,43 +1463,6 @@ def select_bootstrap_candidates(data_nearest, n_bootstrap,
     return candidates
 
 
-def _periodic_bootstrap_sync(n_done, sync_interval, target_incl,
-                             storage_patterns, host_patterns,
-                             min_total_points):
-    """Минимальный вариант: во время фазы начальных точек периодически
-    (каждые sync_interval точек) выгружает свои результаты на Яндекс.Диск
-    и проверяет, не набралось ли уже достаточно точек (свои +
-    параллельные) для построения PCA.
-
-    Возвращает свежий снимок данных (numpy array, 7 столбцов) если порог
-    min_total_points достигнут — сигнал к раннему выходу; иначе None.
-    """
-    if not sync_interval or n_done == 0 or n_done % sync_interval != 0:
-        return None
-    print(f"  [bootstrap-sync] выгрузка своих результатов и проверка "
-          f"параллельных (после {n_done} точек)...")
-    sync_to_yadisk()   # только печать, без ntfy
-    if (min_total_points is None or storage_patterns is None
-            or host_patterns is None):
-        return None
-    data_now, _ = load_fresh_data_from_files(
-        storage_patterns = storage_patterns,
-        host_patterns    = host_patterns,
-        incl_filter      = target_incl,
-        use_log_scale    = False,
-        exclude_suffix   = None,     # считаем все точки на incl
-        return_full      = True,
-        notify           = False,    # тихая сверка
-    )
-    n_total = len(data_now) if data_now is not None else 0
-    print(f"  [bootstrap-sync] всего точек на incl={target_incl:.2f}°: "
-          f"{n_total} (порог {min_total_points})")
-    if n_total >= min_total_points:
-        print("  [bootstrap-sync] достаточно данных — ранний выход.")
-        return data_now
-    return None
-
-
 def bootstrap_initial_points_from_nearest_incl(
         storage_patterns,
         host_patterns,
@@ -1390,12 +1473,6 @@ def bootstrap_initial_points_from_nearest_incl(
         penalty_cutoff_frac=0.5,
         strategy='best_diverse',
         max_dist_warn=20.0,
-        rng=None,
-        sync_interval=None,
-        min_total_points=None,
-        resv_dir=None,
-        reserve_eps=0.02,
-        reserve_ttl_sec=7200,
 ):
     """
     Формирует начальные точки для нового target_incl,
@@ -1434,7 +1511,7 @@ def bootstrap_initial_points_from_nearest_incl(
     if data_nearest is None:
         print("  [bootstrap] Нет данных для bootstrap. "
               "Будут использованы случайные точки.")
-        return [], None, float('inf'), None
+        return [], None, float('inf')
 
     if dist > max_dist_warn:
         msg = (f"  [bootstrap] ВНИМАНИЕ: ближайшее наклонение "
@@ -1460,7 +1537,6 @@ def bootstrap_initial_points_from_nearest_incl(
         n_bootstrap          = n_bootstrap,
         penalty_cutoff_frac  = penalty_cutoff_frac,
         strategy             = strategy,
-        rng                  = rng,
     )
 
     print(f"\n  Выбрано кандидатов: {len(candidates)}")
@@ -1478,23 +1554,10 @@ def bootstrap_initial_points_from_nearest_incl(
 
     print(f"\n  Пересчёт penalty для incl={target_incl:.2f}°...")
 
-    data_refresh = None   # свежий снимок диска при раннем выходе
     for i, params in enumerate(candidates):
         print(f"\n  [{i+1}/{len(candidates)}] "
               f"Q={params['Q']:.4f}, gh={params['gh']:.4f}, "
               f"rh={params['rh']:.4f}, rho0={params['rho0']:.4f}")
-
-        # --- Превентивное резервирование кандидата ---
-        resv_fp, skip = _try_reserve_candidate(
-            params, resv_dir, reserve_eps, reserve_ttl_sec, bounds_original)
-        if skip:
-            print("    [reserve] пропуск: точку считает другой процесс")
-            data_refresh = _periodic_bootstrap_sync(
-                i + 1, sync_interval, target_incl,
-                storage_patterns, host_patterns, min_total_points)
-            if data_refresh is not None:
-                break
-            continue
 
         # Переводим в PCA-координаты (если модель есть)
         if model_data_template is not None:
@@ -1542,14 +1605,6 @@ def bootstrap_initial_points_from_nearest_incl(
         except Exception as e:
             print(f"    ✗ Ошибка вычисления: {e}")
             n_failed += 1
-        finally:
-            release_reservation(resv_fp)
-
-        data_refresh = _periodic_bootstrap_sync(
-            i + 1, sync_interval, target_incl,
-            storage_patterns, host_patterns, min_total_points)
-        if data_refresh is not None:
-            break
 
     # --- Итог ---
     print(f"\n  Bootstrap завершён: "
@@ -1569,138 +1624,7 @@ def bootstrap_initial_points_from_nearest_incl(
             tags=['white_check_mark']
         )
 
-    return bootstrap_results, nearest_incl, dist, data_refresh
-
-
-def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
-                              n_seed=12, penalty_cutoff_frac=0.5,
-                              strategy='best_diverse', rng=None,
-                              sync_interval=None, storage_patterns=None,
-                              host_patterns=None, min_total_points=None,
-                              resv_dir=None, reserve_eps=0.02,
-                              reserve_ttl_sec=7200):
-    """
-    Формирует начальные точки из АРХИВНЫХ файлов (seed_patterns, например
-    PA46.8) для того же target_incl, ПЕРЕСЧИТЫВАЯ penalty с текущей
-    (корректной) геометрией.
-
-    Отличие от bootstrap_initial_points_from_nearest_incl:
-      - читает строки на ТОМ ЖЕ наклонении target_incl (а не ближайшем),
-      - источник — отдельные seed_patterns (не storage/host), поэтому
-        устаревшие penalty не попадают в PCA-модель напрямую;
-        в модель идут только пересчитанные значения.
-
-    Возвращает: bootstrap_results — list of {'params','penalty','pc'}.
-    """
-    print("\n" + "=" * 60)
-    print(f"SEED из архива (PA46.8) для incl={target_incl:.2f}°")
-    print("=" * 60)
-
-    # --- Шаг 1: собрать локальные архивные файлы (без скачивания) ---
-    all_files = []
-    for pattern in seed_patterns:
-        for f in glob.glob(pattern):
-            if f not in all_files:
-                all_files.append(f)
-
-    if not all_files:
-        print("  [seed-pa468] Архивные файлы не найдены.")
-        return [], None
-
-    print(f"  [seed-pa468] Файлов: {len(all_files)}")
-
-    # --- Шаг 2: прочитать строки на ТОМ ЖЕ наклонении ---
-    rows = []
-    for filepath in all_files:
-        try:
-            with open(filepath, 'r') as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    parts = line.split()
-                    if len(parts) < 7:
-                        continue
-                    try:
-                        row = [float(p) for p in parts[:7]]
-                    except ValueError:
-                        continue
-                    if abs(row[0] - target_incl) > 0.01:
-                        continue
-                    if row[3] <= 0 or row[4] <= 0:
-                        continue
-                    if row[6] >= 1e5:
-                        continue
-                    rows.append(row)
-        except FileNotFoundError:
-            pass
-
-    if not rows:
-        print(f"  [seed-pa468] Нет точек на incl={target_incl:.2f}° в архиве.")
-        return [], None
-
-    data_seed = numpy.array(rows)
-    print(f"  [seed-pa468] Найдено архивных точек: {len(data_seed)}")
-
-    # --- Шаг 3: выбрать кандидатов (ранжируем по СТАРОМУ penalty) ---
-    candidates = select_bootstrap_candidates(
-        data_seed,
-        n_bootstrap         = n_seed,
-        penalty_cutoff_frac = penalty_cutoff_frac,
-        strategy            = strategy,
-        rng                 = rng,
-    )
-    print(f"  [seed-pa468] Выбрано кандидатов: {len(candidates)}")
-
-    # --- Шаг 4: пересчёт penalty с текущей геометрией ---
-    seed_results = []
-    n_success = 0
-    data_refresh = None   # свежий снимок диска при раннем выходе
-    for i, params in enumerate(candidates):
-        resv_fp, skip = _try_reserve_candidate(
-            params, resv_dir, reserve_eps, reserve_ttl_sec, bounds_original)
-        if skip:
-            print(f"    [{i+1}/{len(candidates)}] [reserve] пропуск: "
-                  f"точку считает другой процесс")
-            data_refresh = _periodic_bootstrap_sync(
-                i + 1, sync_interval, target_incl,
-                storage_patterns, host_patterns, min_total_points)
-            if data_refresh is not None:
-                break
-            continue
-        pc_coords = _params_to_dummy_pc(params, None, bounds_original)
-        try:
-            y_val = halo_IC_lib_weights_pca_fixed(
-                pc_coords,
-                None,                       # модели ещё нет
-                bounds_original,
-                densityStars, datasets, alphah, betah,
-                direct_params=params,
-            )
-            penalty = -y_val
-            if numpy.isfinite(penalty) and penalty < 1e5:
-                seed_results.append({
-                    'params':  params,
-                    'penalty': penalty,
-                    'pc':      pc_coords,
-                })
-                n_success += 1
-                print(f"    [{i+1}/{len(candidates)}] ✓ penalty={penalty:.6f}")
-            else:
-                print(f"    [{i+1}/{len(candidates)}] ✗ penalty={penalty:.6f}")
-        except Exception as e:
-            print(f"    [{i+1}/{len(candidates)}] ✗ ошибка: {e}")
-        finally:
-            release_reservation(resv_fp)
-
-        data_refresh = _periodic_bootstrap_sync(
-            i + 1, sync_interval, target_incl,
-            storage_patterns, host_patterns, min_total_points)
-        if data_refresh is not None:
-            break
-
-    print(f"  [seed-pa468] Пересчитано успешно: {n_success}/{len(candidates)}")
-    return seed_results, data_refresh
+    return bootstrap_results, nearest_incl, dist
 
 
 def _params_to_dummy_pc(params, model_data, bounds_original):
@@ -1811,7 +1735,6 @@ def build_initial_pca_from_bootstrap(bootstrap_results,
            f"n_components={n_comp_actual}")
 
     return model_data
-
 # ==============================================================
 #  КЛАСС TuRBO ДЛЯ PCA-ПРОСТРАНСТВА
 # ==============================================================
@@ -1920,7 +1843,7 @@ class TuRBO_PCA_Fixed:
             with open(self.output_file, 'a') as f:
                 f.write(f"#  [TuRBO] TR сужена → length = {self.length:.4f}")
     
-    def suggest(self, X_obs, Y_obs, X_pending=None):
+    def suggest(self, X_obs, Y_obs):
         best_idx = Y_obs.argmax()
         x_center = X_obs[best_idx]
         tr_bounds = self._tr_bounds(x_center)
@@ -1928,13 +1851,10 @@ class TuRBO_PCA_Fixed:
         model = self._fit_gp(X_obs, Y_obs)
         model.eval()
         
-        # X_pending — точки, которые другие процессы уже считают (резервации).
-        # q-acquisition штатно уводит предложение в сторону от них.
         acqf = qLogNoisyExpectedImprovement(
             model=model,
             X_baseline=X_obs,
             prune_baseline=True,
-            X_pending=X_pending,
         )
         
         X_next, _ = optimize_acqf(
@@ -1978,41 +1898,35 @@ def adaptive_penalty_cutoff(data, target_fraction=0.3, min_points=10, cutoff_sta
         
     return cutoff
 
-def load_fresh_data_from_files(storage_patterns,host_patterns, incl_filter, 
+def load_fresh_data_from_files(storage_patterns, host_patterns, incl_filter, 
                                 use_log_scale=True,
                                 exclude_suffix=hostname_proc,
-                                return_full=False,
-                                notify=True):
-    """
-    Читает все доступные файлы результатов прямо сейчас,
-    включая файлы параллельных процессов.
-    
-    files:          базовые файлы (исторические)
-    incl_filter:    фильтр по наклонению
-    use_log_scale:  логарифмировать rh и rho0
-    exclude_suffix: суффикс файлов текущего процесса 
-                    (чтобы не читать дважды, если уже в model_data)
-    
-    Возвращает: X_raw, penalties — все доступные точки
-    """
+                                return_full=False):
     # --- Шаг 1: скачиваем свежие файлы с Яндекс.Диска ---
-    load_from_yadisk(storage_patterns, host_patterns, notify=notify)
+    load_from_yadisk(storage_patterns, host_patterns)
     
     # --- Шаг 2: собираем список файлов на диске ---
     all_files = []
     
+    # ДИАГНОСТИКА: показываем что нашли по каждому паттерну
+    print("  [load_fresh] Поиск файлов по паттернам:")
+    print(f"    host_patterns:    {host_patterns}")
+    print(f"    storage_patterns: {storage_patterns}")
+    print(f"    exclude_suffix:   '{exclude_suffix}'")
+    
     for pattern in host_patterns + storage_patterns:
         found = glob.glob(pattern)
+        print(f"    паттерн '{pattern}': найдено {found}")
         for f in found:
             if f not in all_files:
-                # Пропускаем файл текущего процесса если указано
+                # ДИАГНОСТИКА: показываем решение по каждому файлу
                 if exclude_suffix and exclude_suffix in f:
+                    print(f"      ПРОПУСК (exclude_suffix): {f}")
                     continue
                 all_files.append(f)
+                print(f"      ДОБАВЛЕН: {f}")
     
-    print(f"  [load_fresh] Файлов для чтения: {len(all_files)}")
-    for f in all_files:
-        print(f"    {f}")
+    print(f"  [load_fresh] Итого файлов для чтения: {len(all_files)}")
     
     raw = []
     file_counts = {}
@@ -2032,27 +1946,32 @@ def load_fresh_data_from_files(storage_patterns,host_patterns, incl_filter,
                         row = [float(p) for p in parts[:7]]
                         row = [1e6 if numpy.isinf(val) else val 
                                for val in row]
+                        # ДИАГНОСТИКА: первые несколько строк
+                        if count < 2:
+                            print(f"      [{file}] строка: incl={row[0]:.2f}, "
+                                  f"pen={row[6]:.4f}, "
+                                  f"фильтр incl={incl_filter}: "
+                                  f"{'OK' if abs(row[0]-incl_filter)<0.01 else 'SKIP'}")
                         # Фильтр по наклонению
                         if abs(row[0] - incl_filter) > 0.01:
                             continue
-                        # Фильтр на корректность
                         if row[3] <= 0 or row[4] <= 0:
                             continue
-                        if row[6] >= 1e5:   # пропускаем failed runs
+                        if row[6] >= 1e5:
                             continue
                         raw.append(row)
                         count += 1
                     except ValueError:
                         continue
         except FileNotFoundError:
-            pass
+            print(f"    ФАЙЛ НЕ НАЙДЕН: {file}")
         file_counts[file] = count
     
     print("  [PCA update] Загружено точек по файлам:")
     for fname, cnt in file_counts.items():
         print(f"    {fname}: {cnt}")
     
-    if len(raw) == 0:        
+    if len(raw) == 0:
         if return_full:
             return None, file_counts
         else:
@@ -2061,13 +1980,10 @@ def load_fresh_data_from_files(storage_patterns,host_patterns, incl_filter,
     data = numpy.array(raw)
     print(f"  [load_fresh] Итого точек из файлов: {len(data)}")
 
-    # --- Возврат ---
     if return_full:
-        # Полный массив: все 7 столбцов [incl, Q, gh, rh, rho0, Ups, penalty]
         return data, file_counts
     else:
-        # Только параметры и penalty
-        X_raw     = data[:, 1:5]   # Q, gh, rh, rho0
+        X_raw     = data[:, 1:5]
         penalties = data[:, 6]
         return X_raw, penalties, file_counts
 
@@ -2320,14 +2236,7 @@ def _update_pca_model(model_data, data_good, new_params, new_penalties,
     return model_data_new, X_obs_new_t, Y_obs, turbo
 
 def _generate_random_initial_points(bounds_original, n_points,
-                                     output_file=None,
-                                     sync_interval=None,
-                                     storage_patterns=None,
-                                     host_patterns=None,
-                                     min_total_points=None,
-                                     resv_dir=None,
-                                     reserve_eps=0.02,
-                                     reserve_ttl_sec=7200):
+                                     output_file=None):
     """
     Последний резерв: вычисляет penalty для случайных точек
     из пространства параметров (Latin Hypercube Sampling).
@@ -2349,10 +2258,8 @@ def _generate_random_initial_points(bounds_original, n_points,
 
     param_names = ['Q', 'gh', 'rh', 'rho0']
 
-    # Latin Hypercube Sampling.
-    # Per-process RNG (proc_rng) instead of a fixed seed → each parallel worker
-    # generates a DIFFERENT random fallback set (Goal 0: no duplicate init points).
-    rng      = proc_rng
+    # Latin Hypercube Sampling
+    rng      = numpy.random.default_rng(seed=42)
     n_params = len(param_names)
     # Разбиваем [0,1]^n на n_points равных ячеек по каждому измерению
     lhs = numpy.zeros((n_points, n_params))
@@ -2378,19 +2285,8 @@ def _generate_random_initial_points(bounds_original, n_points,
 
     # Вычисляем penalty
     bootstrap_results = []
-    data_refresh = None   # свежий снимок диска при раннем выходе
     for i, params in enumerate(candidates):
         _write(f"\n  [{i+1}/{n_points}] Вычисление penalty...")
-        resv_fp, skip = _try_reserve_candidate(
-            params, resv_dir, reserve_eps, reserve_ttl_sec, bounds_original)
-        if skip:
-            _write("    [reserve] пропуск: точку считает другой процесс")
-            data_refresh = _periodic_bootstrap_sync(
-                i + 1, sync_interval, incl,
-                storage_patterns, host_patterns, min_total_points)
-            if data_refresh is not None:
-                break
-            continue
         # Dummy PCA-координаты (нормализованные параметры)
         pc_coords = _params_to_dummy_pc(params, None, bounds_original)
         try:
@@ -2410,17 +2306,9 @@ def _generate_random_initial_points(bounds_original, n_points,
                 _write(f"    ✓ penalty={penalty:.6f}")
         except Exception as e:
             _write(f"    ✗ Ошибка: {e}")
-        finally:
-            release_reservation(resv_fp)
-
-        data_refresh = _periodic_bootstrap_sync(
-            i + 1, sync_interval, incl,
-            storage_patterns, host_patterns, min_total_points)
-        if data_refresh is not None:
-            break
 
     if not bootstrap_results:
-        return numpy.empty((0, 7)), [], data_refresh
+        return numpy.empty((0, 7)), []
 
     rows = numpy.array([
         [incl,
@@ -2430,11 +2318,11 @@ def _generate_random_initial_points(bounds_original, n_points,
         for r in bootstrap_results
     ])
     _write(f"\n  [random init] Успешно: {len(rows)}/{n_points}")
-    return rows, bootstrap_results, data_refresh
-
+    return rows, bootstrap_results
 def run_pca_optimization(
     storage_patterns=None,   # паттерны всех файлов из хранилища
-    host_patterns=None,      # паттерны файлов своего сервера
+    host_patterns=None,      # паттерны файлов своего сервера,
+    fallback_patterns=None,    # ← НОВЫЙ параметр
     n_components=4,
     n_iter=30,
     target_fraction=0.3,
@@ -2444,14 +2332,11 @@ def run_pca_optimization(
     expand_pca_bounds=2.5,
     output_file=None,
     resume=True,
-    pca_update_interval=15,
-    seed_patterns=None,      # архивные паттерны (PA46.8) для начальных точек
-    seed_from_pa468=False,   # включить seed из архива (penalty пересчитывается)
-    reserve_points=True,     # резервировать точки (защита от дублей внутри VM)
-    reserve_eps=0.02,        # порог «одинаковости» в нормированном простр-ве
-    reserve_ttl_sec=7200,    # TTL резервации (протухание после смерти процесса)
-    reserve_max_retries=8    # сколько раз возмущать кандидат при коллизии
+    pca_update_interval=12
 ):
+    if fallback_patterns is None:
+        fallback_patterns = ["4UpsBoTorch_PCA_PA46.8_Sersic*.txt"]
+        
     global best_overall_Upsilon, best_overall_target, number_of_find_w_U
     global number_of_h_IC_lw, hostname_proc
     global densityStars, datasets, incl, alphah, betah
@@ -2496,37 +2381,36 @@ def run_pca_optimization(
         'rh':  (0.5,  3.5),
         'rho0':(34.0, 120.0),
     }
-
-    # --- Каталог резерваций (общий для процессов одной VM) ---
-    resv_dir = reservation_dir(incl) if reserve_points else None
-    if reserve_points:
-        _write(f"\nРезервирование точек включено: dir={resv_dir}, "
-               f"eps={reserve_eps}, ttl={reserve_ttl_sec}s")
-
+# ==============================================================
+    # ШАГ 0: ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ ФАЙЛОВ С ЯНДЕКС.ДИСКА
     # ==============================================================
-    # ШАГ 1: ЗАГРУЗКА ДАННЫХ через load_fresh_data_from_files
+    _write("\n" + "=" * 60)
+    _write("ОБНОВЛЕНИЕ ФАЙЛОВ С ЯНДЕКС.ДИСКА (force_update)")
+    _write("=" * 60)
+    
+    load_from_yadisk(
+        storage_patterns = storage_patterns,
+        host_patterns    = host_patterns,
+        force_update     = True,   # перезаписать устаревшие локальные копии
+    )
+   # ==============================================================
+    # ШАГ 1: ЗАГРУЗКА ДАННЫХ
     # ==============================================================
     _write("\n" + "=" * 60)
     _write("ЗАГРУЗКА ДАННЫХ И РАСЧЁТ АДАПТИВНОГО CUTOFF")
     _write("=" * 60)
 
     MIN_POINTS_FOR_PCA = 10  # минимум точек для построения PCA
-    # Интервал (в точках) периодической выгрузки/проверки параллельных
-    # результатов во время фазы начальных точек (минимальный вариант).
-    bootstrap_sync_interval = 4
 
-    # Читаем ВСЕ файлы включая свой (exclude_suffix=None),
-    # так как это начальная загрузка — нужна полная история
     data, file_counts = load_fresh_data_from_files(
         storage_patterns = storage_patterns,
         host_patterns    = host_patterns,
         incl_filter      = incl,
-        use_log_scale    = False,      # сырые данные, логарифм применим позже
-        exclude_suffix   = None,       # читаем все файлы включая свой
-        return_full      = True,       # нужен полный массив [7 столбцов]
+        use_log_scale    = False,
+        exclude_suffix   = None,
+        return_full      = True,
     )
 
-    # --- Отчёт по загруженным файлам ---
     _write(f"\nПрочитано файлов: {len(file_counts)}")
     for fname, cnt in file_counts.items():
         _write(f"  {fname}: {cnt} строк")
@@ -2535,8 +2419,7 @@ def run_pca_optimization(
     n_have = len(data) if data is not None else 0
     data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)
 
-
-    # ==============================================================
+       # ==============================================================
     # ШАГ 1b: BOOTSTRAP если данных нет или мало
     # ==============================================================
     bootstrap_results   = []   # результаты bootstrap (могут быть пустыми)
@@ -2547,72 +2430,29 @@ def run_pca_optimization(
         _write(f"\nДанных для incl={incl} недостаточно "
                f"({n_have} < {MIN_POINTS_FOR_PCA}).")
 
-        # --- Источник 0 (опц.): SEED из архива PA46.8 на том же incl ---
-        # Penalty пересчитывается с корректной геометрией; устаревшие penalty
-        # в PCA-модель не попадают.
-        if seed_from_pa468 and seed_patterns:
-            _write("Источник начальных точек: архив PA46.8 "
-                   "(penalty пересчитывается)...")
-            n_seed = (24 if n_have == 0
-                      else max(8, MIN_POINTS_FOR_PCA - n_have + 3))
-            seed_results, seed_refresh = seed_points_from_patterns(
-                seed_patterns       = seed_patterns,
-                target_incl         = incl,
-                bounds_original     = bounds_original,
-                n_seed              = n_seed,
-                penalty_cutoff_frac = 0.8,
-                strategy            = 'best_diverse',
-                rng                 = proc_rng,
-                sync_interval       = bootstrap_sync_interval,
-                storage_patterns    = storage_patterns,
-                host_patterns       = host_patterns,
-                min_total_points    = MIN_POINTS_FOR_PCA,
-                resv_dir            = resv_dir,
-                reserve_eps         = reserve_eps,
-                reserve_ttl_sec     = reserve_ttl_sec,
-            )
-            if seed_results:
-                bootstrap_results = seed_results
-                seed_rows = numpy.array([
-                    [incl,
-                     r['params']['Q'],  r['params']['gh'],
-                     r['params']['rh'], r['params']['rho0'],
-                     0.0,               r['penalty']]
-                    for r in seed_results
-                ])
-                if seed_refresh is not None:
-                    data = seed_refresh
-                    _write(f"  Ранний выход seed: свежий снимок диска "
-                           f"— {len(data)} точек (свои + параллельные)")
-                elif data is not None and len(data) > 0:
-                    data = numpy.vstack([data, seed_rows])
-                else:
-                    data = seed_rows
-                _write(f"  SEED PA46.8 дал {len(seed_results)} точек, "
-                       f"всего {len(data)}")
-                n_have          = len(data) if data is not None else 0
-                data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)
+        # Сколько точек пересчитать:
+        # если данных совсем нет — берём 12,
+        # иначе добираем до MIN_POINTS_FOR_PCA + 3 запасных
+        n_boot = (12 if n_have == 0
+                  else max(8, MIN_POINTS_FOR_PCA - n_have + 3))
 
-    if not data_sufficient:
-        _write("Запускаем bootstrap из ближайшего наклонения...")
+        # ------------------------------------------------------
+        # Попытка 1: bootstrap из ближайшего наклонения
+        #            в файлах 4UpsBoTorch_PCA_Sersic*
+        # ------------------------------------------------------
+        _write("\nПопытка 1: bootstrap из ближайшего наклонения "
+               "(файлы 4UpsBoTorch_PCA_Sersic*)...")
 
         send_notification(
             f"Bootstrap для incl={incl:.2f}°\n"
             f"Данных: {n_have} (нужно ≥ {MIN_POINTS_FOR_PCA})\n"
-            f"Ищем ближайшее наклонение...",
+            f"Попытка 1: ближайшее наклонение из PCA_Sersic*...",
             title=f"Galaxy {hostname_proc}: Bootstrap",
             priority='default',
             tags=['hourglass_flowing_sand']
         )
 
-        # Сколько точек пересчитать:
-        # если данных совсем нет — берём 24 (запас на гонку резерваций
-        # между параллельными процессами), иначе добираем
-        # до MIN_POINTS_FOR_PCA + 3 запасных
-        n_boot = (24 if n_have == 0
-                  else max(8, MIN_POINTS_FOR_PCA - n_have + 3))
-
-        bootstrap_results, nearest_incl_used, dist_used, data_refresh = \
+        bootstrap_results, nearest_incl_used, dist_used = \
             bootstrap_initial_points_from_nearest_incl(
                 storage_patterns    = storage_patterns,
                 host_patterns       = host_patterns,
@@ -2620,23 +2460,113 @@ def run_pca_optimization(
                 model_data_template = None,   # модели ещё нет
                 bounds_original     = bounds_original,
                 n_bootstrap         = n_boot,
-                penalty_cutoff_frac = 0.8,
+                penalty_cutoff_frac = 0.5,
                 strategy            = 'best_diverse',
                 max_dist_warn       = 20.0,
-                rng                 = proc_rng,
-                sync_interval       = bootstrap_sync_interval,
-                min_total_points    = MIN_POINTS_FOR_PCA,
-                resv_dir            = resv_dir,
-                reserve_eps         = reserve_eps,
-                reserve_ttl_sec     = reserve_ttl_sec,
             )
 
         if bootstrap_results:
-            _write(f"\n  Bootstrap дал {len(bootstrap_results)} точек "
+            _write(f"\n  Попытка 1 успешна: {len(bootstrap_results)} точек "
                    f"(из incl={nearest_incl_used:.2f}°, "
                    f"dist={dist_used:.1f}°)")
 
-            # Формируем строки в формате [incl, Q, gh, rh, rho0, Ups, penalty]
+        # ------------------------------------------------------
+        # Попытка 2: fallback из файлов другого posang
+        #            4UpsBoTorch_PCA_PA46.8_Sersic*
+        #            penalty из этих файлов — только для выбора!
+        #            penalty ПЕРЕСЧИТЫВАЕТСЯ для текущего incl
+        # ------------------------------------------------------
+        if not bootstrap_results:
+            _write("\n  Попытка 1 не дала результатов.")
+            _write("Попытка 2: fallback из файлов другого posang "
+                   "(4UpsBoTorch_PCA_PA46.8_Sersic*)...")
+            _write("  ВНИМАНИЕ: penalty из fallback-файлов используется")
+            _write("            ТОЛЬКО для выбора кандидатов!")
+            _write("            Для PCA penalty будет ПЕРЕСЧИТАН.")
+
+            send_notification(
+                f"Bootstrap (попытка 1) не дал результатов\n"
+                f"incl={incl:.2f}°\n"
+                f"Попытка 2: fallback из PA46.8_Sersic*...",
+                title=f"Galaxy {hostname_proc}: Fallback",
+                priority='default',
+                tags=['hourglass_flowing_sand']
+            )
+
+            bootstrap_results = bootstrap_from_fallback(
+                fallback_patterns   = fallback_patterns,
+                target_incl         = incl,
+                bounds_original     = bounds_original,
+                n_bootstrap         = n_boot,
+                penalty_cutoff_frac = 0.5,
+                strategy            = 'best_diverse',
+                output_file         = output_file,
+            )
+
+            if bootstrap_results:
+                _write(f"\n  Попытка 2 успешна: "
+                       f"{len(bootstrap_results)} точек "
+                       f"(penalty пересчитан для incl={incl:.2f}°)")
+                send_notification(
+                    f"Fallback bootstrap успешен\n"
+                    f"incl={incl:.2f}°\n"
+                    f"Точек: {len(bootstrap_results)}\n"
+                    f"Лучший penalty: "
+                    f"{min(r['penalty'] for r in bootstrap_results):.4f}",
+                    title=f"Galaxy {hostname_proc}: Fallback OK",
+                    priority='default',
+                    tags=['white_check_mark']
+                )
+
+        # ------------------------------------------------------
+        # Попытка 3: Latin Hypercube Sampling
+        #            последний резерв — случайные точки
+        # ------------------------------------------------------
+        if not bootstrap_results:
+            _write("\n  Попытка 2 не дала результатов.")
+            _write("Попытка 3: случайные начальные точки (LHS)...")
+
+            send_notification(
+                f"Fallback (попытка 2) не дал результатов\n"
+                f"incl={incl:.2f}°\n"
+                f"Попытка 3: Latin Hypercube Sampling...",
+                title=f"Galaxy {hostname_proc}: LHS",
+                priority='default',
+                tags=['hourglass_flowing_sand']
+            )
+
+            data_lhs, bootstrap_results = _generate_random_initial_points(
+                bounds_original = bounds_original,
+                n_points        = MIN_POINTS_FOR_PCA,
+                output_file     = output_file,
+            )
+
+            if bootstrap_results:
+                _write(f"\n  Попытка 3 успешна: "
+                       f"{len(bootstrap_results)} точек (LHS)")
+                send_notification(
+                    f"LHS bootstrap успешен\n"
+                    f"incl={incl:.2f}°\n"
+                    f"Точек: {len(bootstrap_results)}",
+                    title=f"Galaxy {hostname_proc}: LHS OK",
+                    priority='default',
+                    tags=['white_check_mark']
+                )
+            else:
+                _write("  Попытка 3 не дала результатов.")
+                send_notification(
+                    f"ВСЕ попытки bootstrap провалились!\n"
+                    f"incl={incl:.2f}°",
+                    title=f"Galaxy {hostname_proc}: ОШИБКА",
+                    priority='urgent',
+                    tags=['warning', 'rotating_light']
+                )
+
+        # ------------------------------------------------------
+        # Объединяем результаты bootstrap с имеющимися данными
+        # ------------------------------------------------------
+        if bootstrap_results:
+            # Формируем строки [incl, Q, gh, rh, rho0, Ups, penalty]
             boot_rows = numpy.array([
                 [incl,
                  r['params']['Q'],  r['params']['gh'],
@@ -2645,86 +2575,27 @@ def run_pca_optimization(
                 for r in bootstrap_results
             ])
 
-            # Ранний выход: свежий снимок диска уже содержит наши
-            # bootstrap-точки (записаны в UpsFile) + параллельные —
-            # каждый файл прочитан один раз, без двойного счёта.
-            if data_refresh is not None:
-                data = data_refresh
-                _write(f"  Ранний выход bootstrap: свежий снимок диска "
-                       f"— {len(data)} точек (свои + параллельные)")
-            # Объединяем с имеющимися данными (если есть)
-            elif data is not None and len(data) > 0:
+            if data is not None and len(data) > 0:
                 data = numpy.vstack([data, boot_rows])
-                _write(f"  Объединено: {len(data)} точек "
+                _write(f"\n  Объединено: {len(data)} точек "
                        f"(исходные + bootstrap)")
             else:
                 data = boot_rows
-                _write(f"  Только bootstrap: {len(data)} точек")
+                _write(f"\n  Только bootstrap: {len(data)} точек")
 
         else:
-            _write("  Bootstrap не дал результатов.")
-            _write("  Генерируем случайные начальные точки (LHS)...")
-
-            # Последний резерв: Latin Hypercube Sampling
-            data_lhs, bootstrap_results, lhs_refresh = \
-                _generate_random_initial_points(
-                    bounds_original  = bounds_original,
-                    n_points         = MIN_POINTS_FOR_PCA,
-                    output_file      = output_file,
-                    sync_interval    = bootstrap_sync_interval,
-                    storage_patterns = storage_patterns,
-                    host_patterns    = host_patterns,
-                    min_total_points = MIN_POINTS_FOR_PCA,
-                    resv_dir         = resv_dir,
-                    reserve_eps      = reserve_eps,
-                    reserve_ttl_sec  = reserve_ttl_sec,
-                )
-            if lhs_refresh is not None:
-                data = lhs_refresh
-                _write(f"  Ранний выход random-LHS: свежий снимок диска "
-                       f"— {len(data)} точек (свои + параллельные)")
-            elif data is not None and len(data) > 0:
-                data = numpy.vstack([data, data_lhs])
-            else:
-                data = data_lhs
+            # bootstrap_results пуст — но data_lhs могла быть заполнена
+            # в попытке 3 (LHS возвращает data_lhs отдельно)
+            if 'data_lhs' in dir() and data_lhs is not None and len(data_lhs) > 0:
+                if data is not None and len(data) > 0:
+                    data = numpy.vstack([data, data_lhs])
+                else:
+                    data = data_lhs
+                _write(f"\n  Использованы LHS-точки: {len(data_lhs)}")
 
         # Обновляем флаг после всех попыток
         n_have          = len(data) if data is not None else 0
         data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)
-
-        # Финальный фолбэк: если после bootstrap точек всё ещё мало
-        # (гонка резерваций между параллельными процессами выбила почти
-        # все кандидаты в skip — как в случае p1/p5), досчитываем
-        # недостающее через LHS, чтобы процесс не падал, а добирал сам.
-        if not data_sufficient:
-            n_deficit = MIN_POINTS_FOR_PCA - n_have
-            _write(f"  Недобор после bootstrap: {n_have} < "
-                   f"{MIN_POINTS_FOR_PCA}. LHS-добор {n_deficit} точек...")
-            data_lhs, lhs_results, lhs_refresh = \
-                _generate_random_initial_points(
-                    bounds_original  = bounds_original,
-                    n_points         = n_deficit,
-                    output_file      = output_file,
-                    sync_interval    = bootstrap_sync_interval,
-                    storage_patterns = storage_patterns,
-                    host_patterns    = host_patterns,
-                    min_total_points = MIN_POINTS_FOR_PCA,
-                    resv_dir         = resv_dir,
-                    reserve_eps      = reserve_eps,
-                    reserve_ttl_sec  = reserve_ttl_sec,
-                )
-            if lhs_refresh is not None:
-                data = lhs_refresh
-                _write(f"  Ранний выход LHS-добора: свежий снимок диска "
-                       f"— {len(data)} точек (свои + параллельные)")
-            elif data is not None and len(data) > 0:
-                data = numpy.vstack([data, data_lhs])
-            else:
-                data = data_lhs
-            if lhs_results:
-                bootstrap_results = (bootstrap_results or []) + lhs_results
-            n_have          = len(data) if data is not None else 0
-            data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)
 
     if not data_sufficient:
         raise ValueError(
@@ -2733,7 +2604,7 @@ def run_pca_optimization(
             f"(есть {n_have}, нужно ≥ {MIN_POINTS_FOR_PCA})."
         )
 
-    # Фильтр на корректность для логарифмирования
+    # --- Фильтр на корректность для логарифмирования ---
     if use_log_scale:
         mask_valid = (data[:, 3] > 0) & (data[:, 4] > 0)
         n_dropped  = numpy.sum(~mask_valid)
@@ -2741,7 +2612,7 @@ def run_pca_optimization(
             _write(f"  Отброшено точек с rh<=0 или rho0<=0: {n_dropped}")
         data = data[mask_valid]
 
-    _write(f"Загружено строк (incl={incl}): {len(data)}")
+    _write(f"Итого строк для построения модели (incl={incl}): {len(data)}")
 
     # --- Сортировка по penalty ---
     data_sort = data[numpy.argsort(data[:, 6])]
@@ -2751,8 +2622,8 @@ def run_pca_optimization(
     # --- Адаптивный cutoff ---
     penalty_cutoff = adaptive_penalty_cutoff(
         data_sort,
-        target_fraction=target_fraction,
-        cutoff_start=cutoff_start
+        target_fraction = target_fraction,
+        cutoff_start    = cutoff_start
     )
     _write(f"Адаптивный penalty cutoff: {penalty_cutoff:.4f}"
            f" (оставляем {target_fraction*100:.0f}% лучших точек)")
@@ -2768,12 +2639,13 @@ def run_pca_optimization(
     data_good = data_sort[mask_good]
     _write(f"Точек с penalty ≤ {penalty_cutoff}: {len(data_good)}")
 
+    # X_raw всегда определяется здесь — независимо от пути (bootstrap / обычный)
     X_raw = data_good[:, 1:5].copy()   # Q, gh, rh, rho0
 
     if use_log_scale:
-        X_transformed        = X_raw.copy()
-        X_transformed[:, 2]  = numpy.log10(X_raw[:, 2])
-        X_transformed[:, 3]  = numpy.log10(X_raw[:, 3])
+        X_transformed       = X_raw.copy()
+        X_transformed[:, 2] = numpy.log10(X_raw[:, 2])
+        X_transformed[:, 3] = numpy.log10(X_raw[:, 3])
         _write("Используется логарифмическое масштабирование для rh и rho0")
     else:
         X_transformed = X_raw
@@ -2799,6 +2671,7 @@ def run_pca_optimization(
 
     _write("\n" + "=" * 55)
     if bootstrap_results:
+
         if nearest_incl_used is not None:
             _write(f"PCA-модель построена на основе bootstrap "
                    f"(incl={nearest_incl_used:.2f}° → {incl:.2f}°):")
@@ -2808,7 +2681,6 @@ def run_pca_optimization(
     else:
         _write("PCA-модель построена (взвешенная, 4 параметра):")
     _write("=" * 55)
-
 
     cumvar = numpy.cumsum(pca.explained_variance_ratio_)
     for i, (ev, cv) in enumerate(zip(pca.explained_variance_ratio_, cumvar)):
@@ -2856,7 +2728,6 @@ def run_pca_optimization(
         pickle.dump(model_data, f)
     _write(f"\nМодель сохранена в {pkl_file}")
 
-
     # --- Уведомление о bootstrap ---
     if bootstrap_results:
         if nearest_incl_used is not None:
@@ -2864,6 +2735,7 @@ def run_pca_optimization(
                         f"dist={dist_used:.1f}°)\n")
         else:
             _src_txt = f"incl={incl:.2f}°\n"
+        
         send_notification(
             f"PCA-модель построена на bootstrap\n"
             f"{_src_txt}"
@@ -3024,67 +2896,17 @@ def run_pca_optimization(
         _write(f"    Размер TR         = {turbo.length:.4f}")
 
         # --- Предложение новой точки ---
-        # --- Резервации других процессов (точки «под оценкой») ---
-        active_resv = (read_active_reservations(
-                           resv_dir, reserve_ttl_sec,
-                           exclude_suffix=hostname_proc)
-                       if reserve_points else [])
-
-        # Переводим чужие резервации в текущее PCA-пространство → X_pending,
-        # чтобы acquisition штатно уводил предложение в сторону от них.
-        X_pending = None
-        if active_resv:
-            pend = []
-            for r in active_resv:
-                try:
-                    pend.append(params_to_pca_fixed(r['params'], model_data))
-                except Exception:
-                    pass
-            if pend:
-                X_pending = torch.tensor(numpy.array(pend),
-                                         dtype=dtype, device=device)
-
-        # --- Предложение новой точки ---
-        X_next    = turbo.suggest(X_obs, Y_obs, X_pending=X_pending)
+        X_next    = turbo.suggest(X_obs, Y_obs)
         pc_coords = X_next[0].cpu().numpy()
-        new_params_i = pca_to_params_fixed(pc_coords, model_data, bounds_original)
-
-        # --- Жёсткая страховка: если предложение всё же слишком близко к
-        #     чужой резервации, возмущаем кандидат в пределах TR ---
-        if reserve_points and active_resv:
-            attempt = 0
-            while (attempt < reserve_max_retries
-                   and any(reservation_dist_norm(new_params_i, r['params'],
-                                                  bounds_original) < reserve_eps
-                           for r in active_resv)):
-                attempt += 1
-                jitter    = proc_rng.normal(scale=0.1 * turbo.length,
-                                            size=pc_coords.shape)
-                pc_coords = pc_coords + jitter
-                new_params_i = pca_to_params_fixed(pc_coords, model_data,
-                                                   bounds_original)
-            if attempt > 0:
-                _write(f"    [reserve] кандидат сдвинут за {attempt} попыток "
-                       f"(избегаем дублей с {len(active_resv)} активными "
-                       f"резервациями)")
-            # Синхронизируем тензор X_next с возможным возмущением
-            X_next = torch.tensor([pc_coords], dtype=dtype, device=device)
-
-        # --- Резервируем выбранную точку до дорогого расчёта ---
-        resv_fp = (reserve_point(resv_dir, hostname_proc, new_params_i)
-                   if reserve_points else None)
 
         # --- Вычисление целевой функции ---
-        try:
-            y_next = halo_IC_lib_weights_pca_fixed(
-                pc_coords, model_data, bounds_original,
-                densityStars, datasets, alphah, betah
-            )
-        finally:
-            # Результат уже записан в UpsFile — резервацию можно снять
-            release_reservation(resv_fp)
+        y_next = halo_IC_lib_weights_pca_fixed(
+            pc_coords, model_data, bounds_original,
+            densityStars, datasets, alphah, betah
+        )
 
         # --- Сохраняем в буфер ---
+        new_params_i = pca_to_params_fixed(pc_coords, model_data, bounds_original)
         new_points_params.append(new_params_i)
         new_points_penalty.append(-y_next)   # penalty = -y_next
 
@@ -3244,23 +3066,14 @@ def compare_good_vs_acceptable(data, cutoff1=0.60, cutoff2=0.75,
 # ==============================================================
 def diagnose_pca_space(storage_patterns, host_patterns,
                        cutoff_start=0.60, incl_filter=None):
-    """
-    storage_patterns: паттерны для поиска в хранилище (все серверы)
-    host_patterns:    паттерны файлов своего сервера
-    cutoff_start:     порог отсечки по penalty
-    incl_filter:      если не None — фильтровать данные по наклонению.
-                      Если None — используется глобальная переменная incl.
-    """
-    # --- Имя файла диагностики ---
+
     diag_file = f"diagnose_pca_space_{hostname_proc}.txt"
 
-    # --- Фильтр по наклонению ---
     if incl_filter is None:
-        incl_filter = incl          # глобальная переменная
+        incl_filter = incl
     incl_msg = f"incl={incl_filter}"
 
     def _write(text):
-        """Вспомогательная функция: печать + запись в файл."""
         print(text)
         with open(diag_file, 'a') as f:
             f.write(text + '\n')
@@ -3270,18 +3083,21 @@ def diagnose_pca_space(storage_patterns, host_patterns,
     _write(f"Файл диагностики: {diag_file}")
     _write("=" * 70)
 
-    # --- Загрузка данных ---
-   # --- Загрузка данных через load_fresh_data_from_files ---
-    # Читаем ВСЕ файлы включая свой (exclude_suffix=None),
-    # так как диагностика должна видеть полную картину
+    # --- Загрузка данных с force_update ---
     _write("\nЗагрузка данных...")
+    load_from_yadisk(
+        storage_patterns = storage_patterns,
+        host_patterns    = host_patterns,
+        force_update     = True,
+    )
+
     data, file_counts = load_fresh_data_from_files(
         storage_patterns = storage_patterns,
         host_patterns    = host_patterns,
         incl_filter      = incl_filter,
-        use_log_scale    = False,      # сырые данные, без логарифмирования
-        exclude_suffix   = None,       # читаем все файлы включая свой
-        return_full      = True,       # нужен полный массив
+        use_log_scale    = False,
+        exclude_suffix   = None,
+        return_full      = True,
     )
 
     # --- Отчёт по файлам ---
@@ -3290,10 +3106,13 @@ def diagnose_pca_space(storage_patterns, host_patterns,
         _write(f"  {fname}: {cnt} строк")
 
     if data is None or len(data) == 0:
-        _write("Нет данных для диагностики.")
+        _write(f"Нет данных для incl={incl_filter}. Диагностика пропущена.")
         return None
 
     _write(f"Загружено строк (incl={incl_filter}): {len(data)}")
+
+    # --- Минимум точек для диагностики ---
+    MIN_POINTS_DIAG = 5   # меньше этого — диагностика бессмысленна
 
     # --- Выбор cutoff ---
     penalty_cutoff = cutoff_start
@@ -3308,9 +3127,9 @@ def diagnose_pca_space(storage_patterns, host_patterns,
         mask_good      = data[:, 6] <= penalty_cutoff
         data_good      = data[mask_good]
 
-        if len(data_good) == 0:
-            _write("Ошибка: не удалось отобрать точки. Пропускаем диагностику.")
-            return None
+    if len(data_good) == 0:
+        _write("Ошибка: не удалось отобрать точки. Пропускаем диагностику.")
+        return None
 
     _write(f"\nВсего точек ({incl_msg}):              {len(data)}")
     _write(f"Точек с penalty <= {penalty_cutoff:.4f}: {len(data_good)}")
@@ -3324,46 +3143,111 @@ def diagnose_pca_space(storage_patterns, host_patterns,
         _write(f"  {name:8s}: min={vals.min():8.3f}, max={vals.max():8.3f}, "
                f"mean={vals.mean():8.3f}, std={vals.std():8.3f}")
 
-    # --- Корреляционная матрица ---
+    # --- Проверка достаточности точек для PCA и корреляций ---
+    if len(data_good) < MIN_POINTS_DIAG:
+        _write(f"\nВНИМАНИЕ: Мало точек для полной диагностики "
+               f"({len(data_good)} < {MIN_POINTS_DIAG}).")
+        _write("Пропускаем корреляционную матрицу и PCA-анализ.")
+        _write("Доступна только статистика параметров (см. выше).")
+        _write("\nРекомендация: запустите bootstrap или добавьте данные.")
+
+        # Минимальная диагностика: статистика penalty
+        _write("\nСтатистика penalty:")
+        _write(f"  min={data[:, 6].min():.4f}, "
+               f"max={data[:, 6].max():.4f}, "
+               f"mean={data[:, 6].mean():.4f}")
+        _write(f"\nКоличество точек по порогам penalty:")
+        cutoffs = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80,
+                   1.0,  1.5,  2.0,  3.0]
+        for cutoff in cutoffs:
+            n_pts = numpy.sum(data[:, 6] <= cutoff)
+            _write(f"  penalty <= {cutoff:.2f}: "
+                   f"{n_pts:5d} точек ({100 * n_pts / len(data):.1f}%)")
+
+        sync_to_yadisk()
+        return data_good
+
+    # --- Корреляционная матрица (только если точек достаточно) ---
     _write("\nКорреляционная матрица:")
     _write("-" * 50)
     X    = data_good[:, 1:6]
-    corr = numpy.corrcoef(X.T)
-    _write("        Q      gh      rh    rho0     Ups")
-    for i, name in enumerate(param_names):
-        row_str = f"{name:5s} " + "".join(f"{corr[i,j]:7.3f} " for j in range(5))
-        _write(row_str)
+    
+    # Защита от вырожденных столбцов (std=0)
+    stds = X.std(axis=0)
+    if numpy.any(stds == 0):
+        _write(f"  ВНИМАНИЕ: вырожденные столбцы (std=0): "
+               f"{[param_names[i] for i, s in enumerate(stds) if s == 0]}")
+        _write("  Корреляционная матрица не вычисляется.")
+    else:
+        corr = numpy.corrcoef(X.T)
+        _write("        Q      gh      rh    rho0     Ups")
+        for i, name in enumerate(param_names):
+            row_str = (f"{name:5s} " +
+                       "".join(f"{corr[i,j]:7.3f} " for j in range(5)))
+            _write(row_str)
 
-    # --- PCA без Upsilon ---
+    # --- PCA-анализ (только если точек достаточно) ---
     _write("\nСравнение PCA с Upsilon и без:")
     _write("-" * 50)
 
-    X_with_ups = data_good[:, 1:6]
-    scaler1    = StandardScaler()
-    pca1       = PCA(n_components=4)
-    pca1.fit(scaler1.fit_transform(X_with_ups))
-    _write(f"С Upsilon:\n"
-           f"  Explained variance: {pca1.explained_variance_ratio_}\n"
-           f"  Cumulative:         {numpy.cumsum(pca1.explained_variance_ratio_)}")
+    # Максимально возможное число компонент
+    n_comp_max_with    = min(4, len(data_good) - 1, 5)   # 5 параметров с Ups
+    n_comp_max_without = min(4, len(data_good) - 1, 4)   # 4 параметра без Ups
 
-    X_no_ups = data_good[:, 1:5]
-    scaler2  = StandardScaler()
-    pca2     = PCA(n_components=4)
-    pca2.fit(scaler2.fit_transform(X_no_ups))
-    _write(f"\nБез Upsilon:\n"
-           f"  Explained variance: {pca2.explained_variance_ratio_}\n"
-           f"  Cumulative:         {numpy.cumsum(pca2.explained_variance_ratio_)}")
+    if n_comp_max_with < 1 or n_comp_max_without < 1:
+        _write(f"  Недостаточно точек для PCA "
+               f"(нужно ≥ 2, есть {len(data_good)}). Пропускаем.")
+    else:
+        X_with_ups = data_good[:, 1:6]
+        scaler1    = StandardScaler()
+        pca1       = PCA(n_components=n_comp_max_with)
+        try:
+            pca1.fit(scaler1.fit_transform(X_with_ups))
+            _write(f"С Upsilon (n_components={n_comp_max_with}):\n"
+                   f"  Explained variance: "
+                   f"{pca1.explained_variance_ratio_}\n"
+                   f"  Cumulative:         "
+                   f"{numpy.cumsum(pca1.explained_variance_ratio_)}")
+        except Exception as e:
+            _write(f"  PCA с Upsilon: ошибка — {e}")
 
-    # --- PCA с логарифмическим масштабированием ---
-    _write("\nС логарифмическим масштабированием:")
-    X_log       = X_no_ups.copy()
-    X_log[:, 2] = numpy.log10(X_no_ups[:, 2])
-    X_log[:, 3] = numpy.log10(X_no_ups[:, 3])
-    scaler3     = StandardScaler()
-    pca3        = PCA(n_components=4)
-    pca3.fit(scaler3.fit_transform(X_log))
-    _write(f"  Explained variance: {pca3.explained_variance_ratio_}\n"
-           f"  Cumulative:         {numpy.cumsum(pca3.explained_variance_ratio_)}")
+        X_no_ups = data_good[:, 1:5]
+        scaler2  = StandardScaler()
+        pca2     = PCA(n_components=n_comp_max_without)
+        try:
+            pca2.fit(scaler2.fit_transform(X_no_ups))
+            _write(f"\nБез Upsilon (n_components={n_comp_max_without}):\n"
+                   f"  Explained variance: "
+                   f"{pca2.explained_variance_ratio_}\n"
+                   f"  Cumulative:         "
+                   f"{numpy.cumsum(pca2.explained_variance_ratio_)}")
+        except Exception as e:
+            _write(f"  PCA без Upsilon: ошибка — {e}")
+
+        # --- PCA с логарифмическим масштабированием ---
+        _write("\nС логарифмическим масштабированием:")
+        X_log       = X_no_ups.copy()
+        # Защита от log(0)
+        mask_pos    = (X_log[:, 2] > 0) & (X_log[:, 3] > 0)
+        if numpy.sum(mask_pos) < 2:
+            _write("  Недостаточно точек с rh>0 и rho0>0. Пропускаем.")
+        else:
+            X_log_valid       = X_log[mask_pos].copy()
+            X_log_valid[:, 2] = numpy.log10(X_log_valid[:, 2])
+            X_log_valid[:, 3] = numpy.log10(X_log_valid[:, 3])
+            n_comp_log        = min(n_comp_max_without,
+                                    len(X_log_valid) - 1)
+            scaler3           = StandardScaler()
+            pca3              = PCA(n_components=n_comp_log)
+            try:
+                pca3.fit(scaler3.fit_transform(X_log_valid))
+                _write(f"  n_components={n_comp_log}:\n"
+                       f"  Explained variance: "
+                       f"{pca3.explained_variance_ratio_}\n"
+                       f"  Cumulative:         "
+                       f"{numpy.cumsum(pca3.explained_variance_ratio_)}")
+            except Exception as e:
+                _write(f"  PCA с log: ошибка — {e}")
 
     # --- Проверка обратного преобразования ---
     _write("\nПроверка обратного преобразования:")
@@ -3375,25 +3259,32 @@ def diagnose_pca_space(storage_patterns, host_patterns,
            f"rh={best_point[3]:.4f}, rho0={best_point[4]:.4f}, "
            f"Ups={best_point[5]:.4f}, pen={best_point[6]:.4f}")
 
-    params     = {'Q': best_point[1], 'gh': best_point[2],
-                  'rh': best_point[3], 'rho0': best_point[4]}
-    X_test     = numpy.array([[params['Q'], params['gh'],
-                               numpy.log10(params['rh']),
-                               numpy.log10(params['rho0'])]])
-    X_t_scaled = scaler3.transform(X_test)
-    pc_coords  = pca3.transform(X_t_scaled)
-    _write(f"\nPCA-координаты: {pc_coords[0]}")
+    if len(data_good) >= 2:
+        params     = {'Q': best_point[1], 'gh': best_point[2],
+                      'rh': best_point[3], 'rho0': best_point[4]}
+        X_test     = numpy.array([[params['Q'], params['gh'],
+                                   numpy.log10(max(params['rh'], 1e-10)),
+                                   numpy.log10(max(params['rho0'], 1e-10))]])
 
-    X_back_scaled = pca3.inverse_transform(pc_coords)
-    X_back        = scaler3.inverse_transform(X_back_scaled)
-    _write(f"Обратное преобразование:\n"
-           f"  Q={X_back[0,0]:.4f}, gh={X_back[0,1]:.4f}, "
-           f"rh={10**X_back[0,2]:.4f}, rho0={10**X_back[0,3]:.4f}")
-    _write(f"\nОшибка обратного преобразования:\n"
-           f"  Q:    {abs(X_back[0,0] - params['Q']):.6f}\n"
-           f"  gh:   {abs(X_back[0,1] - params['gh']):.6f}\n"
-           f"  rh:   {abs(10**X_back[0,2] - params['rh']):.6f}\n"
-           f"  rho0: {abs(10**X_back[0,3] - params['rho0']):.6f}")
+        try:
+            X_t_scaled    = scaler3.transform(X_test)
+            pc_coords     = pca3.transform(X_t_scaled)
+            _write(f"\nPCA-координаты: {pc_coords[0]}")
+
+            X_back_scaled = pca3.inverse_transform(pc_coords)
+            X_back        = scaler3.inverse_transform(X_back_scaled)
+            _write(f"Обратное преобразование:\n"
+                   f"  Q={X_back[0,0]:.4f}, gh={X_back[0,1]:.4f}, "
+                   f"rh={10**X_back[0,2]:.4f}, rho0={10**X_back[0,3]:.4f}")
+            _write(f"\nОшибка обратного преобразования:\n"
+                   f"  Q:    {abs(X_back[0,0] - params['Q']):.6f}\n"
+                   f"  gh:   {abs(X_back[0,1] - params['gh']):.6f}\n"
+                   f"  rh:   {abs(10**X_back[0,2] - params['rh']):.6f}\n"
+                   f"  rho0: {abs(10**X_back[0,3] - params['rho0']):.6f}")
+        except Exception as e:
+            _write(f"  Проверка обратного преобразования: ошибка — {e}")
+    else:
+        _write("  Недостаточно точек для проверки обратного преобразования.")
 
     # --- Статистика по cutoff ---
     _write("\nКоличество точек по порогам penalty:")
@@ -3405,16 +3296,16 @@ def diagnose_pca_space(storage_patterns, host_patterns,
                f"{n_pts:5d} точек ({100 * n_pts / len(data):.1f}%)")
 
     # --- Сравнение хороших и приемлемых ---
-    compare_good_vs_acceptable(
-        data,
-        cutoff1=cutoff_start,
-        cutoff2=min(cutoff_start * 1.25, cutoff_start + 0.15),
-        incl_filter=incl_filter,
-        diag_file=diag_file
-    )
+    if len(data_good) >= MIN_POINTS_DIAG:
+        compare_good_vs_acceptable(
+            data,
+            cutoff1     = cutoff_start,
+            cutoff2     = min(cutoff_start * 1.25, cutoff_start + 0.15),
+            incl_filter = incl_filter,
+            diag_file   = diag_file
+        )
 
     sync_to_yadisk()
-
     return data_good
 
 # ==============================================================
@@ -3461,15 +3352,13 @@ if __name__ == '__main__':
         best_params, best_Upsilon, best_penalty = run_pca_optimization(
             storage_patterns = storage_patterns,
             host_patterns    = host_patterns,
+        fallback_patterns = fallback_patterns, 
             cutoff_start     = cutoff_start,
             n_components     = 3,
             n_iter           = 40,
             length_init      = 0.6,
             use_log_scale    = True,
             resume           = do_resume,
-            pca_update_interval = 6,
-            seed_patterns    = seed_patterns,
-            seed_from_pa468  = args.seed_from_pa468,
         )
         
         finalize(best_params, best_Upsilon, best_penalty)

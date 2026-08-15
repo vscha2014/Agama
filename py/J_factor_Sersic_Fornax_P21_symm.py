@@ -49,6 +49,8 @@ penalty_cutoff  = None     # None = адаптивный (target_fraction луч
 target_fraction = 0.30     # доля лучших точек при адаптивном cutoff
 cutoff_start    = 0.60     # жёсткий потолок cutoff
 D_kpc           = 143.0    # расстояние до галактики (kpc)
+q_ap            = 1.0 - 0.31
+
 n_samples       = None     # None = все хорошие точки
 alphah          = 2.0      # параметр профиля гало
 betah           = 3.0      # параметр профиля гало
@@ -71,17 +73,16 @@ def make_output_filename(prefix, theta_max_deg, incl, ext='txt'):
     """
     Формирует имя выходного файла вида:
         {prefix}_Sersic_incl{incl:.2f}_theta{theta:.1f}.{ext}
+    Если theta_max_deg is None, суффикс _theta опускается.
 
     Примеры:
         J_factor_Sersic_incl90.00_theta0.5.txt
-        corner_plot_Sersic_incl71.85_theta0.5.pdf
+        mass_histogram_1.0_Sersic_incl90.00.pdf
     """
-    return (
-        f"{prefix}_Sersic"
-        f"_incl{incl:.2f}"
-        f"_theta{theta_max_deg:.1f}"
-        f".{ext}"
-    )
+    base = f"{prefix}_Sersic_incl{incl:.2f}"
+    if theta_max_deg is not None:
+        base += f"_theta{theta_max_deg:.1f}"
+    return f"{base}.{ext}"
 
 
 def make_output_fullpath(prefix, theta_max_deg, incl, ext='txt',
@@ -98,6 +99,13 @@ def make_output_fullpath(prefix, theta_max_deg, incl, ext='txt',
     """
     fname = make_output_filename(prefix, theta_max_deg, incl, ext)
     return os.path.join(yadisk_dir, fname)
+
+
+def compute_axRZst(incl_deg):
+    beta = incl_deg * numpy.pi / 180.0
+    sinb = numpy.sin(beta)
+    cosb = numpy.cos(beta)
+    return numpy.sqrt(q_ap**2 - cosb**2) / sinb
 
 
 # ============================================================
@@ -203,6 +211,46 @@ def load_log_data(log_files, incl_filter=90.0, verbose=True):
     return data, file_counts
 
 
+def discover_inclinations(log_files, verbose=True):
+    """
+    Сканирует лог-файлы и возвращает отсортированный список уникальных
+    наклонений (колонка 0), встречающихся в 4Ups-файлах.
+
+    Значения округляются до 0.01°, чтобы объединить идентичные наклонения,
+    записанные с разной точностью.
+    """
+    incls = set()
+
+    for filepath in log_files:
+        try:
+            with open(filepath, 'r') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 7:
+                        continue
+                    try:
+                        val = float(parts[0])
+                    except ValueError:
+                        continue
+                    if numpy.isinf(val) or numpy.isnan(val):
+                        continue
+                    incls.add(round(val, 2))
+        except FileNotFoundError:
+            if verbose:
+                print(f"  ПРЕДУПРЕЖДЕНИЕ: файл не найден: {filepath}")
+
+    result = sorted(incls)
+
+    if verbose:
+        print(f"\nНайдено уникальных наклонений: {len(result)}")
+        print(f"  {result}")
+
+    return result
+
+
 # ============================================================
 #  АДАПТИВНЫЙ CUTOFF
 # ============================================================
@@ -259,7 +307,7 @@ def weighted_percentile(values, weights, percentiles):
 # ============================================================
 
 def compute_J_factor(
-    Q, gh, rh, rho0,
+    Q, gh, rh, rho0, Upsilon,
     alphah=2.0, betah=3.0,
     cutoff=55.0, cutoff_strength=2.5,
     D_kpc=143.0,
@@ -270,6 +318,8 @@ def compute_J_factor(
 ):
     """
     Вычисляет J-фактор для профиля ТМ типа spheroid (AGAMA).
+    rho0 — нормировка плотности ТМ в единицах кода (10⁶ M☉/кпк³).
+    Upsilon — масштабный фактор массы; физическая нормировка = rho0 * Upsilon.
 
     Returns
     -------
@@ -277,7 +327,7 @@ def compute_J_factor(
     J_Msun_kpc5 : float — J-фактор в Msun²/kpc⁵·sr (до конвертации)
     """
     kpc_to_cm = 3.0857e21
-    rho_conv  = 1.989e33 / 1.602e-10 / (kpc_to_cm**3)
+    rho_conv  = 1e6 * 1.989e33 / 1.783e-24 / (kpc_to_cm**3)
 
     density_DM = agama.Density(
         type              = 'spheroid',
@@ -285,7 +335,7 @@ def compute_J_factor(
         beta              = betah,
         gamma             = gh,
         axisratioz        = Q,
-        densitynorm       = rho0,
+        densitynorm       = rho0 * Upsilon,
         scaleradius       = rh,
         outercutoffradius = cutoff,
         cutoffstrength    = cutoff_strength,
@@ -324,6 +374,45 @@ def compute_J_factor(
     J_GeV2_cm5 = J_total * (rho_conv**2) * kpc_to_cm
 
     return J_GeV2_cm5, J_total
+
+
+# ============================================================
+#  ВЫЧИСЛЕНИЕ МАСС МОДЕЛИ
+# ============================================================
+
+def compute_model_masses(
+    Q, gh, rh, rho0, Upsilon,
+    alphah=2.0, betah=3.0,
+    cutoff=55.0, cutoff_strength=2.5,
+    massSt=14.0, scaleRst=None, Sersic_m=0.80, axRZst=1.0,
+    enclosed_radii=(1.0,),
+):
+    densityHalo = agama.Density(
+        type='spheroid',
+        alpha=alphah, beta=betah,
+        gamma=gh, axisratioz=Q,
+        densitynorm=rho0 * Upsilon, scaleradius=rh,
+        outercutoffradius=cutoff, cutoffstrength=cutoff_strength,
+    )
+    densityStars = agama.Density(
+        type='Sersic', sersicIndex=Sersic_m,
+        mass=massSt * Upsilon, scaleRadius=scaleRst, axisRatioZ=axRZst,
+    )
+    densityTotal = agama.Density(densityStars, densityHalo)
+
+    result = {}
+    result['M_total_DM'] = float(densityHalo.totalMass())
+    result['M_total_stars'] = float(densityStars.totalMass())
+    result['M_total'] = float(densityTotal.totalMass())
+
+    for r in enclosed_radii:
+        m_dm = float(densityHalo.enclosedMass(r))
+        m_st = float(densityStars.enclosedMass(r))
+        result[f'M_DM_{r}'] = m_dm
+        result[f'M_stars_{r}'] = m_st
+        result[f'M_tot_{r}'] = m_dm + m_st
+
+    return result
 
 
 # ============================================================
@@ -441,7 +530,7 @@ def compute_J_from_logs(
 
         try:
             J_GeV, J_M = compute_J_factor(
-                Q=Q, gh=gh, rh=rh, rho0=rho0,
+                Q=Q, gh=gh, rh=rh, rho0=rho0, Upsilon=Upsilon,
                 alphah=alphah, betah=betah,
                 D_kpc=D_kpc,
                 theta_max_deg=theta_max_deg,
@@ -774,7 +863,7 @@ def print_summary_table(all_results):
     print("\n" + "=" * 80)
     print(f"{'СВОДНАЯ ТАБЛИЦА J-ФАКТОРА (взвешенная статистика)':^80}")
     print("=" * 80)
-    print(f"{'theta':>8s}  {'log10(J)':>10s}  "
+    print(f"{'incl':>7s}  {'theta':>8s}  {'log10(J)':>10s}  "
           f"{'+1σ':>7s}  {'-1σ':>7s}  "
           f"{'+2σ':>7s}  {'-2σ':>7s}  "
           f"{'N':>5s}  {'файл'}")
@@ -785,12 +874,151 @@ def print_summary_table(all_results):
         m1  = med - r['logJ_16']
         p2  = r['logJ_97p5'] - med
         m2  = med - r['logJ_2p5']
-        print(f"  {r['theta_max']:6.2f}°  {med:10.3f}  "
+        print(f"  {r['incl']:5.2f}°  {r['theta_max']:6.2f}°  {med:10.3f}  "
               f"{p1:+7.3f}  {m1:+7.3f}  "
               f"{p2:+7.3f}  {m2:+7.3f}  "
               f"{r['n_points']:5d}  "
               f"{os.path.basename(r['output_file'])}")
     print("=" * 80)
+
+
+# ============================================================
+#  ГИСТОГРАММЫ МАССЫ МОДЕЛИ
+# ============================================================
+
+def make_mass_histograms(
+    data_good, J_arr,
+    enclosed_radii=(1.0,),
+    massSt=14.0, scaleRst=None, Sersic_m=0.80, axRZst=1.0,
+    alphah=2.0, betah=3.0,
+    incl=None, yadisk_dir=YADISK_DIR,
+):
+    _incl = incl if incl is not None else incl_target
+    n_J = len(J_arr)
+
+    Q_arr     = data_good[:n_J, 1]
+    gh_arr    = data_good[:n_J, 2]
+    rh_arr    = data_good[:n_J, 3]
+    rho0_arr  = data_good[:n_J, 4]
+    Ups_arr   = data_good[:n_J, 5]
+
+    _axRZst = compute_axRZst(_incl)
+
+    all_radii = list(enclosed_radii) + ['total']
+    mass_data = {r: [] for r in all_radii}
+    dm_frac_data = {r: [] for r in all_radii}
+
+    for i in range(n_J):
+        try:
+            masses = compute_model_masses(
+                Q=Q_arr[i], gh=gh_arr[i], rh=rh_arr[i],
+                rho0=rho0_arr[i], Upsilon=Ups_arr[i],
+                alphah=alphah, betah=betah,
+                massSt=massSt, scaleRst=scaleRst,
+                Sersic_m=Sersic_m, axRZst=_axRZst,
+                enclosed_radii=enclosed_radii,
+            )
+        except Exception:
+            continue
+
+        for r in enclosed_radii:
+            m_tot = masses[f'M_tot_{r}']
+            m_dm  = masses[f'M_DM_{r}']
+            mass_data[r].append(m_tot)
+            dm_frac_data[r].append(m_dm / m_tot if m_tot > 0 else 0)
+
+        m_tot = masses['M_total']
+        m_dm  = masses['M_total_DM']
+        mass_data['total'].append(m_tot)
+        dm_frac_data['total'].append(m_dm / m_tot if m_tot > 0 else 0)
+
+    for r in all_radii:
+        m_vals = numpy.array(mass_data[r]) / 10.0
+        f_vals = numpy.array(dm_frac_data[r])
+        if len(m_vals) == 0:
+            continue
+
+        is_total = (r == 'total')
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        if is_total:
+            n_bins = 20
+            bin_edges = numpy.linspace(550, 850, n_bins + 1)
+        else:
+            n_bins = 20
+            pad = (m_vals.max() - m_vals.min()) * 0.1
+            lo_auto = m_vals.min() - pad
+            hi_auto = m_vals.max() + pad
+            bin_edges = numpy.linspace(lo_auto, hi_auto, n_bins + 1)
+
+        bin_widths = numpy.diff(bin_edges)
+
+        for b in range(n_bins):
+            lo, hi = bin_edges[b], bin_edges[b+1]
+            mask = (m_vals >= lo) & (m_vals < hi)
+            n_in_bin = mask.sum()
+            if n_in_bin == 0:
+                continue
+
+            f_bin = f_vals[mask]
+
+            groups = []
+            remaining = list(range(n_in_bin))
+            while remaining:
+                idx0 = remaining.pop(0)
+                group = [idx0]
+                f_ref = f_bin[idx0]
+                remaining2 = []
+                for j in remaining:
+                    if abs(f_bin[j] - f_ref) <= 0.10:
+                        group.append(j)
+                    else:
+                        remaining2.append(j)
+                remaining = remaining2
+                avg_f = f_bin[group].mean()
+                groups.append((len(group), avg_f))
+
+            n_cols = len(groups)
+            total_w = bin_widths[b] * 0.8
+            col_w = total_w / n_cols if n_cols > 0 else total_w
+
+            for col_idx, (cnt, avg_f_dm) in enumerate(groups):
+                n_dm = cnt * avg_f_dm
+                n_st = cnt * (1 - avg_f_dm)
+                x_pos = lo + bin_widths[b] * 0.1 + col_idx * col_w + col_w / 2
+
+                ax.bar(x_pos, n_dm, width=col_w * 0.85,
+                       color='#2c3e50', alpha=0.85, linewidth=0)
+                ax.bar(x_pos, n_st, width=col_w * 0.85, bottom=n_dm,
+                       color='#bdc3c7', alpha=0.85, linewidth=0)
+
+        if is_total:
+            r_label = 'полная масса'
+            ax.set_xlim(550, 850)
+        else:
+            r_label = f'r < {r} кпк'
+
+        ax.set_xlabel(r'$M\;[10^7\;M_\odot]$', fontsize=11)
+        ax.set_ylabel('Число моделей', fontsize=11)
+        ax.set_title(f'Fornax dSph, incl={_incl:.2f}°, {r_label}, {len(m_vals)} моделей',
+                     fontsize=12)
+
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='#2c3e50', label='Тёмная материя'),
+            Patch(facecolor='#bdc3c7', label='Звёзды'),
+        ]
+        if not is_total:
+            ax.legend(handles=legend_elements, fontsize=8, loc='upper right')
+
+        outfile = make_output_fullpath(
+            prefix=f'mass_histogram_{r}',
+            theta_max_deg=None, incl=_incl, ext='pdf', yadisk_dir=yadisk_dir,
+        )
+        fig.savefig(outfile, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Гистограмма массы сохранена: {outfile}")
 
 
 # ============================================================
@@ -800,57 +1028,93 @@ def print_summary_table(all_results):
 print("=" * 60)
 print("J-FACTOR COMPUTATION  Fornax dSph")
 print(f"Start: {datetime.datetime.now()}")
-print(f"incl = {incl_target}°,  D = {D_kpc} kpc")
+print(f"D = {D_kpc} kpc")
 print(f"Входные файлы  ← {YADISK_DIR}")
 print(f"Выходные файлы → {YADISK_DIR}")
 print("=" * 60)
 
+# --- Обнаружение всех наклонений, встречающихся в 4Ups-файлах ---
+_log_files = collect_log_files(
+    yadisk_dir=YADISK_DIR, patterns_rel=LOG_PATTERNS_REL, verbose=True
+)
+incl_values = discover_inclinations(_log_files, verbose=True)
+if not incl_values:
+    raise RuntimeError("Не найдено ни одного наклонения в лог-файлах.")
+
 all_results = []
 
-# --- Расчёт для каждого theta ---
-for _theta in theta_list:
-    print(f"\n{'='*50}")
-    print(f"theta_max = {_theta}°")
-    print('='*50)
+_theta_corner = 0.5
+_massSt   = 14.0
+_scaleRst = numpy.pi * D_kpc / 180 * 16.4 / 60
+_Sersic_m = 0.80
 
-    try:
-        _results, _J_arr, _data_used = compute_J_from_logs(
-            theta_max_deg = _theta,
-        )
-        all_results.append(_results)
+# --- Цикл по всем наклонениям из 4Ups-файлов ---
+for _incl in incl_values:
+    print(f"\n{'#'*60}")
+    print(f"# Наклонение incl = {_incl}°")
+    print('#'*60)
 
-    except Exception as _e:
-        print(f"  ОШИБКА для theta={_theta}: {_e}")
-        continue
+    _corner_data = None   # (data_good, J_arr, results) для theta_corner
 
-# --- Сводная таблица ---
+    # --- Расчёт для каждого theta ---
+    for _theta in theta_list:
+        print(f"\n{'='*50}")
+        print(f"incl={_incl}°  theta_max = {_theta}°")
+        print('='*50)
+
+        try:
+            _results, _J_arr, _data_used = compute_J_from_logs(
+                theta_max_deg = _theta,
+                incl_filter   = _incl,
+            )
+            all_results.append(_results)
+            if abs(_theta - _theta_corner) < 1e-9:
+                _corner_data = (_data_used, _J_arr, _results)
+
+        except Exception as _e:
+            print(f"  ОШИБКА для incl={_incl}, theta={_theta}: {_e}")
+            continue
+
+    # --- Corner-plot + гистограммы массы для theta_corner ---
+    if do_corner_plot and _corner_data is not None:
+        _data_c, _J_c, _res_c = _corner_data
+        try:
+            make_corner_plot(
+                data_good     = _data_c,
+                J_arr         = _J_c,
+                theta_max_deg = _theta_corner,
+                incl          = _incl,
+                yadisk_dir    = YADISK_DIR,
+                title         = (
+                    f'Fornax dSph  |  incl={_incl:.2f}°  '
+                    f'|  theta<{_theta_corner:.1f}°  '
+                    f'|  D={D_kpc} kpc\n'
+                    f'{len(_J_c)} models  |  '
+                    f'log10(J) = '
+                    f'{_res_c["logJ_median"]:.2f} ± '
+                    f'{_res_c["logJ_std"]:.2f}'
+                ),
+            )
+        except Exception as _e:
+            print(f"  Ошибка corner-plot (incl={_incl}): {_e}")
+
+        try:
+            make_mass_histograms(
+                data_good=_data_c,
+                J_arr=_J_c,
+                enclosed_radii=(1.0,),
+                massSt=_massSt,
+                scaleRst=_scaleRst,
+                Sersic_m=_Sersic_m,
+                axRZst=None,
+                incl=_incl,
+                yadisk_dir=YADISK_DIR,
+            )
+        except Exception as _e:
+            print(f"  Ошибка гистограмм массы (incl={_incl}): {_e}")
+
+# --- Сводная таблица (все наклонения и theta) ---
 if all_results:
     print_summary_table(all_results)
-
-# --- Corner-plot для theta=0.5° ---
-if do_corner_plot:
-    _theta_corner = 0.5
-    try:
-        _res_c, _J_c, _data_c = compute_J_from_logs(
-            theta_max_deg = _theta_corner,
-        )
-        make_corner_plot(
-            data_good     = _data_c,
-            J_arr         = _J_c,
-            theta_max_deg = _theta_corner,
-            incl          = incl_target,
-            yadisk_dir    = YADISK_DIR,
-            title         = (
-                f'Fornax dSph  |  incl={incl_target:.2f}°  '
-                f'|  theta<{_theta_corner:.1f}°  '
-                f'|  D={D_kpc} kpc\n'
-                f'{len(_J_c)} models  |  '
-                f'log10(J) = '
-                f'{_res_c["logJ_median"]:.2f} ± '
-                f'{_res_c["logJ_std"]:.2f}'
-            ),
-        )
-    except Exception as _e:
-        print(f"  Ошибка corner-plot: {_e}")
 
 print(f"\nГотово: {datetime.datetime.now()}")

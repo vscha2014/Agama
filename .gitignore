@@ -19,3 +19,19 @@ Makefile.local
 .venv-ai/
 doc/ai/_tmp/
 py/reservations_i*/
+py/Jcomputed_from_raw*.txt
+py/profile_corner_*.pdf
+py/profile_corner_*.png
+py/mass_histogram_all_incl_*.pdf
+py/mass_histogram_all_incl_*.png
+doc/*.odp
+py/4Ups*txt
+py/*log
+py/mass_histogram*pdf
+analise/*
+
+# Артефакты эксперимента orblib_exp (Fornax_P21_PCA_w3Sersic_orblib_exp.py).
+# Новые имена НЕ совпадают с закоммиченными примерами 4Ups*/4result*.
+py/orblib/
+py/out_*.txt
+py/log_*.txt
