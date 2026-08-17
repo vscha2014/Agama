@@ -35,3 +35,7 @@ py/analise/
 py/orblib/
 py/out_*.txt
 py/log_*.txt
+# Tar-шарды орблибов (launch_orblib_exp.sh): временные каталоги скачивания/
+# сборки (остаются лишь при аварии) и tar-файлы, если окажутся в py/.
+py/.orblib_shards_*/
+py/orblib_*.tar

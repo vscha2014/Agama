@@ -81,6 +81,10 @@ parser.add_argument('--save-orblib', action='store_true',
                          '(savez_compressed, локально в --orblib-dir).')
 parser.add_argument('--orblib-dir', dest='orblib_dir', type=str, default='orblib',
                     help='Каталог для файлов библиотек орбит. По умолчанию ./orblib.')
+parser.add_argument('--reuse-orblib', action='store_true',
+                    help='Переиспользовать сохранённые библиотеки орбит: перед '
+                         'agama.orbit искать .npz в --orblib-dir по контент-ключу '
+                         '(ТОЛЬКО локальные файлы, без сети). По умолчанию ВЫКЛ.')
 args = parser.parse_args()
 
 if args.n_threads is not None:
@@ -102,6 +106,7 @@ GH_ID       = args.gh_id             # 0 = номинальные GH; >0 = ре�
 SER_ID      = args.ser_id            # 0 = номинальный Серсик; >0 = реализация возмущения (future)
 SAVE_ORBLIB = args.save_orblib       # сохранять библиотеку орбит для каждой модели
 ORBLIB_DIR  = args.orblib_dir
+REUSE_ORBLIB = args.reuse_orblib     # lookup сохранённых библиотек перед agama.orbit
 orblib_counter = 0                   # сквозной счётчик сохранённых библиотек орбит
 
 # Пункты 3-4 (возмущение GH / Серсика) — задел для дальнейшей доработки.
@@ -113,8 +118,19 @@ if GH_ID != 0 or SER_ID != 0:
         "Идентификатор их резервирует для дальнейшей доработки. "
         "Сейчас запускайте только с gh_id=0 и ser_id=0.")
 
-if SAVE_ORBLIB:
+if SAVE_ORBLIB or REUSE_ORBLIB:
     os.makedirs(ORBLIB_DIR, exist_ok=True)
+
+def orblib_key(Q, gh, rh, rho0):
+    """Контент-ключ библиотеки орбит: имя .npz и путь в ORBLIB_DIR.
+    ЕДИНАЯ точка для save и lookup. Ключ зависит от (Q, gh, rh, rho0,
+    incl, DOUBLE, N_BIN, SER_ID); НЕ зависит от gh_id (см. комментарий
+    в блоке сохранения) и от hostname."""
+    _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
+    _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
+    name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
+            f"_ser{SER_ID}_{_phash}.npz")
+    return name, os.path.join(ORBLIB_DIR, name)
 
 # Идентификатор эксперимента: кодирует (1) удвоение, (2) число звёзд/апертуру,
 # (3) реализацию GH, (4) реализацию Серсика. incl остаётся столбцом данных и
@@ -1062,26 +1078,63 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             lmax=4, mmax=0, gridSizeR=23
         )
         
-        _t_sample = time.perf_counter()
-        ic = numpy.vstack((
-            densityStars.sample(int(numOrbits), potential=pot_gal)[0]
-        ))
-        sample_time_s = time.perf_counter() - _t_sample
-        
-        _t_orbit = time.perf_counter()
-        inttime = pot_gal.Tcirc(ic) * intTime
-        matrices = agama.orbit(
-            potential=pot_gal, 
-            ic=ic, 
-            time=inttime, 
-            Omega=0.0,
-            targets=[d.target for d in datasets], 
-            trajsize=trajsize
-        )
-        orbit_time_s = time.perf_counter() - _t_orbit
-        matrices = matrices[:-1]
-        print(f"  [orbitlib] sample={sample_time_s:.1f}s orbit={orbit_time_s:.1f}s "
-              f"(numOrbits={numOrbits}, trajsize={trajsize}, intTime={intTime})")
+        # --- Lookup сохранённой библиотеки орбит (--reuse-orblib) ---
+        # ТОЛЬКО локальные файлы в ORBLIB_DIR (никакой сети в горячем цикле);
+        # синхронизацию с Я.Диском делает оркестратор до/после запуска.
+        _ol_name, _ol_path = orblib_key(Q, gh, rh, rho0)
+        orblib_loaded = False
+        if REUSE_ORBLIB and os.path.exists(_ol_path):
+            _t_load = time.perf_counter()
+            try:
+                with numpy.load(_ol_path) as _npz:
+                    _meta = dict(incl=float(_npz['incl']),
+                                 double=int(_npz['double']),
+                                 n_bin=int(_npz['n_bin']),
+                                 ser_id=int(_npz['ser_id']),
+                                 numOrbits=int(_npz['numOrbits']))
+                    _meta_exp = dict(incl=float(incl), double=int(DOUBLE),
+                                     n_bin=N_BIN, ser_id=SER_ID,
+                                     numOrbits=int(numOrbits))
+                    if _meta == _meta_exp:
+                        matrices = [numpy.asarray(_npz['matrix_dens']),
+                                    numpy.asarray(_npz['matrix_kinem'])]
+                        ic = numpy.asarray(_npz['ic'])
+                        orblib_loaded = True
+                    else:
+                        print(f"  [orblib] ВНИМАНИЕ: {_ol_name} найден, но метаданные "
+                              f"не совпадают: файл={_meta}, ожидается={_meta_exp} — пересчёт")
+            except Exception as _e:
+                print(f"  [orblib] ВНИМАНИЕ: ошибка чтения {_ol_name}: {_e} — пересчёт")
+            if orblib_loaded:
+                # Время загрузки учитываем как orbit_time_s (честное сравнение
+                # стоимости оценки в логах при reuse vs расчёте).
+                sample_time_s = 0.0
+                orbit_time_s = time.perf_counter() - _t_load
+                print(f"  [orblib] reuse {_ol_name}: load={orbit_time_s:.2f}s "
+                      f"dtype={matrices[0].dtype} "
+                      f"dens={matrices[0].shape} kinem={matrices[1].shape}")
+
+        if not orblib_loaded:
+            _t_sample = time.perf_counter()
+            ic = numpy.vstack((
+                densityStars.sample(int(numOrbits), potential=pot_gal)[0]
+            ))
+            sample_time_s = time.perf_counter() - _t_sample
+
+            _t_orbit = time.perf_counter()
+            inttime = pot_gal.Tcirc(ic) * intTime
+            matrices = agama.orbit(
+                potential=pot_gal,
+                ic=ic,
+                time=inttime,
+                Omega=0.0,
+                targets=[d.target for d in datasets],
+                trajsize=trajsize
+            )
+            orbit_time_s = time.perf_counter() - _t_orbit
+            matrices = matrices[:-1]
+            print(f"  [orbitlib] sample={sample_time_s:.1f}s orbit={orbit_time_s:.1f}s "
+                  f"(numOrbits={numOrbits}, trajsize={trajsize}, intTime={intTime})")
 
         # --- Сохранение библиотеки орбит (matrices + ic) ---
         # Имя КОНТЕНТ-АДРЕСНОЕ по физике модели: (incl, удвоение, n_bin,
@@ -1094,14 +1147,12 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         # Орбитные IC стохастичны (RNG AGAMA) → для одних параметров содержимое
         # у разных процессов различается; берём первую готовую (skip-if-exists),
         # одной реализации достаточно. Запись атомарная (tmp + os.replace).
+        # Ключ строится в orblib_key() — общая точка для save и lookup.
+        # Матрицы хранятся в float64 (не float32) — для bit-воспроизводимости
+        # penalty при reuse; цена — ~2x размер файла (логируется ниже).
         orblib_save_info = None
-        if SAVE_ORBLIB:
+        if SAVE_ORBLIB and not orblib_loaded:
             orblib_counter += 1
-            _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
-            _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
-            _ol_name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
-                        f"_ser{SER_ID}_{_phash}.npz")
-            _ol_path = os.path.join(ORBLIB_DIR, _ol_name)
             if os.path.exists(_ol_path):
                 _ol_mb = os.path.getsize(_ol_path) / 1e6
                 orblib_save_info = (_ol_name, _ol_mb, 0.0)
@@ -1110,14 +1161,18 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                 _t_ol  = time.perf_counter()
                 _ol_tmp = f"{_ol_path}.{os.getpid()}.tmp"
                 try:
+                    _arr64 = dict(
+                        ic           = ic.astype(numpy.float64),
+                        inttime      = numpy.asarray(inttime, dtype=numpy.float64),
+                        matrix_dens  = numpy.asarray(matrices[0], dtype=numpy.float64),
+                        matrix_kinem = numpy.asarray(matrices[1], dtype=numpy.float64),
+                    )
+                    _raw64_mb = sum(a.nbytes for a in _arr64.values()) / 1e6
                     # Файл-объект → numpy НЕ добавляет .npz к имени (детерминировано)
                     with open(_ol_tmp, 'wb') as _fh:
                         numpy.savez_compressed(
                             _fh,
-                            ic           = ic.astype(numpy.float32),
-                            inttime      = numpy.asarray(inttime, dtype=numpy.float32),
-                            matrix_dens  = numpy.asarray(matrices[0], dtype=numpy.float32),
-                            matrix_kinem = numpy.asarray(matrices[1], dtype=numpy.float32),
+                            **_arr64,
                             Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
                             numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
                             gridv=gridv, degree=degree, ghorder=ghorder,
@@ -1129,6 +1184,9 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                     orblib_save_info = (_ol_name, _ol_mb, _ol_dt)
                     print(f"  [orblib] saved {_ol_name} ({_ol_mb:.1f} MB, {_ol_dt:.1f}s, "
                           f"dens={numpy.shape(matrices[0])} kinem={numpy.shape(matrices[1])})")
+                    print(f"  [orblib] float64: raw={_raw64_mb:.1f} MB "
+                          f"(float32 было бы {_raw64_mb/2:.1f} MB), "
+                          f"после сжатия {_ol_mb:.1f} MB")
                 except Exception as _e:
                     print(f"  [orblib] ОШИБКА сохранения {_ol_name}: {_e}")
                     if os.path.exists(_ol_tmp):
@@ -1274,6 +1332,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             f.write(f"# orblib saved: {orblib_save_info[0]} "
                     f"size_MB={orblib_save_info[1]:.3f} "
                     f"save_s={orblib_save_info[2]:.3f}\n")
+        elif orblib_loaded:
+            f.write(f"# orblib reused: {_ol_name} load_s={orbit_time_s:.3f}\n")
         f.write("# End of history\n\n")
     
     print("4UpsBoTorch writed")
