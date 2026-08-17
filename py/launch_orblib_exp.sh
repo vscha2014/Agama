@@ -125,26 +125,37 @@ log() {
 notify() {
     local msg="$1"
     local priority="${2:-default}"
-    curl -s \
+    if curl -s -f \
         -H "Title: OrblibExp ${HOSTNAME_ENV}" \
         -H "Priority: ${priority}" \
         -d "$msg" \
-        "${NTFY_SERVER}/${NTFY_TOPIC}" || true
+        "${NTFY_SERVER}/${NTFY_TOPIC}" > /dev/null 2>>"$LOGFILE"; then
+        :
+    else
+        # Не даём set -e упасть на неудаче notify; фиксируем в лог, чтобы
+        # было видно, что уведомление не дошло (сеть/ntfy недоступны).
+        log "  ~ ntfy: не удалось отправить уведомление ('${msg}')"
+    fi
 }
 
 schedule_shutdown() {
     local delay="$1"
     local reason="$2"
-    if [ "$DO_SHUTDOWN" -ne 1 ]; then
-        log "Выключение пропущено (--no-shutdown): ${reason}"
-        return 0
-    fi
+    # Идемпотентность (SHUTDOWN_DONE) ставим ПЕРВОЙ, до ветвления по
+    # --no-shutdown — иначе on_exit не узнаёт, что штатное завершение уже
+    # обработано, и шлёт дублирующее аварийное уведомление.
     if [ "$SHUTDOWN_DONE" -eq 1 ]; then
         return 0
     fi
     SHUTDOWN_DONE=1
-    log "Выключение VM через ${delay} мин (${reason})..."
+    # Лог заливаем в любом случае (даже без реального выключения) — чтобы
+    # результат был на Я.Диске независимо от --no-shutdown.
     upload_to_yadisk "$LOGFILE" || true
+    if [ "$DO_SHUTDOWN" -ne 1 ]; then
+        log "Выключение пропущено (--no-shutdown): ${reason}"
+        return 0
+    fi
+    log "Выключение VM через ${delay} мин (${reason})..."
     sudo shutdown -h +"$delay" "AGAMA orblib_exp: ${reason}" || true
 }
 
@@ -424,6 +435,10 @@ run_container() {
     else
         merge_label="RESULT-ERR(${exit_code}): incl=${INCL}, exp=${EXP_ID}, suffix=${sfx}, host=${HOSTNAME_ENV}"
         log "  ✗ Контейнер $sfx завершён с кодом $exit_code — объединяем частичные файлы"
+        # Немедленное уведомление о падении ЭТОГО контейнера — не ждём
+        # финального summary (который может не наступить, если упадут все).
+        local err_msg="Контейнер ${sfx} (${HOSTNAME_ENV}, exp=${EXP_ID}, incl=${INCL}) завершился с ошибкой (код ${exit_code}). Лог: dockerlog_${sfx}_${EXP_ID}_i${INCL}_${TIMESTAMP}.log"
+        notify "$err_msg" "high"
     fi
 
     merge_proc_files "$sfx" "$merge_label"
@@ -434,7 +449,9 @@ run_container() {
         upload_to_yadisk "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
     ) 200>"${WORK_DIR}/.upload_lock_orblib"
 
-    # Диагностический лог процесса (log_*) и лог контейнера
+    # Диагностический лог процесса (log_*) и лог контейнера — заливаем
+    # ВСЕГДА (в т.ч. при ошибке), чтобы traceback был на Я.Диске независимо
+    # от исхода остальных контейнеров/финальных шагов оркестратора.
     upload_to_yadisk "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.txt"
     upload_to_yadisk "$proc_log"
 
@@ -577,8 +594,17 @@ for i in $(seq 0 $((N_PROC - 1))); do
     fi
 done
 
-DONE_COUNT=$(ls "${WORK_DIR}"/.done_orblib_* 2>/dev/null | wc -l)
+# ВАЖНО: НЕ считать через `ls .../.done_orblib_* | wc -l` — под `set -e -o
+# pipefail`, если ни один контейнер не создал .done_orblib_* (все упали),
+# `ls` возвращает ненулевой код (glob не раскрылся), pipefail транслирует
+# его в статус всего конвейера → `set -e` аварийно валит ВЕСЬ скрипт на
+# этой строке, минуя ШАГ 4-6 (в т.ч. финальную заливку лога и уведомление).
+# Считаем из уже отслеженного FAILED — без обращения к файловой системе.
+DONE_COUNT=$((N_PROC - FAILED))
 log "  Успешно: ${DONE_COUNT}/${N_PROC}, ошибок: ${FAILED}"
+# Промежуточная заливка мастер-лога — чтобы результат был на Я.Диске уже
+# здесь, даже если что-то в ШАГ 4-6 позже пойдёт не так.
+upload_to_yadisk "$LOGFILE"
 
 # ==============================================================
 # ШАГ 4: ФИНАЛЬНАЯ ПРОВЕРКА ОБЪЕДИНЕНИЯ
