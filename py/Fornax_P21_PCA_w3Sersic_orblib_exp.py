@@ -124,12 +124,16 @@ if SAVE_ORBLIB or REUSE_ORBLIB:
 def orblib_key(Q, gh, rh, rho0):
     """Контент-ключ библиотеки орбит: имя .npz и путь в ORBLIB_DIR.
     ЕДИНАЯ точка для save и lookup. Ключ зависит от (Q, gh, rh, rho0,
-    incl, DOUBLE, N_BIN, SER_ID); НЕ зависит от gh_id (см. комментарий
-    в блоке сохранения) и от hostname."""
+    incl, DOUBLE, N_BIN, SER_ID, GEOM_HASH); НЕ зависит от gh_id (см.
+    комментарий в блоке сохранения) и от hostname.
+    GEOM_HASH (сетка gridx/gridy + апертуры sectAPP, см. ниже по коду)
+    гарантирует, что любое изменение построения сетки/разбиения на апертуры
+    даёт другое имя файла — коллизия со старыми несовместимыми шардами
+    исключена по построению, а не отлавливается постфактум при lookup."""
     _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
     _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
     name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
-            f"_ser{SER_ID}_{_phash}.npz")
+            f"_ser{SER_ID}_geom{GEOM_HASH}_{_phash}.npz")
     return name, os.path.join(ORBLIB_DIR, name)
 
 # Идентификатор эксперимента: кодирует (1) удвоение, (2) число звёзд/апертуру,
@@ -332,6 +336,7 @@ add_vleP         = [[],[],[],[],[],[],[],[],[]]
 sect_i   = [0,0,0,0,0,0,0,0,0]
 app_num_j= [0,0,0,0,0,0,0,0,0]
 max_a2   = [0,0,0,0,0,0,0,0,0]
+sector_star_count = [0,0,0,0,0,0,0,0,0]  # диагностика: сколько звёзд попало в каждый сектор
 sector = 0
 for j in range(len(xy_a2vleP_P21)):
     if(app_num_j[0]>n_bin-1) :
@@ -367,6 +372,7 @@ for j in range(len(xy_a2vleP_P21)):
                         sector = 7
 
         max_a2[sector] = xy_a2vleP_P21['a2'][j]
+        sector_star_count[sector] += 1
         if(app_num_j[sector]>n_bin-1) :
             sectors_P21RvleP[sector].extend(numpy.array([add_vleP[sector]]))
             add_vleP[sector] = []
@@ -380,6 +386,7 @@ for j in range(len(xy_a2vleP_P21)):
     else:
         add_vleP[0].append(xy_a2vleP_P21[['vl', 'err_v', 'prob']][j])
         app_num_j[0] += xy_a2vleP_P21['prob'][j]
+        sector_star_count[0] += 1
         if(app_num_j[0]>n_bin-1) :
             sectors_P21RvleP[0].extend(numpy.array([add_vleP[0]]))
             for s in range(len(bound_circR)):
@@ -388,6 +395,25 @@ for j in range(len(xy_a2vleP_P21)):
 for s in range(1,len(sectors_P21RvleP)):
     sectors_P21RvleP[s].extend(numpy.array([add_vleP[s]]))
     bound_circR[s].append(max_a2[s]**0.5 + 0.01)
+
+# --- Guard: вырожденные секторы -----------------------------------------
+# При больших n_bin (или неудачном разбиении) сектор может не получить ни
+# одной звезды за пределами центральной апертуры (max_a2[s] остаётся 0).
+# Тогда bound_circR[s] = [R_центр, 0.01] — внешний радиус МЕНЬШЕ внутреннего,
+# кольцо вырождено (инвертировано), и падение произойдёт много позже в
+# agama.Target с невнятным сообщением. Проверяем монотонность границ и
+# наличие хотя бы одной звезды в каждом секторе явно, здесь и сейчас.
+for s in range(1, len(bound_circR)):
+    n_apertures_s = len(bound_circR[s]) - 1
+    if sector_star_count[s] == 0 or any(
+        bound_circR[s][k+1] <= bound_circR[s][k] for k in range(len(bound_circR[s]) - 1)
+    ):
+        raise RuntimeError(
+            f"Сектор {s}: {sector_star_count[s]} звёзд, {n_apertures_s} апертур "
+            f"при n_bin={n_bin} — недостаточно данных для построения апертур этого "
+            f"сектора (границы: {bound_circR[s]}). Уменьшите n_bin или проверьте "
+            f"разбиение на секторы."
+        )
 
 circ_points = [[],[],[],[],[],[],[],[],[]]
 phit=numpy.linspace(0, 2*numpy.pi, 121)
@@ -684,18 +710,52 @@ kinemParams2 = dict(
 n_grids = 51
 n_grids_x_per_bin = n_grids / len(bound_circR[1])
 gridx_min = bound_circR[0][0] / n_grids_x_per_bin
-gridx_max = bound_circR[1][-1] + gridx_min
-gridx = agama.nonuniformGrid(nnodes=n_grids+1,xmin=gridx_min,xmax=gridx_max)
-gridx = numpy.hstack( (list(reversed(-gridx)),gridx[1:]) )
-print(gridx)
-
 n_grids_y_per_bin = n_grids /  len(bound_circR[3])
 gridy_min = bound_circR[0][0] * q_ap / n_grids_y_per_bin
-gridy_max = bound_circR[3][-1]* q_ap + gridy_min
-gridy = agama.nonuniformGrid(nnodes=n_grids+1,xmin=gridy_min,xmax=gridy_max)
+
+# --- Вариант A: сетка строится по ФАКТИЧЕСКИМ апертурам, а не по границам
+# секторов 1/3 (bound_circR[1][-1]/bound_circR[3][-1]). Это гарантирует
+# покрытие всех апертур сеткой при любом n_bin/double/max_r/симметрии
+# (раньше при --no-double диагональные секторы могли выходить за сетку,
+# построенную только по секторам 1 и 3 → "datacube does not cover all
+# apertures"). Пересобираем gridx/gridy с тем же числом узлов и тем же
+# xmin (плотность у центра), но с xmax = максимум |x|/|y| по всем вершинам
+# реальных апертур (+ запас gridx_min/gridy_min, как раньше).
+_app_pts  = numpy.vstack(sectAPP)
+gridx_max = numpy.abs(_app_pts[:, 0]).max() + gridx_min
+gridy_max = numpy.abs(_app_pts[:, 1]).max() + gridy_min
+gridx = agama.nonuniformGrid(nnodes=n_grids+1, xmin=gridx_min, xmax=gridx_max)
+gridx = numpy.hstack( (list(reversed(-gridx)),gridx[1:]) )
+print(gridx)
+gridy = agama.nonuniformGrid(nnodes=n_grids+1, xmin=gridy_min, xmax=gridy_max)
 gridy = numpy.hstack( (list(reversed(-gridy)),gridy[1:]) )
 print(gridy)
-   
+
+# --- Диагностика перед созданием Target: если сетка не покрывает апертуры,
+# это должно быть видно из лога СРАЗУ, а не через невнятную ошибку AGAMA.
+print("Сводка по секторам перед построением Target:")
+print(f"  центральная апертура: {sector_star_count[0]} звёзд, R={bound_circR[0][0]:.4f}")
+for s in range(1, len(bound_circR)):
+    print(f"  сектор {s}: {sector_star_count[s]} звёзд, "
+          f"{len(bound_circR[s]) - 1} апертур, R_outer={bound_circR[s][-1]:.4f}")
+print(f"  всего апертур: {len(sectAPP)}, макс. |x|={numpy.abs(_app_pts[:,0]).max():.4f}, "
+      f"макс. |y|={numpy.abs(_app_pts[:,1]).max():.4f}")
+print(f"  сетка gridx: [{gridx.min():.4f}, {gridx.max():.4f}], узлов={len(gridx)}")
+print(f"  сетка gridy: [{gridy.min():.4f}, {gridy.max():.4f}], узлов={len(gridy)}")
+
+# --- Geometry hash: короткий хэш от (gridx, gridy, sectAPP) для orblib_key().
+# Любое изменение построения сетки/апертур (n_bin, double, max_r, сам код
+# биннинга) даёт другой GEOM_HASH → другое имя файла библиотеки орбит →
+# коллизия со старыми несовместимыми шардами исключена ПО ПОСТРОЕНИЮ, а не
+# отлавливается постфактум при попытке reuse.
+_geom_hasher = hashlib.md5()
+_geom_hasher.update(numpy.ascontiguousarray(gridx, dtype='float64').tobytes())
+_geom_hasher.update(numpy.ascontiguousarray(gridy, dtype='float64').tobytes())
+for _app in sectAPP:
+    _geom_hasher.update(numpy.ascontiguousarray(_app, dtype='float64').tobytes())
+GEOM_HASH = _geom_hasher.hexdigest()[:8]
+print(f"  GEOM_HASH={GEOM_HASH} (сетка+апертуры; входит в имя файла библиотеки орбит)")
+
 target       = agama.Target(apertures=sectAPP, gridx=gridx, gridy=gridy, **kinemParams2)
 datacube_P21 = target((xv_P21,prob_P21)).reshape(len(sectAPP), -1)
 ghm_moments_P21 = agama.ghMoments(degree=degree, gridv=gridv, matrix=datacube_P21, ghorder=ghorder)
