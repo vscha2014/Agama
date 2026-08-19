@@ -570,19 +570,41 @@ def read_active_reservations(resv_dir, ttl_sec, exclude_suffix=None):
                     'mtime': mt, 'path': fp})
     return out
 
-def reserve_point(resv_dir, suffix, params):
-    """Атомарно создаёт файл-резервацию. Имя уникально (suffix+pid+время),
-    поэтому коллизий имён нет. Возвращает путь к файлу резервации."""
-    fname = f"{suffix}_{os.getpid()}_{int(time.time() * 1e6)}.resv"
-    fp = os.path.join(resv_dir, fname)
-    fd = os.open(fp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    try:
-        os.write(fd, (
-            f"{params['Q']:.15g} {params['gh']:.15g} "
-            f"{params['rh']:.15g} {params['rho0']:.15g} {suffix}\n"
-        ).encode())
-    finally:
-        os.close(fd)
+def _claim_file(fp, payload, ttl_sec):
+    for _ in range(2):
+        try:
+            fd = os.open(fp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                stale = time.time() - os.path.getmtime(fp) > ttl_sec
+            except FileNotFoundError:
+                continue
+            if not stale:
+                return False
+            try:
+                os.remove(fp)
+                print(f"  [reserve] stale lock reclaimed: {os.path.basename(fp)}")
+            except FileNotFoundError:
+                pass
+            continue
+        try:
+            os.write(fd, payload.encode())
+        finally:
+            os.close(fd)
+        return True
+    return False
+
+def reserve_point(resv_dir, suffix, params, ttl_sec):
+    """Атомарно резервирует фиксированный контент-ключ расчётной точки."""
+    orblib_name, _ = orblib_key(
+        params['Q'], params['gh'], params['rh'], params['rho0'])
+    fp = os.path.join(resv_dir, f"{orblib_name}.resv")
+    payload = (
+        f"{params['Q']:.15g} {params['gh']:.15g} "
+        f"{params['rh']:.15g} {params['rho0']:.15g} {suffix}\n"
+    )
+    if not _claim_file(fp, payload, ttl_sec):
+        raise FileExistsError(fp)
     return fp
 
 def release_reservation(fp):
@@ -615,10 +637,19 @@ def _try_reserve_candidate(params, resv_dir, reserve_eps,
                                  bounds_original) < reserve_eps:
             return None, True
     try:
-        fp = reserve_point(resv_dir, hostname_proc, params)
-    except Exception:
-        fp = None
+        fp = reserve_point(resv_dir, hostname_proc, params, reserve_ttl_sec)
+    except FileExistsError:
+        return None, True
+    except OSError as e:
+        print(f"  [reserve] claim failed: {e}")
+        return None, True
+    print(f"  [reserve] claimed: {os.path.basename(fp)}")
     return fp, False
+
+class OrblibBusyError(RuntimeError):
+    pass
+
+_ORBLIB_BUILD_TTL_SEC = 7200
 
 massSt    = 14.0
 scaleRst  =  sc*16.4/60
@@ -1118,6 +1149,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
     
 #    print(f"PCA coords: {pc_coords}")
     print(f"  → Q={Q:.4f}, gh={gh:.4f}, rh={rh:.4f}, rho0={rho0:.4f}")
+    _ol_build_fp = None
     
     try:
         densityHalo = agama.Density(
@@ -1175,6 +1207,13 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                       f"dens={matrices[0].shape} kinem={matrices[1].shape}")
 
         if not orblib_loaded:
+            if SAVE_ORBLIB:
+                _ol_build_fp = f"{_ol_path}.building"
+                _build_payload = f"{hostname_proc} {time.time():.6f}\n"
+                if not _claim_file(_ol_build_fp, _build_payload,
+                                   _ORBLIB_BUILD_TTL_SEC):
+                    raise OrblibBusyError(_ol_name)
+                print(f"  [orblib] build claimed: {_ol_name}")
             _t_sample = time.perf_counter()
             ic = numpy.vstack((
                 densityStars.sample(int(numOrbits), potential=pot_gal)[0]
@@ -1255,9 +1294,13 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                         except OSError:
                             pass
 
+    except OrblibBusyError:
+        raise
     except Exception as e:
         print(f"  Ошибка при создании модели: {e}")
         return -1e6
+    finally:
+        release_reservation(_ol_build_fp)
     
     num_dof = sum([sum(d.cons_err > 0) for d in datasets])
     mult = num_dof**0.5 * 10
@@ -1773,6 +1816,8 @@ def bootstrap_initial_points_from_nearest_incl(
                 print(f"    ✗ penalty={penalty:.6f} (невалидное значение)")
                 n_failed += 1
 
+        except OrblibBusyError:
+            print("    [orblib] build busy → следующий bootstrap-кандидат")
         except Exception as e:
             print(f"    ✗ Ошибка вычисления: {e}")
             n_failed += 1
@@ -1922,6 +1967,8 @@ def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
                 print(f"    [{i+1}/{len(candidates)}] ✓ penalty={penalty:.6f}")
             else:
                 print(f"    [{i+1}/{len(candidates)}] ✗ penalty={penalty:.6f}")
+        except OrblibBusyError:
+            print(f"    [{i+1}/{len(candidates)}] [orblib] build busy → следующая")
         except Exception as e:
             print(f"    [{i+1}/{len(candidates)}] ✗ ошибка: {e}")
         finally:
@@ -2188,15 +2235,19 @@ def adaptive_penalty_cutoff(data, target_fraction=0.3, min_points=10, cutoff_sta
     Выбирает cutoff так, чтобы оставить target_fraction лучших точек.
     Гарантирует, что будет выбрано не менее min_points (чтобы PCA не падал).
     """
-    penalties = data[:, 6]
+    data = numpy.asarray(data)
+    penalties = data[:, 6] if data.ndim == 2 else data
     n_total = len(penalties)
     
     # Если всего данных меньше или равно min_points, берем их все
     if n_total <= min_points:
         return numpy.max(penalties)
         
-    # Вычисляем порог по процентилю
-    cutoff = numpy.percentile(penalties, target_fraction * 100)
+    # Вычисляем порог по числу отбираемых точек
+    n_keep = min(n_total, max(min_points,
+                              int(numpy.ceil(target_fraction * n_total))))
+    sorted_penalties = numpy.sort(penalties)
+    cutoff = sorted_penalties[n_keep - 1]
     
     # Пытаемся ограничить порог значением cutoff_start, 
     # НО только если при этом останется хотя бы min_points точек
@@ -2207,7 +2258,6 @@ def adaptive_penalty_cutoff(data, target_fraction=0.3, min_points=10, cutoff_sta
     # Финальная проверка: если даже текущий cutoff оставляет слишком мало точек,
     # принудительно берем значение penalty у min_points-ой по счету точки
     if numpy.sum(penalties <= cutoff) < min_points:
-        sorted_penalties = numpy.sort(penalties)
         cutoff = sorted_penalties[min_points - 1]
         
     return cutoff
@@ -2316,6 +2366,8 @@ def _update_pca_model(model_data, data_good, new_params, new_penalties,
                       read_parallel=True,     # читать файлы параллельных процессов
                       current_suffix=None,    # суффикс текущего процесса
                       penalty_cutoff=2.0,     # отсечка по penalty
+                      target_fraction=0.3,
+                      min_points=10,
                       ):
     """
     Пересчёт PCA с учётом:
@@ -2434,10 +2486,18 @@ def _update_pca_model(model_data, data_good, new_params, new_penalties,
     # -------------------------------------------------------
     # Фильтр по penalty_cutoff
     # -------------------------------------------------------
-    mask      = pen_all <= penalty_cutoff
+    adaptive_cutoff = adaptive_penalty_cutoff(
+        pen_all,
+        target_fraction=target_fraction,
+        min_points=min_points,
+        cutoff_start=penalty_cutoff,
+    )
+    mask      = pen_all <= adaptive_cutoff
     X_raw_all = X_raw_all[mask]
     pen_all   = pen_all[mask]
-    _write(f"    После фильтра penalty≤{penalty_cutoff}: {len(pen_all)} точек")
+    _write(f"    Адаптивный penalty cutoff: {adaptive_cutoff:.4f} "
+           f"(лучшие {target_fraction*100:.0f}%, минимум {min_points})")
+    _write(f"    После фильтра penalty≤{adaptive_cutoff}: {len(pen_all)} точек")
 
     if len(pen_all) < 5:
         _write("    ВНИМАНИЕ: мало точек для PCA, пропускаем обновление")
@@ -2642,6 +2702,8 @@ def _generate_random_initial_points(bounds_original, n_points,
                     'pc':      pc_coords,
                 })
                 _write(f"    ✓ penalty={penalty:.6f}")
+        except OrblibBusyError:
+            _write("    [orblib] build busy → следующая случайная точка")
         except Exception as e:
             _write(f"    ✗ Ошибка: {e}")
         finally:
@@ -3122,15 +3184,8 @@ def run_pca_optimization(
     _write(f"Y (target): min={Y_obs.min().item():.4f}, "
            f"max={Y_obs.max().item():.4f}")
 
-    # Априорная точка — лучшая из истории
-    best_idx        = data_good[:, 6].argmin()
-    best_historical = data_good[best_idx]
-    prior_params    = {
-        'Q':    best_historical[1],
-        'gh':   best_historical[2],
-        'rh':   best_historical[3],
-        'rho0': best_historical[4],
-    }
+    # Априорные кандидаты — десять лучших точек истории
+    prior_candidates = data_good[numpy.argsort(data_good[:, 6])][:10]
 
     turbo = TuRBO_PCA_Fixed(
         model_data      = model_data,
@@ -3207,29 +3262,56 @@ def run_pca_optimization(
     # ШАГ 5: АПРИОРНАЯ ТОЧКА
     # ==============================================================
     if do_prior:
-        _write("\nДобавление априорной точки (лучшая из исторических):")
-        _write(f"  Q={prior_params['Q']}, gh={prior_params['gh']}, "
-               f"rh={prior_params['rh']}, rho0={prior_params['rho0']}")
+        _write("\nДобавление априорной точки (первая свободная из top-10):")
+        prior_added = False
+        for prior_rank, best_historical in enumerate(prior_candidates, start=1):
+            prior_params = {
+                'Q':    best_historical[1],
+                'gh':   best_historical[2],
+                'rh':   best_historical[3],
+                'rho0': best_historical[4],
+            }
+            prior_pc = params_to_pca_fixed(prior_params, model_data)
+            prior_eval_params = pca_to_params_fixed(
+                prior_pc, model_data, bounds_original)
+            resv_fp, skip = _try_reserve_candidate(
+                prior_eval_params, resv_dir, reserve_eps,
+                reserve_ttl_sec, bounds_original)
+            if skip:
+                _write(f"  [prior] top-{prior_rank} занята → следующая")
+                continue
 
-        prior_pc = params_to_pca_fixed(prior_params, model_data)
-        _write(f"  PCA-координаты априорной точки: {prior_pc}")
-        _write("  Вычисление penalty для априорной точки...")
+            _write(f"  [prior] выбрана top-{prior_rank}: "
+                   f"Q={prior_eval_params['Q']:.4f}, "
+                   f"gh={prior_eval_params['gh']:.4f}, "
+                   f"rh={prior_eval_params['rh']:.4f}, "
+                   f"rho0={prior_eval_params['rho0']:.4f}")
+            _write(f"  PCA-координаты априорной точки: {prior_pc}")
+            _write("  Вычисление penalty для априорной точки...")
+            try:
+                prior_y = halo_IC_lib_weights_pca_fixed(
+                    prior_pc, model_data, bounds_original,
+                    densityStars, datasets, alphah, betah
+                )
+            except OrblibBusyError:
+                _write(f"  [prior] orblib top-{prior_rank} строится → следующая")
+                continue
+            finally:
+                release_reservation(resv_fp)
 
-        prior_y = halo_IC_lib_weights_pca_fixed(
-            prior_pc, model_data, bounds_original,
-            densityStars, datasets, alphah, betah
-        )
-
-        X_obs = torch.cat([
-            X_obs,
-            torch.tensor([prior_pc],  dtype=dtype, device=device)
-        ], dim=0)
-        Y_obs = torch.cat([
-            Y_obs,
-            torch.tensor([[prior_y]], dtype=dtype, device=device)
-        ], dim=0)
-
-        _write(f"  Априорная точка добавлена. Penalty={-prior_y:.6f}")
+            X_obs = torch.cat([
+                X_obs,
+                torch.tensor([prior_pc], dtype=dtype, device=device)
+            ], dim=0)
+            Y_obs = torch.cat([
+                Y_obs,
+                torch.tensor([[prior_y]], dtype=dtype, device=device)
+            ], dim=0)
+            _write(f"  Априорная точка добавлена. Penalty={-prior_y:.6f}")
+            prior_added = True
+            break
+        if not prior_added:
+            _write("  [prior] все top-10 заняты — переходим к TuRBO без ожидания")
 
     # ==============================================================
     # ШАГ 6: ОСНОВНОЙ ЦИКЛ TuRBO
@@ -3257,66 +3339,73 @@ def run_pca_optimization(
         _write(f"    Предыдущий target = {y_last:.6f}  ({y_last_source})")
         _write(f"    Размер TR         = {turbo.length:.4f}")
 
-        # --- Предложение новой точки ---
-        # --- Резервации других процессов (точки «под оценкой») ---
-        active_resv = (read_active_reservations(
-                           resv_dir, reserve_ttl_sec,
-                           exclude_suffix=hostname_proc)
-                       if reserve_points else [])
-
-        # Переводим чужие резервации в текущее PCA-пространство → X_pending,
-        # чтобы acquisition штатно уводил предложение в сторону от них.
-        X_pending = None
-        if active_resv:
+        # --- Предложение и атомарное резервирование новой точки ---
+        candidate_done = False
+        local_pending = []
+        for claim_attempt in range(max(1, reserve_max_retries + 1)):
+            active_resv = (read_active_reservations(
+                               resv_dir, reserve_ttl_sec,
+                               exclude_suffix=hostname_proc)
+                           if reserve_points else [])
             pend = []
             for r in active_resv:
                 try:
                     pend.append(params_to_pca_fixed(r['params'], model_data))
                 except Exception:
                     pass
-            if pend:
-                X_pending = torch.tensor(numpy.array(pend),
-                                         dtype=dtype, device=device)
+            pend.extend(local_pending)
+            X_pending = (torch.tensor(numpy.array(pend), dtype=dtype,
+                                      device=device)
+                         if pend else None)
 
-        # --- Предложение новой точки ---
-        X_next    = turbo.suggest(X_obs, Y_obs, X_pending=X_pending)
-        pc_coords = X_next[0].cpu().numpy()
-        new_params_i = pca_to_params_fixed(pc_coords, model_data, bounds_original)
+            X_next = turbo.suggest(X_obs, Y_obs, X_pending=X_pending)
+            pc_coords = X_next[0].cpu().numpy()
+            new_params_i = pca_to_params_fixed(
+                pc_coords, model_data, bounds_original)
 
-        # --- Жёсткая страховка: если предложение всё же слишком близко к
-        #     чужой резервации, возмущаем кандидат в пределах TR ---
-        if reserve_points and active_resv:
-            attempt = 0
-            while (attempt < reserve_max_retries
+            jitter_attempt = 0
+            while (jitter_attempt < reserve_max_retries
                    and any(reservation_dist_norm(new_params_i, r['params'],
                                                   bounds_original) < reserve_eps
                            for r in active_resv)):
-                attempt += 1
-                jitter    = proc_rng.normal(scale=0.1 * turbo.length,
-                                            size=pc_coords.shape)
-                pc_coords = pc_coords + jitter
-                new_params_i = pca_to_params_fixed(pc_coords, model_data,
-                                                   bounds_original)
-            if attempt > 0:
-                _write(f"    [reserve] кандидат сдвинут за {attempt} попыток "
-                       f"(избегаем дублей с {len(active_resv)} активными "
-                       f"резервациями)")
-            # Синхронизируем тензор X_next с возможным возмущением
-            X_next = torch.tensor([pc_coords], dtype=dtype, device=device)
+                jitter_attempt += 1
+                pc_coords = pc_coords + proc_rng.normal(
+                    scale=0.1 * turbo.length, size=pc_coords.shape)
+                new_params_i = pca_to_params_fixed(
+                    pc_coords, model_data, bounds_original)
+            if jitter_attempt:
+                X_next = torch.tensor([pc_coords], dtype=dtype, device=device)
+                _write(f"    [reserve] кандидат сдвинут за "
+                       f"{jitter_attempt} попыток")
 
-        # --- Резервируем выбранную точку до дорогого расчёта ---
-        resv_fp = (reserve_point(resv_dir, hostname_proc, new_params_i)
-                   if reserve_points else None)
+            resv_fp, skip = _try_reserve_candidate(
+                new_params_i, resv_dir, reserve_eps,
+                reserve_ttl_sec, bounds_original)
+            if skip:
+                _write(f"    [reserve] busy → resuggest "
+                       f"({claim_attempt + 1}/{reserve_max_retries + 1})")
+                local_pending.append(pc_coords.copy())
+                continue
 
-        # --- Вычисление целевой функции ---
-        try:
-            y_next = halo_IC_lib_weights_pca_fixed(
-                pc_coords, model_data, bounds_original,
-                densityStars, datasets, alphah, betah
-            )
-        finally:
-            # Результат уже записан в UpsFile — резервацию можно снять
-            release_reservation(resv_fp)
+            try:
+                y_next = halo_IC_lib_weights_pca_fixed(
+                    pc_coords, model_data, bounds_original,
+                    densityStars, datasets, alphah, betah
+                )
+            except OrblibBusyError:
+                _write(f"    [orblib] build busy → resuggest "
+                       f"({claim_attempt + 1}/{reserve_max_retries + 1})")
+                local_pending.append(pc_coords.copy())
+                continue
+            finally:
+                release_reservation(resv_fp)
+            candidate_done = True
+            break
+
+        if not candidate_done:
+            _write("    [reserve] свободный кандидат не найден — "
+                   "итерация пропущена без ожидания")
+            continue
 
         # --- Сохраняем в буфер ---
         new_points_params.append(new_params_i)
@@ -3365,11 +3454,9 @@ def run_pca_optimization(
                 read_parallel     = True,
                 current_suffix    = hostname_proc,
                 penalty_cutoff    = cutoff_start,
+                target_fraction   = target_fraction,
+                min_points        = 10,
             )
-
-            # Сохраняем обновлённую модель
-            with open(pkl_file, 'wb') as f:
-                pickle.dump(model_data, f)
 
             _write(f"  [PCA] Обновление завершено. "
                    f"Точек в буфере: {len(new_points_params)}")
