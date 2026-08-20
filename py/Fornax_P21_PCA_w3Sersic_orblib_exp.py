@@ -3241,56 +3241,15 @@ def run_pca_optimization(
     _write(f"Y (target): min={Y_obs.min().item():.4f}, "
            f"max={Y_obs.max().item():.4f}")
 
-    # Априорные кандидаты: текущая история + canonical 4Ups + PA46.8 (opt-in).
-    # Исторический penalty нужен только для порядка кандидатов; каждая выбранная
-    # точка заново считает и орбиты, и penalty.
-    prior_groups = [
-        ('current', incl,
-         data_good[numpy.argsort(data_good[:, 6])][:10]),
-    ]
-    canonical_data, canonical_incl, canonical_files = \
-        load_prior_candidates_from_patterns(
-            prior_patterns, incl, nearest_fallback=True,
-            sync_from_yadisk=True)
-    if canonical_data is not None:
-        canonical_data = canonical_data[numpy.argsort(canonical_data[:, 6])][:10]
-        prior_groups.append(('canonical-4Ups', canonical_incl, canonical_data))
-        _write(f"Prior source canonical-4Ups: файлов={canonical_files}, "
-               f"incl={canonical_incl:.2f}, кандидатов={len(canonical_data)}")
-    else:
-        _write(f"Prior source canonical-4Ups: кандидатов нет "
-               f"(файлов={canonical_files})")
-
-    if seed_from_pa468 and seed_patterns:
-        pa_data, pa_incl, pa_files = load_prior_candidates_from_patterns(
-            seed_patterns, incl, nearest_fallback=False,
-            sync_from_yadisk=True)
-        if pa_data is not None:
-            pa_data = pa_data[numpy.argsort(pa_data[:, 6])][:10]
-            prior_groups.append(('PA46.8', pa_incl, pa_data))
-            _write(f"Prior source PA46.8: файлов={pa_files}, "
-                   f"incl={pa_incl:.2f}, кандидатов={len(pa_data)}")
-        else:
-            _write(f"Prior source PA46.8: кандидатов нет (файлов={pa_files})")
-
+    prior_penalty_threshold = 10.0
+    prior_min_points = MIN_POINTS_FOR_PCA
+    prior_good_count = int(numpy.sum(data[:, 6] < prior_penalty_threshold))
+    prior_needed_count = max(0, prior_min_points - prior_good_count)
+    prior_history_sufficient = prior_needed_count == 0
     prior_candidates = []
-    prior_seen = set()
-    for rank in range(10):
-        for source, source_incl, source_data in prior_groups:
-            if rank >= len(source_data):
-                continue
-            row = source_data[rank]
-            key = tuple(f"{value:.6g}" for value in row[1:5])
-            if key in prior_seen:
-                continue
-            prior_seen.add(key)
-            prior_candidates.append({
-                'row': row,
-                'source': source,
-                'source_incl': source_incl,
-            })
-    _write(f"Prior pool: {len(prior_candidates)} уникальных кандидатов "
-           f"из {len(prior_groups)} источников")
+    _write(f"Точек out_-истории с penalty < {prior_penalty_threshold:g}: "
+           f"{prior_good_count}/{prior_min_points}; "
+           f"добрать извне: {prior_needed_count}")
 
     turbo = TuRBO_PCA_Fixed(
         model_data      = model_data,
@@ -3363,6 +3322,77 @@ def run_pca_optimization(
     else:
         _write("# Checkpoint не найден, запуск с нуля")
 
+    if do_prior and prior_history_sufficient:
+        _write("Prior не требуется: в out_-истории достаточно точек "
+               f"с penalty < {prior_penalty_threshold:g}")
+        do_prior = False
+
+    if do_prior:
+        # Внешние penalty используются только для порядка кандидатов.
+        # Орбиты и penalty выбранной prior-точки всегда пересчитываются.
+        prior_groups = []
+        nearest_data, nearest_incl, nearest_dist = find_nearest_incl_data(
+            storage_patterns, host_patterns, incl)
+        if nearest_data is not None:
+            nearest_data = nearest_data[numpy.argsort(nearest_data[:, 6])][:10]
+            prior_groups.append(('nearest-out', nearest_incl, nearest_data))
+            _write(f"Prior source nearest-out: incl={nearest_incl:.2f}, "
+                   f"dist={nearest_dist:.2f}, кандидатов={len(nearest_data)}")
+        else:
+            _write("Prior source nearest-out: кандидатов нет")
+
+        canonical_data, canonical_incl, canonical_files = \
+            load_prior_candidates_from_patterns(
+                prior_patterns, incl, nearest_fallback=True,
+                sync_from_yadisk=True)
+        if canonical_data is not None:
+            canonical_data = canonical_data[
+                numpy.argsort(canonical_data[:, 6])][:10]
+            prior_groups.append(('canonical-4Ups', canonical_incl,
+                                 canonical_data))
+            _write(f"Prior source canonical-4Ups: файлов={canonical_files}, "
+                   f"incl={canonical_incl:.2f}, "
+                   f"кандидатов={len(canonical_data)}")
+        else:
+            _write(f"Prior source canonical-4Ups: кандидатов нет "
+                   f"(файлов={canonical_files})")
+
+        if seed_from_pa468 and seed_patterns:
+            pa_data, pa_incl, pa_files = load_prior_candidates_from_patterns(
+                seed_patterns, incl, nearest_fallback=False,
+                sync_from_yadisk=True)
+            if pa_data is not None:
+                pa_data = pa_data[numpy.argsort(pa_data[:, 6])][:10]
+                prior_groups.append(('PA46.8', pa_incl, pa_data))
+                _write(f"Prior source PA46.8: файлов={pa_files}, "
+                       f"incl={pa_incl:.2f}, кандидатов={len(pa_data)}")
+            else:
+                _write(f"Prior source PA46.8: кандидатов нет "
+                       f"(файлов={pa_files})")
+
+        prior_seen = set()
+        for rank in range(10):
+            for source, source_incl, source_data in prior_groups:
+                if rank >= len(source_data):
+                    continue
+                row = source_data[rank]
+                key = tuple(f"{value:.6g}" for value in row[1:5])
+                if key in prior_seen:
+                    continue
+                prior_seen.add(key)
+                prior_candidates.append({
+                    'row': row,
+                    'source': source,
+                    'source_incl': source_incl,
+                })
+        prior_candidates = prior_candidates[:prior_needed_count]
+        _write(f"Prior pool: {len(prior_candidates)}/{prior_needed_count} "
+               f"кандидатов для добора из {len(prior_groups)} "
+               "внешних источников")
+        if not prior_candidates:
+            _write("Prior пропущен: внешние кандидаты не найдены")
+            do_prior = False
+
     # ==============================================================
     # ШАГ 5: АПРИОРНАЯ ТОЧКА
     # ==============================================================
@@ -3397,17 +3427,25 @@ def run_pca_optimization(
                    f"rho0={prior_eval_params['rho0']:.4f}")
             _write(f"  PCA-координаты априорной точки: {prior_pc}")
             _write("  Вычисление penalty для априорной точки...")
+            prior_completed = False
             try:
                 prior_y = halo_IC_lib_weights_pca_fixed(
                     prior_pc, model_data, bounds_original,
                     densityStars, datasets, alphah, betah,
                     allow_orblib_reuse=False,
                 )
+                prior_completed = True
+                if resv_fp:
+                    try:
+                        os.utime(resv_fp, None)
+                    except OSError:
+                        pass
             except OrblibBusyError:
                 _write(f"  [prior] orblib #{prior_rank} строится → следующая")
                 continue
             finally:
-                release_reservation(resv_fp)
+                if not prior_completed:
+                    release_reservation(resv_fp)
 
             X_obs = torch.cat([
                 X_obs,
@@ -3419,7 +3457,6 @@ def run_pca_optimization(
             ], dim=0)
             _write(f"  Априорная точка добавлена. Penalty={-prior_y:.6f}")
             prior_added = True
-            break
         if not prior_added:
             _write("  [prior] весь prior pool занят — переходим к TuRBO без ожидания")
 
