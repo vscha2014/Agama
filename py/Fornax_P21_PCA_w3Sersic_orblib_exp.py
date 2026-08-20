@@ -162,6 +162,12 @@ storage_patterns = [
     f"out_*_{EXP_ID}_*.txt",
 ]
 
+# Canonical production history is a prior-only parameter source. Its penalty
+# and orbit libraries are never reused by the experimental evaluation.
+prior_seed_patterns = [
+    "4UpsBoTorch_PCA_Sersic*.txt",
+]
+
 # Архивные файлы со СТАРОЙ (неверной) геометрией posang=46.8, q_ap=0.7.
 # Используются ТОЛЬКО как источник кандидатов-параметров для начальных точек
 # (penalty пересчитывается с корректной геометрией). Эти паттерны намеренно
@@ -1110,7 +1116,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     numOrbits=100000, trajsize=1000, intTime=100.,
                                     regul=1.,
                                     # НОВЫЙ параметр: прямые параметры без PCA
-                                    direct_params=None):
+                                    direct_params=None,
+                                    allow_orblib_reuse=True):
     global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent, orblib_counter
     
    # --- РЕЖИМ БЕЗ PCA: direct_params передан напрямую ---
@@ -1175,7 +1182,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         # синхронизацию с Я.Диском делает оркестратор до/после запуска.
         _ol_name, _ol_path = orblib_key(Q, gh, rh, rho0)
         orblib_loaded = False
-        if REUSE_ORBLIB and os.path.exists(_ol_path):
+        if allow_orblib_reuse and REUSE_ORBLIB and os.path.exists(_ol_path):
             _t_load = time.perf_counter()
             try:
                 with numpy.load(_ol_path) as _npz:
@@ -1849,6 +1856,53 @@ def bootstrap_initial_points_from_nearest_incl(
         )
 
     return bootstrap_results, nearest_incl, dist, data_refresh
+
+
+def load_prior_candidates_from_patterns(patterns, target_incl,
+                                        nearest_fallback=False,
+                                        sync_from_yadisk=False):
+    if sync_from_yadisk:
+        load_from_yadisk(patterns, [], notify=False)
+
+    all_files = []
+    for pattern in patterns:
+        for filepath in glob.glob(pattern):
+            if filepath not in all_files:
+                all_files.append(filepath)
+
+    rows = []
+    for filepath in all_files:
+        try:
+            with open(filepath, 'r') as fh:
+                for line in fh:
+                    parts = line.split()
+                    if not parts or parts[0].startswith('#') or len(parts) < 7:
+                        continue
+                    try:
+                        row = [float(value) for value in parts[:7]]
+                    except ValueError:
+                        continue
+                    if (not numpy.all(numpy.isfinite(row)) or row[3] <= 0
+                            or row[4] <= 0 or row[6] >= 1e5):
+                        continue
+                    rows.append(row)
+        except FileNotFoundError:
+            pass
+
+    if not rows:
+        return None, None, len(all_files)
+
+    data = numpy.array(rows)
+    exact = data[numpy.abs(data[:, 0] - target_incl) <= 0.01]
+    if len(exact) > 0:
+        return exact, float(target_incl), len(all_files)
+    if not nearest_fallback:
+        return None, None, len(all_files)
+
+    inclinations = numpy.unique(numpy.round(data[:, 0], 2))
+    nearest = float(inclinations[numpy.argmin(numpy.abs(inclinations - target_incl))])
+    selected = data[numpy.abs(data[:, 0] - nearest) <= 0.01]
+    return selected, nearest, len(all_files)
 
 
 def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
@@ -2742,6 +2796,7 @@ def run_pca_optimization(
     resume=True,
     pca_update_interval=15,
     seed_patterns=None,      # архивные паттерны (PA46.8) для начальных точек
+    prior_patterns=None,     # canonical 4Ups — только параметры prior
     seed_from_pa468=False,   # включить seed из архива (penalty пересчитывается)
     reserve_points=True,     # резервировать точки (защита от дублей внутри VM)
     reserve_eps=0.02,        # порог «одинаковости» в нормированном простр-ве
@@ -2762,6 +2817,8 @@ def run_pca_optimization(
             f"4UpsBoTorch_PCA_Sersic_{_hostname_env}.txt",
             f"4UpsBoTorch_PCA_Sersic_{_hostname_env}_p*.txt",
         ]
+    if prior_patterns is None:
+        prior_patterns = prior_seed_patterns
 
     def _write(text):
         """Вспомогательная функция: печать + запись в файл."""
@@ -3184,8 +3241,56 @@ def run_pca_optimization(
     _write(f"Y (target): min={Y_obs.min().item():.4f}, "
            f"max={Y_obs.max().item():.4f}")
 
-    # Априорные кандидаты — десять лучших точек истории
-    prior_candidates = data_good[numpy.argsort(data_good[:, 6])][:10]
+    # Априорные кандидаты: текущая история + canonical 4Ups + PA46.8 (opt-in).
+    # Исторический penalty нужен только для порядка кандидатов; каждая выбранная
+    # точка заново считает и орбиты, и penalty.
+    prior_groups = [
+        ('current', incl,
+         data_good[numpy.argsort(data_good[:, 6])][:10]),
+    ]
+    canonical_data, canonical_incl, canonical_files = \
+        load_prior_candidates_from_patterns(
+            prior_patterns, incl, nearest_fallback=True,
+            sync_from_yadisk=True)
+    if canonical_data is not None:
+        canonical_data = canonical_data[numpy.argsort(canonical_data[:, 6])][:10]
+        prior_groups.append(('canonical-4Ups', canonical_incl, canonical_data))
+        _write(f"Prior source canonical-4Ups: файлов={canonical_files}, "
+               f"incl={canonical_incl:.2f}, кандидатов={len(canonical_data)}")
+    else:
+        _write(f"Prior source canonical-4Ups: кандидатов нет "
+               f"(файлов={canonical_files})")
+
+    if seed_from_pa468 and seed_patterns:
+        pa_data, pa_incl, pa_files = load_prior_candidates_from_patterns(
+            seed_patterns, incl, nearest_fallback=False,
+            sync_from_yadisk=True)
+        if pa_data is not None:
+            pa_data = pa_data[numpy.argsort(pa_data[:, 6])][:10]
+            prior_groups.append(('PA46.8', pa_incl, pa_data))
+            _write(f"Prior source PA46.8: файлов={pa_files}, "
+                   f"incl={pa_incl:.2f}, кандидатов={len(pa_data)}")
+        else:
+            _write(f"Prior source PA46.8: кандидатов нет (файлов={pa_files})")
+
+    prior_candidates = []
+    prior_seen = set()
+    for rank in range(10):
+        for source, source_incl, source_data in prior_groups:
+            if rank >= len(source_data):
+                continue
+            row = source_data[rank]
+            key = tuple(f"{value:.6g}" for value in row[1:5])
+            if key in prior_seen:
+                continue
+            prior_seen.add(key)
+            prior_candidates.append({
+                'row': row,
+                'source': source,
+                'source_incl': source_incl,
+            })
+    _write(f"Prior pool: {len(prior_candidates)} уникальных кандидатов "
+           f"из {len(prior_groups)} источников")
 
     turbo = TuRBO_PCA_Fixed(
         model_data      = model_data,
@@ -3262,9 +3367,10 @@ def run_pca_optimization(
     # ШАГ 5: АПРИОРНАЯ ТОЧКА
     # ==============================================================
     if do_prior:
-        _write("\nДобавление априорной точки (первая свободная из top-10):")
+        _write("\nДобавление априорной точки (первая свободная из prior pool):")
         prior_added = False
-        for prior_rank, best_historical in enumerate(prior_candidates, start=1):
+        for prior_rank, candidate in enumerate(prior_candidates, start=1):
+            best_historical = candidate['row']
             prior_params = {
                 'Q':    best_historical[1],
                 'gh':   best_historical[2],
@@ -3278,10 +3384,13 @@ def run_pca_optimization(
                 prior_eval_params, resv_dir, reserve_eps,
                 reserve_ttl_sec, bounds_original)
             if skip:
-                _write(f"  [prior] top-{prior_rank} занята → следующая")
+                _write(f"  [prior] #{prior_rank} ({candidate['source']}) "
+                       "занята → следующая")
                 continue
 
-            _write(f"  [prior] выбрана top-{prior_rank}: "
+            _write(f"  [prior] выбрана #{prior_rank} "
+                   f"source={candidate['source']} "
+                   f"source_incl={candidate['source_incl']:.2f}: "
                    f"Q={prior_eval_params['Q']:.4f}, "
                    f"gh={prior_eval_params['gh']:.4f}, "
                    f"rh={prior_eval_params['rh']:.4f}, "
@@ -3291,10 +3400,11 @@ def run_pca_optimization(
             try:
                 prior_y = halo_IC_lib_weights_pca_fixed(
                     prior_pc, model_data, bounds_original,
-                    densityStars, datasets, alphah, betah
+                    densityStars, datasets, alphah, betah,
+                    allow_orblib_reuse=False,
                 )
             except OrblibBusyError:
-                _write(f"  [prior] orblib top-{prior_rank} строится → следующая")
+                _write(f"  [prior] orblib #{prior_rank} строится → следующая")
                 continue
             finally:
                 release_reservation(resv_fp)
@@ -3311,7 +3421,7 @@ def run_pca_optimization(
             prior_added = True
             break
         if not prior_added:
-            _write("  [prior] все top-10 заняты — переходим к TuRBO без ожидания")
+            _write("  [prior] весь prior pool занят — переходим к TuRBO без ожидания")
 
     # ==============================================================
     # ШАГ 6: ОСНОВНОЙ ЦИКЛ TuRBO
@@ -3790,6 +3900,7 @@ if __name__ == '__main__':
             resume           = do_resume,
             pca_update_interval = 6,
             seed_patterns    = seed_patterns,
+            prior_patterns   = prior_seed_patterns,
             seed_from_pa468  = args.seed_from_pa468,
         )
         
