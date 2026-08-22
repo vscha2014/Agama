@@ -14,7 +14,7 @@ import tempfile
 ARCHIVE_NAME_RE = re.compile(
     r"^orblib_i(?P<incl>[-+]?\d+(?:\.\d+)?)_d(?P<double>[01])_nb(?P<n_bin>\d+)_ser(?P<ser_id>\d+)__(?P<origin>.+?)(?:\.tar)?$"
 )
-TIMESTAMP_RE = re.compile(r"_\d{8}_\d{6}$")
+TIMESTAMP_RE = re.compile(r"_\d{8}_\d{6}(?:_part\d{3})?$")
 
 
 def parse_archive_name(path):
