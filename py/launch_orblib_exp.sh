@@ -6,7 +6,7 @@
 #   * скрипт по умолчанию: Fornax_P21_PCA_w3Sersic_orblib_exp.py;
 #   * файлы истории/логов: out_*_{EXP_ID}_*.txt / log_*_{EXP_ID}_*.txt
 #     (а не 4Ups*/4result*);
-#   * схема tar-шардов библиотек орбит на Яндекс.Диске:
+#   * схема tar-шардов библиотек орбит в galAgama/orblib на Яндекс.Диске:
 #       ШАГ 0 (до запуска): потоково распаковать все orblib_${KEY}__*.tar
 #         в ORBLIB_DIR (дедуп по имени .npz — контент-адресные), снять
 #         snapshot before;
@@ -68,6 +68,7 @@ RCLONE_CONF_DIR="${HOME}/.config/rclone"
 HOSTNAME_ENV="$(hostname)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 REMOTE_DIR="galAgama"
+ORBLIB_REMOTE_DIR="${REMOTE_DIR}/orblib"
 ORBLIB_UPLOAD_ATTEMPTS="${ORBLIB_UPLOAD_ATTEMPTS:-3}"
 ORBLIB_PART_SIZE_GB="${ORBLIB_PART_SIZE_GB:-40}"
 ORBLIB_UPLOAD_TIMEOUT="${ORBLIB_UPLOAD_TIMEOUT:-2h}"
@@ -306,13 +307,13 @@ download_orblib_shards() {
     mkdir -p "$ORBLIB_DIR"
 
     local shards
-    shards=$(rclone lsf "${RCLONE_REMOTE}:${REMOTE_DIR}" \
+    shards=$(rclone lsf "${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}" \
                 --config "${RCLONE_CONF_DIR}/rclone.conf" \
                 2>>"$LOGFILE" \
              | grep -E "^orblib_${KEY}__.*\.tar$" || true)
 
     if [ -z "$shards" ]; then
-        log "  Шардов orblib_${KEY}__*.tar на Яндекс.Диске нет — старт с чистой библиотекой"
+        log "  Шардов orblib_${KEY}__*.tar в ${ORBLIB_REMOTE_DIR} нет — старт с чистой библиотекой"
     else
         local n_shards
         n_shards=$(echo "$shards" | grep -c "")
@@ -323,7 +324,7 @@ download_orblib_shards() {
             before=$(mktemp "${ORBLIB_DIR}/.unpack_before_XXXXXX")
             after=$(mktemp "${ORBLIB_DIR}/.unpack_after_XXXXXX")
             (cd "$ORBLIB_DIR" && ls -1 -- *.npz 2>/dev/null || true) | sort > "$before"
-            if rclone cat "${RCLONE_REMOTE}:${REMOTE_DIR}/${shard}" \
+            if rclone cat "${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}/${shard}" \
                     --config "${RCLONE_CONF_DIR}/rclone.conf" \
                     --stats-one-line 2>>"$LOGFILE" \
                  | tar -xf - -C "$ORBLIB_DIR" --skip-old-files \
@@ -368,7 +369,7 @@ upload_orblib_shard() {
     if "$uploader" \
             --snapshot="$SNAP_BEFORE" \
             --orblib-dir="$ORBLIB_DIR" \
-            --remote-root="${RCLONE_REMOTE}:${REMOTE_DIR}" \
+            --remote-root="${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}" \
             --rclone-config="${RCLONE_CONF_DIR}/rclone.conf" \
             --host="$HOSTNAME_ENV" \
             --timestamp="$TIMESTAMP" \
@@ -478,6 +479,7 @@ log "  EXP_ID           = $EXP_ID"
 log "  KEY (orblib)     = $KEY"
 log "  shard pattern    = $SHARD_PATTERN"
 log "  orblib dir       = $ORBLIB_DIR"
+log "  orblib remote    = ${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}"
 log "  resume           = $RESUME"
 log "  shutdown         = $DO_SHUTDOWN"
 log "  vCPU всего       = $N_VCPU"

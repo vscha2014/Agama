@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 ORBLIB_DIR="${ORBLIB_DIR:-${WORK_DIR}/orblib}"
-REMOTE_ROOT="${REMOTE_ROOT:-yandex:galAgama}"
+REMOTE_ROOT="${REMOTE_ROOT:-yandex:galAgama/orblib}"
 RCLONE_CONFIG="${RCLONE_CONFIG:-${HOME}/.config/rclone/rclone.conf}"
 PART_SIZE_GB="${PART_SIZE_GB:-40}"
 UPLOAD_ATTEMPTS="${UPLOAD_ATTEMPTS:-3}"
@@ -21,7 +21,7 @@ Usage:
 Options:
   --snapshot=PATH       snapshot_before from the failed run (required)
   --orblib-dir=PATH     directory containing .npz files (default: ./orblib)
-  --remote-root=REMOTE  rclone destination directory (default: yandex:galAgama)
+  --remote-root=REMOTE  rclone destination directory (default: yandex:galAgama/orblib)
   --rclone-config=PATH  rclone config path
   --host=NAME           host component of shard names (default: hostname)
   --timestamp=VALUE     YYYYmmdd_HHMMSS (default: inferred from snapshot)
