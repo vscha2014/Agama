@@ -7,6 +7,7 @@ REMOTE_ROOT="${REMOTE_ROOT:-yandex:galAgama}"
 RCLONE_CONFIG="${RCLONE_CONFIG:-${HOME}/.config/rclone/rclone.conf}"
 PART_SIZE_GB="${PART_SIZE_GB:-40}"
 UPLOAD_ATTEMPTS="${UPLOAD_ATTEMPTS:-3}"
+RCLONE_TIMEOUT="${RCLONE_TIMEOUT:-2h}"
 SNAPSHOT=""
 HOST_NAME="$(hostname)"
 RUN_TIMESTAMP=""
@@ -26,6 +27,7 @@ Options:
   --timestamp=VALUE     YYYYmmdd_HHMMSS (default: inferred from snapshot)
   --part-size-gb=N      decimal GB per part (default: 40)
   --attempts=N          upload attempts per part (default: 3)
+  --timeout=DURATION    rclone IO idle/response timeout (default: 2h)
   --apply               upload; without this flag only print the plan
   -h, --help            show this help
 
@@ -45,6 +47,7 @@ for arg in "$@"; do
         --timestamp=*)     RUN_TIMESTAMP="${arg#*=}" ;;
         --part-size-gb=*)  PART_SIZE_GB="${arg#*=}" ;;
         --attempts=*)      UPLOAD_ATTEMPTS="${arg#*=}" ;;
+        --timeout=*)       RCLONE_TIMEOUT="${arg#*=}" ;;
         --apply)           APPLY=1 ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown argument: $arg" >&2; usage >&2; exit 2 ;;
@@ -60,6 +63,8 @@ ORBLIB_DIR="$(readlink -f "$ORBLIB_DIR")"
     || { echo "ERROR: --part-size-gb must be an integer >= 1" >&2; exit 2; }
 [[ "$UPLOAD_ATTEMPTS" =~ ^[0-9]+$ ]] && [ "$UPLOAD_ATTEMPTS" -ge 1 ] \
     || { echo "ERROR: --attempts must be an integer >= 1" >&2; exit 2; }
+[[ "$RCLONE_TIMEOUT" =~ ^[0-9]+(ms|s|m|h)$ ]] \
+    || { echo "ERROR: --timeout must look like 30m or 2h" >&2; exit 2; }
 [[ "$HOST_NAME" =~ ^[A-Za-z0-9._+-]+$ ]] \
     || { echo "ERROR: invalid --host: $HOST_NAME" >&2; exit 2; }
 
@@ -151,6 +156,7 @@ printf 'New libraries: %d\n' "$N_NEW"
 printf 'Experiment key: %s\n' "$KEY"
 printf 'Snapshot: %s\n' "$SNAPSHOT"
 printf 'Part limit: %s bytes (%s GB)\n' "$PART_LIMIT" "$PART_SIZE_GB"
+printf 'Rclone timeout: %s\n' "$RCLONE_TIMEOUT"
 printf 'Parts: %d\n' "${#PART_LISTS[@]}"
 for i in "${!PART_LISTS[@]}"; do
     printf '  %s  files=%d  size=%s bytes (%s)\n' \
@@ -166,16 +172,19 @@ if [ "$APPLY" -ne 1 ]; then
 fi
 
 remote_size() {
-    rclone lsf "$1" --format s --config "$RCLONE_CONFIG" 2>/dev/null | head -n 1
+    rclone lsf "$1" --format s --timeout "$RCLONE_TIMEOUT" \
+        --config "$RCLONE_CONFIG" 2>/dev/null | head -n 1
 }
 
 remote_md5() {
-    rclone md5sum "$1" --config "$RCLONE_CONFIG" 2>/dev/null \
+    rclone md5sum "$1" --timeout "$RCLONE_TIMEOUT" \
+        --config "$RCLONE_CONFIG" 2>/dev/null \
         | awk 'NR == 1 {print tolower($1)}'
 }
 
 remove_partial() {
-    rclone deletefile "$1" --yandex-hard-delete --config "$RCLONE_CONFIG" \
+    rclone deletefile "$1" --yandex-hard-delete \
+        --timeout "$RCLONE_TIMEOUT" --config "$RCLONE_CONFIG" \
         >/dev/null 2>&1 || true
 }
 
@@ -209,6 +218,8 @@ upload_part() {
                 -cf - -C "$ORBLIB_DIR" -T "$list_file" \
             | tee "$fifo" \
             | rclone rcat "$partial_remote" --size "$expected_size" \
+                --timeout "$RCLONE_TIMEOUT" --contimeout 1m \
+                --low-level-retries 1 --retries 1 \
                 --config "$RCLONE_CONFIG" --stats-one-line
         pipeline_rc=$?
         wait "$md5_pid"
@@ -229,7 +240,7 @@ upload_part() {
             continue
         fi
         if ! rclone moveto "$partial_remote" "$final_remote" \
-                --config "$RCLONE_CONFIG"; then
+                --timeout "$RCLONE_TIMEOUT" --config "$RCLONE_CONFIG"; then
             echo "  moveto failed" >&2
             remove_partial "$partial_remote"
             continue
