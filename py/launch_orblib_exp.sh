@@ -10,10 +10,10 @@
 #       ШАГ 0 (до запуска): потоково распаковать все orblib_${KEY}__*.tar
 #         в ORBLIB_DIR (дедуп по имени .npz — контент-адресные), снять
 #         snapshot before;
-#       ФИНАЛ (после контейнеров): after − before = новые .npz → потоковый
-#         tar в remote partial → проверка size+MD5 → атомарная публикация
-#         orblib_${KEY}__${HOST}_${TS}.tar без локальной копии tar.
-#         Существующие шарды НЕ трогаются (нет коллизий между машинами).
+#       ФИНАЛ (после контейнеров): after − before = новые .npz → несколько
+#         tar-частей допустимого размера в remote partial → проверка size+MD5
+#         → атомарная публикация orblib_${KEY}__${HOST}_${TS}_partNNN.tar
+#         без локальных копий tar. Существующие шарды НЕ трогаются.
 #     Никакого синка орблибов ВО ВРЕМЯ расчёта (AGENTS §10: живая
 #     видимость нужна истории out_*, её синкает сам Python-скрипт).
 #
@@ -69,6 +69,8 @@ HOSTNAME_ENV="$(hostname)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 REMOTE_DIR="galAgama"
 ORBLIB_UPLOAD_ATTEMPTS="${ORBLIB_UPLOAD_ATTEMPTS:-3}"
+ORBLIB_PART_SIZE_GB="${ORBLIB_PART_SIZE_GB:-40}"
+ORBLIB_UPLOAD_TIMEOUT="${ORBLIB_UPLOAD_TIMEOUT:-2h}"
 
 # --- Идентификаторы эксперимента ---
 # EXP_ID — как в Python-скрипте (входит в имена out_/log_/checkpoint_).
@@ -76,7 +78,7 @@ EXP_ID="d${DOUBLE}_nb${NBIN}_gh${GHID}_ser${SERID}"
 # KEY — ключ библиотек орбит: incl с одним знаком, БЕЗ gh_id.
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 KEY="i${INCL_FMT}_d${DOUBLE}_nb${NBIN}_ser${SERID}"
-SHARD_NAME="orblib_${KEY}__${HOSTNAME_ENV}_${TIMESTAMP}.tar"
+SHARD_PATTERN="orblib_${KEY}__${HOSTNAME_ENV}_${TIMESTAMP}_partNNN.tar"
 
 # Каталог библиотек орбит: внутри WORK_DIR → виден в контейнере как
 # /workspace/orblib (WORK_DIR монтируется в /workspace), файлы на хосте.
@@ -99,6 +101,14 @@ if [ "$N_PROC" -gt "$N_VCPU" ]; then
 fi
 if ! [[ "$ORBLIB_UPLOAD_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$ORBLIB_UPLOAD_ATTEMPTS" -lt 1 ]; then
     echo "ОШИБКА: ORBLIB_UPLOAD_ATTEMPTS должно быть целым >= 1" >&2
+    exit 1
+fi
+if ! [[ "$ORBLIB_PART_SIZE_GB" =~ ^[0-9]+$ ]] || [ "$ORBLIB_PART_SIZE_GB" -lt 1 ]; then
+    echo "ОШИБКА: ORBLIB_PART_SIZE_GB должно быть целым >= 1" >&2
+    exit 1
+fi
+if ! [[ "$ORBLIB_UPLOAD_TIMEOUT" =~ ^[0-9]+(ms|s|m|h)$ ]]; then
+    echo "ОШИБКА: ORBLIB_UPLOAD_TIMEOUT должен иметь вид 30m или 2h" >&2
     exit 1
 fi
 
@@ -285,57 +295,6 @@ delete_from_yadisk() {
         || log "  ~ Не найдено на диске: $fname"
 }
 
-remote_object_size() {
-    rclone lsf "$1" --format s \
-        --config "${RCLONE_CONF_DIR}/rclone.conf" \
-        2>>"$LOGFILE" | head -n 1
-}
-
-remote_object_md5() {
-    rclone md5sum "$1" \
-        --config "${RCLONE_CONF_DIR}/rclone.conf" \
-        2>>"$LOGFILE" | awk 'NR == 1 {print tolower($1)}'
-}
-
-remove_remote_object() {
-    rclone deletefile "$1" \
-        --yandex-hard-delete \
-        --config "${RCLONE_CONF_DIR}/rclone.conf" \
-        2>>"$LOGFILE" || true
-}
-
-validate_orblib_list() {
-    local list_file="$1"
-    local name path size
-    while IFS= read -r name; do
-        if ! [[ "$name" =~ ^orblib_[A-Za-z0-9._+-]+\.npz$ ]]; then
-            log "  ✗ Недопустимое имя в списке шарда: '$name'"
-            return 1
-        fi
-        path="${ORBLIB_DIR}/${name}"
-        if [ ! -f "$path" ] || [ -L "$path" ]; then
-            log "  ✗ Файл шарда отсутствует или не является обычным файлом: $name"
-            return 1
-        fi
-        size=$(stat -c '%s' -- "$path")
-        if [ "$size" -le 0 ]; then
-            log "  ✗ Пустой файл библиотеки орбит: $name"
-            return 1
-        fi
-    done < "$list_file"
-}
-
-tar_stream_size() {
-    local list_file="$1"
-    local total=1024 name size padded
-    while IFS= read -r name; do
-        size=$(stat -c '%s' -- "${ORBLIB_DIR}/${name}")
-        padded=$(( (size + 511) / 512 * 512 ))
-        total=$(( total + 512 + padded ))
-    done < "$list_file"
-    printf '%s\n' "$total"
-}
-
 # --------------------------------------------------------------
 # download_orblib_shards: ШАГ 0 — streaming download + unpack.
 # Потоково читает ВСЕ шарды текущего KEY (любой хост/время) и распаковывает
@@ -390,109 +349,40 @@ download_orblib_shards() {
 }
 
 # --------------------------------------------------------------
-# upload_orblib_shard: ФИНАЛ — snapshot-diff + потоковый tar-upload.
-# after − before = новые .npz этого запуска → tar в stdout → remote partial;
-# после проверки size+MD5 partial атомарно переименовывается в финальный шард.
-# Полная локальная копия tar не создаётся.
+# upload_orblib_shard: ФИНАЛ — multipart snapshot-diff upload.
+# Проверенный uploader разбивает новые .npz на потоковые tar-части, проверяет
+# size+MD5 и атомарно публикует каждую часть без локальных копий tar.
 # --------------------------------------------------------------
 SHARD_UPLOADED=0
 upload_orblib_shard() {
     [ "$SHARD_UPLOADED" -eq 1 ] && return 0
-    [ -f "$SNAP_BEFORE" ] || { log "  Нет snapshot before — пропуск upload шарда"; return 0; }
+    [ -f "$SNAP_BEFORE" ] || { log "  Нет snapshot before — пропуск upload шардов"; return 0; }
 
-    local snap_after="${ORBLIB_DIR}/.snapshot_after_${TIMESTAMP}.txt"
-    local new_list="${ORBLIB_DIR}/.snapshot_new_${TIMESTAMP}.txt"
-    (cd "$ORBLIB_DIR" && ls -1 -- *.npz 2>/dev/null || true) | sort > "$snap_after"
-    comm -13 "$SNAP_BEFORE" "$snap_after" > "$new_list"
+    local uploader="${WORK_DIR}/upload_orblib_parts.sh"
+    if [ ! -x "$uploader" ]; then
+        log "  ✗ Multipart uploader не найден или не исполняемый: ${uploader}"
+        return 1
+    fi
 
-    local n_new
-    n_new=$(wc -l < "$new_list")
-    if [ "$n_new" -eq 0 ]; then
-        log "  Новых библиотек орбит нет — шард не создаётся"
-        rm -f "$snap_after" "$new_list"
+    log "  Multipart upload: шаблон=${SHARD_PATTERN}, part=${ORBLIB_PART_SIZE_GB} GB, timeout=${ORBLIB_UPLOAD_TIMEOUT}"
+    if "$uploader" \
+            --snapshot="$SNAP_BEFORE" \
+            --orblib-dir="$ORBLIB_DIR" \
+            --remote-root="${RCLONE_REMOTE}:${REMOTE_DIR}" \
+            --rclone-config="${RCLONE_CONF_DIR}/rclone.conf" \
+            --host="$HOSTNAME_ENV" \
+            --timestamp="$TIMESTAMP" \
+            --part-size-gb="$ORBLIB_PART_SIZE_GB" \
+            --attempts="$ORBLIB_UPLOAD_ATTEMPTS" \
+            --timeout="$ORBLIB_UPLOAD_TIMEOUT" \
+            --apply 2>&1 | tee -a "$LOGFILE"; then
         SHARD_UPLOADED=1
+        log "  ✓ Все multipart-шарды библиотек орбит опубликованы"
         return 0
     fi
-    if ! validate_orblib_list "$new_list"; then
-        rm -f "$snap_after" "$new_list"
-        return 1
-    fi
 
-    local expected_size human_size
-    expected_size=$(tar_stream_size "$new_list")
-    human_size=$(numfmt --to=iec "$expected_size")
-    log "  Новых библиотек орбит: ${n_new} → потоковый шард ${SHARD_NAME} (${human_size})"
-
-    local partial_name=".uploading_${SHARD_NAME}.partial"
-    local remote_partial="${RCLONE_REMOTE}:${REMOTE_DIR}/${partial_name}"
-    local remote_final="${RCLONE_REMOTE}:${REMOTE_DIR}/${SHARD_NAME}"
-    local stream_dir md5_fifo md5_file md5_pid pipeline_rc md5_rc
-    local local_md5 remote_md5 remote_size final_md5 final_size attempt
-    local uploaded=0
-    stream_dir=$(mktemp -d "${WORK_DIR}/.orblib_stream_XXXXXX")
-    md5_fifo="${stream_dir}/tar.fifo"
-    md5_file="${stream_dir}/tar.md5"
-
-    for ((attempt = 1; attempt <= ORBLIB_UPLOAD_ATTEMPTS; attempt++)); do
-        log "  Потоковая загрузка: попытка ${attempt}/${ORBLIB_UPLOAD_ATTEMPTS}"
-        remove_remote_object "$remote_partial"
-        rm -f "$md5_fifo" "$md5_file"
-        mkfifo "$md5_fifo"
-        set +e
-        md5sum < "$md5_fifo" > "$md5_file" &
-        md5_pid=$!
-        tar --format=ustar --blocking-factor=1 --verbatim-files-from \
-                -cf - -C "$ORBLIB_DIR" -T "$new_list" 2>>"$LOGFILE" \
-            | tee "$md5_fifo" \
-            | rclone rcat "$remote_partial" \
-                --size "$expected_size" \
-                --config "${RCLONE_CONF_DIR}/rclone.conf" \
-                --stats-one-line 2>>"$LOGFILE"
-        pipeline_rc=$?
-        wait "$md5_pid"
-        md5_rc=$?
-        set -e
-        rm -f "$md5_fifo"
-
-        if [ "$pipeline_rc" -ne 0 ] || [ "$md5_rc" -ne 0 ]; then
-            log "    ✗ tar/rcat завершился с ошибкой (pipeline=${pipeline_rc}, md5=${md5_rc})"
-            remove_remote_object "$remote_partial"
-            continue
-        fi
-        local_md5=$(awk 'NR == 1 {print tolower($1)}' "$md5_file")
-        remote_size=$(remote_object_size "$remote_partial" || true)
-        remote_md5=$(remote_object_md5 "$remote_partial" || true)
-        if [ "$remote_size" != "$expected_size" ] || [ "$remote_md5" != "$local_md5" ]; then
-            log "    ✗ Проверка partial не пройдена: size=${remote_size}/${expected_size}, md5=${remote_md5}/${local_md5}"
-            remove_remote_object "$remote_partial"
-            continue
-        fi
-        if ! rclone moveto "$remote_partial" "$remote_final" \
-                --config "${RCLONE_CONF_DIR}/rclone.conf" \
-                2>>"$LOGFILE"; then
-            log "    ✗ Не удалось опубликовать remote partial"
-            remove_remote_object "$remote_partial"
-            continue
-        fi
-        final_size=$(remote_object_size "$remote_final" || true)
-        final_md5=$(remote_object_md5 "$remote_final" || true)
-        if [ "$final_size" = "$expected_size" ] && [ "$final_md5" = "$local_md5" ]; then
-            uploaded=1
-            SHARD_UPLOADED=1
-            log "  ✓ Шард опубликован: ${SHARD_NAME} (${human_size}, md5=${local_md5})"
-            break
-        fi
-        log "    ✗ Проверка опубликованного шарда не пройдена"
-        remove_remote_object "$remote_final"
-    done
-
-    rm -rf "$stream_dir"
-    rm -f "$snap_after" "$new_list"
-    if [ "$uploaded" -ne 1 ]; then
-        log "  ✗ Потоковая загрузка шарда не удалась; .npz сохранены в ${ORBLIB_DIR}"
-        return 1
-    fi
-    return 0
+    log "  ✗ Multipart upload не завершён; .npz и snapshot сохранены для повторной попытки"
+    return 1
 }
 
 # --------------------------------------------------------------
@@ -586,7 +476,7 @@ log "  script           = $CALC_SCRIPT"
 log "  incl             = $INCL"
 log "  EXP_ID           = $EXP_ID"
 log "  KEY (orblib)     = $KEY"
-log "  shard            = $SHARD_NAME"
+log "  shard pattern    = $SHARD_PATTERN"
 log "  orblib dir       = $ORBLIB_DIR"
 log "  resume           = $RESUME"
 log "  shutdown         = $DO_SHUTDOWN"
@@ -594,7 +484,9 @@ log "  vCPU всего       = $N_VCPU"
 log "  Процессов        = $N_PROC"
 log "  Раскладка ядер   = ${CPU_RANGES[*]}"
 log "  Потоков/процесс  = ${THREADS_ARR[*]}"
-log "  Попыток shard upload = ${ORBLIB_UPLOAD_ATTEMPTS}"
+log "  Размер tar-части = ${ORBLIB_PART_SIZE_GB} GB"
+log "  Timeout upload   = ${ORBLIB_UPLOAD_TIMEOUT}"
+log "  Попыток/часть    = ${ORBLIB_UPLOAD_ATTEMPTS}"
 log "======================================================"
 
 [ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
@@ -603,6 +495,8 @@ log "======================================================"
 for f in "${CALC_SCRIPT}" table3.dat; do
     [ -f "${WORK_DIR}/${f}" ] || die "не найден ${WORK_DIR}/${f}"
 done
+[ -x "${WORK_DIR}/upload_orblib_parts.sh" ] \
+    || die "не найден исполняемый ${WORK_DIR}/upload_orblib_parts.sh"
 
 docker image inspect "$IMAGE" > /dev/null 2>&1 \
     || die "Docker-образ $IMAGE не найден"
@@ -740,10 +634,10 @@ for sfx in "${SUFFIXES[@]}"; do
 done
 
 # ==============================================================
-# ШАГ 5: UPLOAD ШАРДА БИБЛИОТЕК ОРБИТ (snapshot-diff)
+# ШАГ 5: MULTIPART UPLOAD БИБЛИОТЕК ОРБИТ (snapshot-diff)
 # ==============================================================
 log ""
-log "ШАГ 5: Upload нового шарда библиотек орбит..."
+log "ШАГ 5: Multipart upload новых библиотек орбит..."
 upload_orblib_shard
 
 # ==============================================================
