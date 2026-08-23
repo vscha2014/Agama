@@ -7,17 +7,20 @@ Based on Schwarzschild orbit modelling results (AGAMA/forstand)
 Reads log files from:
   /home/gala/Yandex.Disk/galAgama/4UpsBoTorch_Sersic.txt
   /home/gala/Yandex.Disk/galAgama/4UpsBoTorch_PCA_Sersic_*.txt
+  /home/gala/Yandex.Disk/galAgama/out*.txt
 
 Запуск в Spyder Console:
-  %run compute_J_factor.py
-  или выделить нужный блок и нажать F9
+  %run J_factor_Sersic_Fornax_P21_symm.py
+  %run J_factor_Sersic_Fornax_P21_symm.py --input-mask "out_*_d0_nb250_gh0_ser0*.txt"
 """
 
-import numpy
+import argparse
+import datetime
 import glob
 import os
-import datetime
-import agama
+import re
+
+import numpy
 
 import matplotlib
 matplotlib.use('Agg')
@@ -34,14 +37,17 @@ else:
 # ============================================================
 
 # Директория с лог-файлами на Яндекс.Диске
-# Входные И выходные файлы — в одной директории
 YADISK_DIR = "/home/gala/Yandex.Disk/galAgama"
+JFACTOR_DIR = os.path.join(YADISK_DIR, "J_factors")
 
-# Паттерны файлов (относительно YADISK_DIR)
+# Паттерны файлов (относительно YADISK_DIR). --input-mask заменяет этот список.
 LOG_PATTERNS_REL = [
     "4UpsBoTorch_Sersic.txt",
     "4UpsBoTorch_PCA_Sersic_*.txt",
+    "out*.txt",
 ]
+
+EXP_ID_RE = re.compile(r"(?:^|_)(d[01]_nb\d+_gh\d+_ser\d+)(?:_|\.txt$)")
 
 # Параметры расчёта — редактируйте перед запуском
 incl_target     = 90.0     # угол наклонения для фильтра (градусы)
@@ -69,36 +75,78 @@ do_corner_plot  = True
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ: пути и имена файлов
 # ============================================================
 
-def make_output_filename(prefix, theta_max_deg, incl, ext='txt'):
+def make_output_filename(prefix, theta_max_deg, incl, ext='txt',
+                         experiment_id=None):
     """
     Формирует имя выходного файла вида:
-        {prefix}_Sersic_incl{incl:.2f}_theta{theta:.1f}.{ext}
+        {prefix}_Sersic[_experiment]_incl{incl:.2f}_theta{theta:.1f}.{ext}
     Если theta_max_deg is None, суффикс _theta опускается.
-
-    Примеры:
-        J_factor_Sersic_incl90.00_theta0.5.txt
-        mass_histogram_1.0_Sersic_incl90.00.pdf
     """
-    base = f"{prefix}_Sersic_incl{incl:.2f}"
+    base = f"{prefix}_Sersic"
+    if experiment_id is not None:
+        base += f"_{experiment_id}"
+    base += f"_incl{incl:.2f}"
     if theta_max_deg is not None:
         base += f"_theta{theta_max_deg:.1f}"
     return f"{base}.{ext}"
 
 
 def make_output_fullpath(prefix, theta_max_deg, incl, ext='txt',
-                         yadisk_dir=YADISK_DIR):
+                         yadisk_dir=YADISK_DIR, experiment_id=None):
     """
     Формирует полный путь к выходному файлу в директории yadisk_dir.
 
     Все выходные файлы (txt и pdf) сохраняются в ту же директорию,
     что и входные лог-файлы.
 
-    Примеры результата:
-        /home/gala/Yandex.Disk/galAgama/J_factor_Sersic_incl90.00_theta0.5.txt
+    Пример результата:
         /home/gala/Yandex.Disk/galAgama/corner_plot_Sersic_incl90.00_theta0.5.pdf
     """
-    fname = make_output_filename(prefix, theta_max_deg, incl, ext)
+    fname = make_output_filename(
+        prefix, theta_max_deg, incl, ext, experiment_id
+    )
     return os.path.join(yadisk_dir, fname)
+
+
+def make_jfactor_output_filename(theta_max_deg, experiment_id=None, ext='txt'):
+    base = 'J_factor_Sersic'
+    if experiment_id is not None:
+        base += f'_{experiment_id}'
+    base += f'_theta{theta_max_deg:.1f}'
+    return f'{base}.{ext}'
+
+
+def make_jfactor_output_fullpath(theta_max_deg, experiment_id=None,
+                                 yadisk_dir=YADISK_DIR):
+    return os.path.join(
+        yadisk_dir, 'J_factors',
+        make_jfactor_output_filename(theta_max_deg, experiment_id),
+    )
+
+
+def experiment_id_from_filename(path):
+    basename = os.path.basename(path)
+    match = EXP_ID_RE.search(basename)
+    if match is not None:
+        return match.group(1)
+    if basename.startswith('out'):
+        raise ValueError(
+            f"Не удалось извлечь experiment ID из файла {basename}; "
+            "ожидается тег d<0|1>_nb<N>_gh<N>_ser<N>."
+        )
+    return None
+
+
+def group_log_files(log_files):
+    groups = {}
+    for path in log_files:
+        try:
+            experiment_id = experiment_id_from_filename(path)
+        except ValueError as error:
+            print(f"ПРЕДУПРЕЖДЕНИЕ: {error} Файл пропущен.")
+            continue
+        groups.setdefault(experiment_id, []).append(path)
+    return {key: sorted(paths) for key, paths in groups.items()}
 
 
 def compute_axRZst(incl_deg):
@@ -326,6 +374,8 @@ def compute_J_factor(
     J_GeV2_cm5  : float — J-фактор в GeV²/cm⁵
     J_Msun_kpc5 : float — J-фактор в Msun²/kpc⁵·sr (до конвертации)
     """
+    import agama
+
     kpc_to_cm = 3.0857e21
     rho_conv  = 1e6 * 1.989e33 / 1.783e-24 / (kpc_to_cm**3)
 
@@ -387,6 +437,8 @@ def compute_model_masses(
     massSt=14.0, scaleRst=None, Sersic_m=0.80, axRZst=1.0,
     enclosed_radii=(1.0,),
 ):
+    import agama
+
     densityHalo = agama.Density(
         type='spheroid',
         alpha=alphah, beta=betah,
@@ -426,12 +478,16 @@ def compute_J_from_logs(
     output_file   = None,
     yadisk_dir    = YADISK_DIR,
     patterns_rel  = LOG_PATTERNS_REL,
+    log_files     = None,
+    experiment_id = None,
+    initialize_output = True,
+    append_output = False,
 ):
     """
     Читает лог-файлы из yadisk_dir, вычисляет J-фактор для каждой
     хорошей точки и строит взвешенную статистику.
 
-    Выходной текстовый файл сохраняется в yadisk_dir.
+    Выходной текстовый файл сохраняется в yadisk_dir/J_factors.
 
     Returns
     -------
@@ -442,24 +498,19 @@ def compute_J_from_logs(
     _incl   = incl_filter if incl_filter is not None else incl_target
     _cutoff = pen_cutoff  if pen_cutoff  is not None else penalty_cutoff
 
-    # Выходной текстовый файл — в той же директории, что входные
     if output_file is not None:
         _outfile = output_file
     else:
-        _outfile = make_output_fullpath(
-            prefix        = 'J_factor',
-            theta_max_deg = theta_max_deg,
-            incl          = _incl,
-            ext           = 'txt',
-            yadisk_dir    = yadisk_dir,
+        _outfile = make_jfactor_output_fullpath(
+            theta_max_deg, experiment_id, yadisk_dir
         )
 
     print(f"\nВыходной файл: {_outfile}")
 
-    # --- Сбор и загрузка файлов ---
-    log_files = collect_log_files(
-        yadisk_dir=yadisk_dir, patterns_rel=patterns_rel, verbose=True
-    )
+    if log_files is None:
+        log_files = collect_log_files(
+            yadisk_dir=yadisk_dir, patterns_rel=patterns_rel, verbose=True
+        )
     data, file_counts = load_log_data(
         log_files, incl_filter=_incl, verbose=True
     )
@@ -499,21 +550,30 @@ def compute_J_from_logs(
         data_good = data_good[idx]
         print(f"Взвешенная выборка: {n_samples} точек")
 
-    # --- Заголовок файла результатов ---
-    with open(_outfile, 'w') as fout:
-        fout.write(f"# J-factor computation  {datetime.datetime.now()}\n")
-        fout.write(f"# theta_max={theta_max_deg} deg, D={D_kpc} kpc\n")
-        fout.write(f"# incl_target={_incl}, "
-                   f"penalty_cutoff={_cutoff:.6f}\n")
-        fout.write(f"# alphah={alphah}, betah={betah}\n")
-        fout.write(f"# Source directory: {yadisk_dir}\n")
-        fout.write("# Source files:\n")
-        for fname, cnt in file_counts.items():
-            fout.write(f"#   {fname}: {cnt} rows\n")
-        fout.write(
-            "# Q gh rh rho0 Upsilon rho0_x_Ups penalty "
-            "J_GeV2_cm5 log10_J\n"
-        )
+    if initialize_output:
+        output_dir = os.path.dirname(_outfile)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        append_existing = append_output and os.path.isfile(_outfile)
+        if os.path.isfile(_outfile) and not append_output:
+            print(f"ВНИМАНИЕ: существующий файл будет перезаписан: {_outfile}")
+        with open(_outfile, 'a' if append_existing else 'w') as fout:
+            if append_existing:
+                fout.write(f"\n# Appended J-factor computation  {datetime.datetime.now()}\n")
+            else:
+                fout.write(f"# J-factor computation  {datetime.datetime.now()}\n")
+                fout.write(f"# theta_max={theta_max_deg} deg, D={D_kpc} kpc\n")
+                if experiment_id is not None:
+                    fout.write(f"# experiment_id={experiment_id}\n")
+                fout.write(f"# alphah={alphah}, betah={betah}\n")
+                fout.write(f"# Source directory: {yadisk_dir}\n")
+                fout.write(
+                    "# incl Q gh rh rho0 Upsilon rho0_x_Ups penalty "
+                    "J_GeV2_cm5 log10_J\n"
+                )
+            fout.write("# Source files for this run:\n")
+            for fname in file_counts:
+                fout.write(f"#   {fname}\n")
 
     # --- Основной цикл ---
     J_values = []
@@ -544,7 +604,7 @@ def compute_J_from_logs(
 
             with open(_outfile, 'a') as fout:
                 fout.write(
-                    f"{Q:.10f} {gh:.10f} {rh:.10f} {rho0:.10f} "
+                    f"{_incl:.2f} {Q:.10f} {gh:.10f} {rh:.10f} {rho0:.10f} "
                     f"{Upsilon:.10f} {rho0*Upsilon:.10f} "
                     f"{penalty:.10f} "
                     f"{J_GeV:.8e} {numpy.log10(J_GeV):.8f}\n"
@@ -615,7 +675,7 @@ def compute_J_from_logs(
 
     # --- Запись итогов в файл ---
     with open(_outfile, 'a') as fout:
-        fout.write("\n# ============ RESULTS ============\n")
+        fout.write(f"\n# ============ RESULTS incl={_incl:.2f} ============\n")
         fout.write(
             "# Статистика ВЗВЕШЕННАЯ: "
             "w = exp(-(penalty - pen_min) / pen_sigma)\n"
@@ -654,7 +714,8 @@ def make_corner_plot(data_good, J_arr,
                      theta_max_deg=0.5,
                      incl=None,
                      title=None,
-                     yadisk_dir=YADISK_DIR):
+                     yadisk_dir=YADISK_DIR,
+                     experiment_id=None):
     """
     Corner-plot: Q, gh, rh, rho0*Upsilon, Upsilon, log10(J).
 
@@ -677,6 +738,7 @@ def make_corner_plot(data_good, J_arr,
             incl          = _incl,
             ext           = 'pdf',
             yadisk_dir    = yadisk_dir,
+            experiment_id = experiment_id,
         )
 
     print(f"\nCorner-plot → {_outfile}")
@@ -891,7 +953,7 @@ def make_mass_histograms(
     enclosed_radii=(1.0,),
     massSt=14.0, scaleRst=None, Sersic_m=0.80, axRZst=1.0,
     alphah=2.0, betah=3.0,
-    incl=None, yadisk_dir=YADISK_DIR,
+    incl=None, yadisk_dir=YADISK_DIR, experiment_id=None,
 ):
     _incl = incl if incl is not None else incl_target
     n_J = len(J_arr)
@@ -1015,6 +1077,7 @@ def make_mass_histograms(
         outfile = make_output_fullpath(
             prefix=f'mass_histogram_{r}',
             theta_max_deg=None, incl=_incl, ext='pdf', yadisk_dir=yadisk_dir,
+            experiment_id=experiment_id,
         )
         fig.savefig(outfile, dpi=150, bbox_inches='tight')
         plt.close(fig)
@@ -1022,99 +1085,140 @@ def make_mass_histograms(
 
 
 # ============================================================
-#  ЗАПУСК (выполняется при %run или F9 в Spyder)
+#  ЗАПУСК (выполняется при %run или из командной строки)
 # ============================================================
 
-print("=" * 60)
-print("J-FACTOR COMPUTATION  Fornax dSph")
-print(f"Start: {datetime.datetime.now()}")
-print(f"D = {D_kpc} kpc")
-print(f"Входные файлы  ← {YADISK_DIR}")
-print(f"Выходные файлы → {YADISK_DIR}")
-print("=" * 60)
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='J-factor computation for Fornax dSph')
+    parser.add_argument(
+        '--input-mask', action='append', dest='input_masks', default=None,
+        help=("Glob-маска входных файлов относительно YADISK_DIR. Можно указать "
+              "несколько раз. Если задана, стандартные маски не используются."),
+    )
+    parser.add_argument(
+        '--append', action='store_true',
+        help=("Дописывать выбранные --input-mask расчёты в существующие J-файлы. "
+              "Повторный запуск с той же маской добавит строки повторно."),
+    )
+    return parser.parse_args(argv)
 
-# --- Обнаружение всех наклонений, встречающихся в 4Ups-файлах ---
-_log_files = collect_log_files(
-    yadisk_dir=YADISK_DIR, patterns_rel=LOG_PATTERNS_REL, verbose=True
-)
-incl_values = discover_inclinations(_log_files, verbose=True)
-if not incl_values:
-    raise RuntimeError("Не найдено ни одного наклонения в лог-файлах.")
 
-all_results = []
+def main(argv=None):
+    args = parse_args(argv)
+    if args.append and not args.input_masks:
+        raise ValueError("--append требует хотя бы одну --input-mask")
+    patterns_rel = args.input_masks or LOG_PATTERNS_REL
 
-_theta_corner = 0.5
-_massSt   = 14.0
-_scaleRst = numpy.pi * D_kpc / 180 * 16.4 / 60
-_Sersic_m = 0.80
+    print("=" * 60)
+    print("J-FACTOR COMPUTATION  Fornax dSph")
+    print(f"Start: {datetime.datetime.now()}")
+    print(f"D = {D_kpc} kpc")
+    print(f"Входные файлы  ← {YADISK_DIR}")
+    print(f"J-файлы        → {JFACTOR_DIR}")
+    print(f"Маски входа    : {patterns_rel}")
+    print("=" * 60)
 
-# --- Цикл по всем наклонениям из 4Ups-файлов ---
-for _incl in incl_values:
-    print(f"\n{'#'*60}")
-    print(f"# Наклонение incl = {_incl}°")
-    print('#'*60)
+    log_files = collect_log_files(
+        yadisk_dir=YADISK_DIR, patterns_rel=patterns_rel, verbose=True
+    )
+    grouped_files = group_log_files(log_files)
+    if not grouped_files:
+        raise RuntimeError("Среди найденных файлов нет распознаваемых историй расчёта.")
+    all_results = []
 
-    _corner_data = None   # (data_good, J_arr, results) для theta_corner
+    theta_corner = 0.5
+    massSt   = 14.0
+    scaleRst = numpy.pi * D_kpc / 180 * 16.4 / 60
+    Sersic_m = 0.80
 
-    # --- Расчёт для каждого theta ---
-    for _theta in theta_list:
-        print(f"\n{'='*50}")
-        print(f"incl={_incl}°  theta_max = {_theta}°")
-        print('='*50)
+    for experiment_id in sorted(grouped_files, key=lambda value: value or ''):
+        experiment_files = grouped_files[experiment_id]
+        experiment_label = experiment_id or 'legacy'
+        print(f"\n{'#'*60}")
+        print(f"# Эксперимент: {experiment_label}")
+        print(f"# Файлов: {len(experiment_files)}")
+        print('#'*60)
 
-        try:
-            _results, _J_arr, _data_used = compute_J_from_logs(
-                theta_max_deg = _theta,
-                incl_filter   = _incl,
-            )
-            all_results.append(_results)
-            if abs(_theta - _theta_corner) < 1e-9:
-                _corner_data = (_data_used, _J_arr, _results)
-
-        except Exception as _e:
-            print(f"  ОШИБКА для incl={_incl}, theta={_theta}: {_e}")
+        incl_values = discover_inclinations(experiment_files, verbose=True)
+        if not incl_values:
+            print(f"  Нет наклонений для эксперимента {experiment_label}; пропуск.")
             continue
 
-    # --- Corner-plot + гистограммы массы для theta_corner ---
-    if do_corner_plot and _corner_data is not None:
-        _data_c, _J_c, _res_c = _corner_data
-        try:
-            make_corner_plot(
-                data_good     = _data_c,
-                J_arr         = _J_c,
-                theta_max_deg = _theta_corner,
-                incl          = _incl,
-                yadisk_dir    = YADISK_DIR,
-                title         = (
-                    f'Fornax dSph  |  incl={_incl:.2f}°  '
-                    f'|  theta<{_theta_corner:.1f}°  '
-                    f'|  D={D_kpc} kpc\n'
-                    f'{len(_J_c)} models  |  '
-                    f'log10(J) = '
-                    f'{_res_c["logJ_median"]:.2f} ± '
-                    f'{_res_c["logJ_std"]:.2f}'
-                ),
+        corner_data = {}
+        for theta in theta_list:
+            output_file = make_jfactor_output_fullpath(
+                theta, experiment_id, YADISK_DIR
             )
-        except Exception as _e:
-            print(f"  Ошибка corner-plot (incl={_incl}): {_e}")
+            initialize_output = True
+            for incl in incl_values:
+                print(f"\n{'='*50}")
+                print(f"experiment={experiment_label}  incl={incl}°  theta_max={theta}°")
+                print('='*50)
 
-        try:
-            make_mass_histograms(
-                data_good=_data_c,
-                J_arr=_J_c,
-                enclosed_radii=(1.0,),
-                massSt=_massSt,
-                scaleRst=_scaleRst,
-                Sersic_m=_Sersic_m,
-                axRZst=None,
-                incl=_incl,
-                yadisk_dir=YADISK_DIR,
-            )
-        except Exception as _e:
-            print(f"  Ошибка гистограмм массы (incl={_incl}): {_e}")
+                try:
+                    results, J_arr, data_used = compute_J_from_logs(
+                        theta_max_deg=theta,
+                        incl_filter=incl,
+                        output_file=output_file,
+                        yadisk_dir=YADISK_DIR,
+                        log_files=experiment_files,
+                        experiment_id=experiment_id,
+                        initialize_output=initialize_output,
+                        append_output=args.append,
+                    )
+                    all_results.append(results)
+                    if abs(theta - theta_corner) < 1e-9:
+                        corner_data[incl] = (data_used, J_arr, results)
+                except Exception as error:
+                    print(f"  ОШИБКА для experiment={experiment_label}, "
+                          f"incl={incl}, theta={theta}: {error}")
+                finally:
+                    initialize_output = False
 
-# --- Сводная таблица (все наклонения и theta) ---
-if all_results:
-    print_summary_table(all_results)
+        if not do_corner_plot:
+            continue
+        for incl, (data_c, J_c, res_c) in corner_data.items():
+            try:
+                make_corner_plot(
+                    data_good=data_c,
+                    J_arr=J_c,
+                    theta_max_deg=theta_corner,
+                    incl=incl,
+                    yadisk_dir=YADISK_DIR,
+                    experiment_id=experiment_id,
+                    title=(
+                        f'Fornax dSph  |  {experiment_label}  |  incl={incl:.2f}°  '
+                        f'|  theta<{theta_corner:.1f}°  |  D={D_kpc} kpc\n'
+                        f'{len(J_c)} models  |  log10(J) = '
+                        f'{res_c["logJ_median"]:.2f} ± {res_c["logJ_std"]:.2f}'
+                    ),
+                )
+            except Exception as error:
+                print(f"  Ошибка corner-plot (experiment={experiment_label}, "
+                      f"incl={incl}): {error}")
 
-print(f"\nГотово: {datetime.datetime.now()}")
+            try:
+                make_mass_histograms(
+                    data_good=data_c,
+                    J_arr=J_c,
+                    enclosed_radii=(1.0,),
+                    massSt=massSt,
+                    scaleRst=scaleRst,
+                    Sersic_m=Sersic_m,
+                    axRZst=None,
+                    incl=incl,
+                    yadisk_dir=YADISK_DIR,
+                    experiment_id=experiment_id,
+                )
+            except Exception as error:
+                print(f"  Ошибка гистограмм массы (experiment={experiment_label}, "
+                      f"incl={incl}): {error}")
+
+    if all_results:
+        print_summary_table(all_results)
+
+    print(f"\nГотово: {datetime.datetime.now()}")
+
+
+if __name__ == '__main__':
+    main()

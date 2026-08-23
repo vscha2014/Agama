@@ -118,8 +118,10 @@ Failures return `-1e6` (logged as penalty 1e6).
   generalize), applies adaptive penalty cutoff (best `target_fraction=0.30`,
   hard ceiling `cutoff_start=0.60`).
 - For each good model rebuilds the halo density and integrates ρ² along the line
-  of sight over cones θ ∈ {0.1, 0.2, 0.5, 1.0}° (D=143 kpc) → J(θ); writes
-  result tables and weighted histograms / corner plots back to YADISK_DIR.
+  of sight over cones θ ∈ {0.1, 0.2, 0.5, 1.0}° (D=143 kpc) → J(θ). Input
+  `out*.txt` files are grouped by experiment ID; each experiment/theta table
+  contains all inclinations and is written under `YADISK_DIR/J_factors/`.
+  Weighted histograms / corner plots remain directly under `YADISK_DIR`.
 
 ## 6. Parts that are still unclear
 

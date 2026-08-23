@@ -37,8 +37,8 @@ objective-function evaluation:
 | 7 | timestamp | `datetime.datetime.now()`, two whitespace-separated tokens (date + time). **Not parsed** by readers (they take only `parts[:7]`). |
 
 - **J-factor is NOT in these files** — it is computed downstream by
-  `J_factor_Sersic_Fornax_P21_symm.py` into separate `J_factor_*` outputs (on
-  Yandex.Disk, not committed).
+  `J_factor_Sersic_Fornax_P21_symm.py` into separate `J_factor_*` outputs under
+  `Yandex.Disk/galAgama/J_factors/` (not committed).
 - **Seed/worker id**: the worker is identified by the `# Server: <host>_<pN>`
   comment preceding each block and by the filename suffix; it is not a column.
 - The `# PCA:` line gives the candidate's coordinates in the then-current PCA
@@ -66,7 +66,21 @@ Available only from comments: worker id, timestamp (col 7 exists but is unparsed
 **Missing / ambiguous**: random seed, software version, PCA-space id, run id —
 candidates for a future metadata sidecar (needs PI approval, see questions).
 
-## 2. `4result_BoTorch_PCA_Sersic_*.txt` — optimization log (human-readable)
+## 2. `J_factors/J_factor_Sersic[_<experiment_id>]_theta<theta>.txt`
+
+The J-factor analysis groups `out*.txt` inputs by experiment ID
+`d<0|1>_nb<N>_gh<N>_ser<N>` and writes one table per experiment and aperture
+angle. Legacy `4Ups*` inputs use the filename without `<experiment_id>`.
+All inclinations are rows of the same table:
+
+```text
+# incl Q gh rh rho0 Upsilon rho0_x_Ups penalty J_GeV2_cm5 log10_J
+```
+
+`--input-mask` replaces the default input globs; `--append` appends a selected
+new input subset to an existing table without deduplication.
+
+## 3. `4result_BoTorch_PCA_Sersic_*.txt` — optimization log (human-readable)
 
 Written via the `_write` helper inside `run_pca_optimization` (and the launcher
 merge machinery). **Not a tabular format**; it is a free-form log containing:
@@ -86,7 +100,7 @@ final summary; there is no per-row column structure. **No script in the repo
 parses these files** — they appear to be for monitoring/debugging only (to be
 confirmed by the PI, see `questions_for_pi.md`).
 
-## 3. Naming convention: canonical vs PA46.8 archive
+## 4. Naming convention: canonical vs PA46.8 archive
 
 - **Canonical** (correct geometry `posang=42.3`, `q_ap=0.69`):
   `4UpsBoTorch_PCA_Sersic_<host>[_pN].txt` and
@@ -98,7 +112,7 @@ confirmed by the PI, see `questions_for_pi.md`).
   run's PCA model. The archive is read **only** by the opt-in seeding path
   (`--init-from-pa468`, `seed_points_from_patterns`), which **recomputes** penalty.
 
-## 4. Resolved semantics (PI answers)
+## 5. Resolved semantics (PI answers)
 
 1. **Penalty**: **not χ²**; treat col 6 only as a relative ranking score.
 2. **Files**: use **all** files (per-process `_pN` + merged per-host). `_pN` are

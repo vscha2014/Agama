@@ -3,7 +3,7 @@
 """
 Диагностика взвешивания J-фактора (READ-ONLY, ничего не запускает в AGAMA).
 
-Цель: на уже посчитанных файлах J_factor_Sersic_incl*_theta0.5.txt сравнить
+Цель: на уже посчитанных файлах J_factor_Sersic*_theta0.5.txt сравнить
 оценку log10(J) тремя способами и показать величину смещения, связанного с
 плотностью сэмплирования оптимизатором:
 
@@ -26,7 +26,8 @@
 Метод итоговой оценки J — решение PI (контракт §7); здесь ничего не меняется.
 
 Источники данных (--source):
-  jfactor  (по умолчанию) — готовые файлы analise/J_factor_Sersic_incl*_theta0.5.txt
+  jfactor  (по умолчанию) — готовые файлы
+                            J_factors/J_factor_Sersic*_theta0.5.txt
                             (J уже посчитан; AGAMA не нужна).
   raw                     — сырые файлы оптимизатора 4UpsBoTorch_PCA_Sersic*.txt
                             (по умолчанию в /home/gala/Yandex.Disk/galAgama)
@@ -64,6 +65,9 @@ COL_PENALTY = 6
 COL_LOGJ = 8
 
 INCL_RE = re.compile(r'incl([0-9]+(?:\.[0-9]+)?)')
+JFACTOR_EXP_RE = re.compile(
+    r'^J_factor_Sersic(?:_(d[01]_nb\d+_gh\d+_ser\d+))?(?:_incl[^_]*)?_theta'
+)
 
 
 # ============================================================
@@ -77,8 +81,13 @@ def parse_incl_from_name(path):
     return float(m.group(1))
 
 
+def parse_jfactor_experiment(path):
+    match = JFACTOR_EXP_RE.match(os.path.basename(path))
+    return match.group(1) if match is not None else None
+
+
 def load_table(path):
-    """Читает числовые строки файла, пропуская комментарии (#) и пустые."""
+    """Читает 9 старых либо 10 новых (incl + 9) числовых колонок."""
     rows = []
     with open(path, 'r') as fh:
         for line in fh:
@@ -89,7 +98,7 @@ def load_table(path):
             if len(parts) < 9:
                 continue
             try:
-                rows.append([float(x) for x in parts[:9]])
+                rows.append([float(x) for x in parts[:10]])
             except ValueError:
                 continue
     if not rows:
@@ -529,13 +538,30 @@ def build_dataset_jfactor(indir, pattern):
     if not files:
         raise SystemExit(
             f"Не найдено файлов по паттерну {pattern} в {indir}")
+    experiments = {parse_jfactor_experiment(path) for path in files}
+    if len(experiments) > 1:
+        labels = ', '.join(sorted(value or 'legacy' for value in experiments))
+        raise SystemExit(
+            f"Паттерн одновременно выбрал разные эксперименты ({labels}); "
+            "уточните --pattern."
+        )
     print(f"[jfactor] Найдено файлов: {len(files)}")
-    out = {}
+    rows_by_incl = {}
     for f in files:
-        incl = parse_incl_from_name(f)
-        data9 = load_table(f)
-        if len(data9) == 0:
+        table = load_table(f)
+        if len(table) == 0:
             continue
+        if table.shape[1] >= 10:
+            for incl in numpy.unique(numpy.round(table[:, 0], 2)):
+                selected = table[numpy.abs(table[:, 0] - incl) <= 0.01, 1:10]
+                rows_by_incl.setdefault(float(incl), []).append(selected)
+        else:
+            incl = parse_incl_from_name(f)
+            rows_by_incl.setdefault(incl, []).append(table[:, :9])
+
+    out = {}
+    for incl, chunks in rows_by_incl.items():
+        data9 = numpy.vstack(chunks)
         du, counts, n_raw, _ = collapse_duplicates(data9)
         out[incl] = (du, counts, n_raw)
     return out
@@ -768,7 +794,7 @@ def make_plot(results, out_path):
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_indir = os.path.join(script_dir, 'analise')
+    default_indir = os.path.join(RAW_DIR_DEFAULT, 'J_factors')
     default_savej = os.path.join(script_dir, 'Jcomputed_from_raw_theta0.5.txt')
 
     parser = argparse.ArgumentParser(
@@ -779,11 +805,12 @@ def main():
     # jfactor
     parser.add_argument(
         '--indir', default=default_indir,
-        help="[jfactor] Директория с J_factor_Sersic_incl*_theta0.5.txt "
-             "(по умолчанию py/analise).")
+        help="[jfactor] Директория с J_factor_Sersic*_theta0.5.txt "
+             "(по умолчанию Yandex.Disk/galAgama/J_factors).")
     parser.add_argument(
-        '--pattern', default='J_factor_Sersic_incl*_theta0.5.txt',
-        help="[jfactor] Glob-паттерн входных файлов.")
+        '--pattern', default='J_factor_Sersic*_theta0.5.txt',
+        help=("[jfactor] Glob-паттерн входных файлов; должен выбирать не более "
+              "одного experiment ID."))
     # raw
     parser.add_argument(
         '--raw-dir', default=RAW_DIR_DEFAULT,

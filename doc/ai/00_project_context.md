@@ -50,9 +50,10 @@ its uncertainty.
   `4UpsBoTorch_PCA_Sersic_<host>.txt` / `4result_BoTorch_PCA_Sersic_<host>.txt`
   and uploaded to Yandex.Disk; per-process files are then deleted.
 - Checkpoint/resume: `checkpoint_<host>_pN.pkl`, `--resume` flag in the launcher.
-- Post-processing: `py/J_factor_Sersic_Fornax_P21_symm.py` reads the merged history
-  files (from a mounted Yandex.Disk dir), filters by `incl` and penalty percentile,
-  computes J-factors for several aperture angles and builds weighted histograms /
+- Post-processing: `py/J_factor_Sersic_Fornax_P21_symm.py` reads merged `4Ups*`
+  and experiment-tagged `out*` history files (from a mounted Yandex.Disk dir),
+  filters by `incl` and penalty percentile, computes J-factors for several aperture
+  angles, writes grouped tables under `J_factors/`, and builds weighted histograms /
   corner plots.
 
 ## Current user goals (from `Devin_instructions.txt`)
