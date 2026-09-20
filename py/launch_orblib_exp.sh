@@ -42,18 +42,39 @@ CALC_SCRIPT="${CALC_SCRIPT:-Fornax_P21_PCA_w3Sersic_orblib_exp.py}"
 # Параметры эксперимента (нужны оркестратору для EXP_ID/KEY;
 # пробрасываются и в Python-скрипт).
 DOUBLE=1
+Q1=0
 NBIN=250
 GHID=0
 SERID=0
 
 for arg in "$@"; do
     case $arg in
+        --help|-h)
+            printf '%s\n' \
+                'Использование: bash launch_orblib_exp.sh [--Q1] [--incl=90.0] [--nproc=N]' \
+                '  --Q1           Фиксировать Q=1, d1; запись Q1d1_*, чтение d1/Q1d1 при Q=1.' \
+                '  --no-double    Отключить удвоение; несовместимо с --Q1.' \
+                '  --n-bin=250    Число звёзд на апертуру.' \
+                '  --resume       Продолжить с checkpoint выбранного режима.' \
+                '  --no-shutdown  Не выключать VM после завершения.' \
+                'По умолчанию: свободный Q, d1, incl=90, gh-id=0, ser-id=0.' \
+                'Новые .npz выгружаются по мере готовности; старые tar не скачиваются.' \
+                'После отказа доставки: завершение текущих моделей, checkpoint, выключение VM.' \
+                'ORBLIB_FILE_TIMEOUT=900 (сек), ORBLIB_UPLOAD_ATTEMPTS=3, ORBLIB_RESERVE_BYTES=2000000000.' \
+                'Сохранение/локальное переиспользование включены. Без --no-shutdown VM выключается.'
+            exit 0
+            ;;
         --incl=*)      INCL="${arg#*=}"        ;;
         --nproc=*)     N_PROC="${arg#*=}"      ;;
         --resume)      RESUME=1                ;;
         --no-shutdown) DO_SHUTDOWN=0           ;;
         --script=*)    CALC_SCRIPT="${arg#*=}" ;;
         --no-double)   DOUBLE=0                ;;
+        --Q1)          Q1=1                    ;;
+        --q1)
+            echo 'ОШИБКА: используйте --Q1 с заглавной Q' >&2
+            exit 2
+            ;;
         --n-bin=*)     NBIN="${arg#*=}"        ;;
         --gh-id=*)     GHID="${arg#*=}"        ;;
         --ser-id=*)    SERID="${arg#*=}"       ;;
@@ -72,10 +93,19 @@ ORBLIB_REMOTE_DIR="${REMOTE_DIR}/orblib"
 ORBLIB_UPLOAD_ATTEMPTS="${ORBLIB_UPLOAD_ATTEMPTS:-3}"
 ORBLIB_PART_SIZE_GB="${ORBLIB_PART_SIZE_GB:-40}"
 ORBLIB_UPLOAD_TIMEOUT="${ORBLIB_UPLOAD_TIMEOUT:-2h}"
+ORBLIB_FILE_TIMEOUT="${ORBLIB_FILE_TIMEOUT:-900}"
+ORBLIB_RESERVE_BYTES="${ORBLIB_RESERVE_BYTES:-2000000000}"
 
 # --- Идентификаторы эксперимента ---
 # EXP_ID — как в Python-скрипте (входит в имена out_/log_/checkpoint_).
 EXP_ID="d${DOUBLE}_nb${NBIN}_gh${GHID}_ser${SERID}"
+if [ "$Q1" -eq 1 ]; then
+    if [ "$DOUBLE" -ne 1 ]; then
+        echo "ОШИБКА: --Q1 требует удвоения d1; уберите --no-double" >&2
+        exit 1
+    fi
+    EXP_ID="Q1${EXP_ID}"
+fi
 # KEY — ключ библиотек орбит: incl с одним знаком, БЕЗ gh_id.
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 KEY="i${INCL_FMT}_d${DOUBLE}_nb${NBIN}_ser${SERID}"
@@ -84,12 +114,14 @@ SHARD_PATTERN="orblib_${KEY}__${HOSTNAME_ENV}_${TIMESTAMP}_partNNN.tar"
 # Каталог библиотек орбит: внутри WORK_DIR → виден в контейнере как
 # /workspace/orblib (WORK_DIR монтируется в /workspace), файлы на хосте.
 ORBLIB_DIR="${WORK_DIR}/orblib"
-SNAP_BEFORE="${ORBLIB_DIR}/.snapshot_before_${TIMESTAMP}.txt"
+RUN_TAG="${EXP_ID}_i${INCL_FMT}"
+SNAP_BEFORE="${ORBLIB_DIR}/.snapshot_before_${RUN_TAG}_${TIMESTAMP}.txt"
 
 # Флаги эксперимента для Python-скрипта (сейв+реюз орблибов включены:
 # управление библиотеками — смысл этого оркестратора).
-EXP_FLAGS="--n-bin=${NBIN} --gh-id=${GHID} --ser-id=${SERID} --save-orblib --reuse-orblib"
+EXP_FLAGS="--n-bin=${NBIN} --gh-id=${GHID} --ser-id=${SERID} --save-orblib --reuse-orblib --stream-orblib"
 [ "$DOUBLE" -eq 0 ] && EXP_FLAGS="--no-double $EXP_FLAGS"
+[ "$Q1" -eq 1 ] && EXP_FLAGS="--Q1 $EXP_FLAGS"
 
 # --- Валидация и авто-раскладка процессов по ядрам ---
 if ! [[ "$N_PROC" =~ ^[0-9]+$ ]] || [ "$N_PROC" -lt 1 ]; then
@@ -131,6 +163,33 @@ LOGFILE="${WORK_DIR}/launch_orblib_${EXP_ID}_i${INCL}_${TIMESTAMP}.log"
 
 MAIN_PID=$$
 SHUTDOWN_DONE=0
+UPLOADER_PID=""
+STORAGE_STARTED=0
+declare -a PIDS=()
+
+storage_cli() {
+    python3 "${WORK_DIR}/orblib_storage.py" "$@" \
+        --root "$ORBLIB_DIR" --remote "${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}" \
+        --config "${RCLONE_CONF_DIR}/rclone.conf" \
+        --attempts "$ORBLIB_UPLOAD_ATTEMPTS" --timeout "$ORBLIB_FILE_TIMEOUT" \
+        --reserve-bytes "$ORBLIB_RESERVE_BYTES"
+}
+
+storage_stopped() {
+    [ -f "${ORBLIB_DIR}/.storage/STOP" ]
+}
+
+stop_workers() {
+    [ "$STORAGE_STARTED" -eq 1 ] || return 0
+    storage_cli stop --reason "${1:-Controller failure}" || true
+    local pid
+    for pid in "${PIDS[@]}"; do
+        wait "$pid" || true
+    done
+    if [ -n "$UPLOADER_PID" ]; then
+        wait "$UPLOADER_PID" || true
+    fi
+}
 
 # ==============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -142,7 +201,7 @@ log() {
 notify() {
     local msg="$1"
     local priority="${2:-default}"
-    if curl -s -f \
+    if curl -s -f --max-time 10 \
         -H "Title: OrblibExp ${HOSTNAME_ENV}" \
         -H "Priority: ${priority}" \
         -d "$msg" \
@@ -183,16 +242,17 @@ on_exit() {
         log "Аварийное завершение скрипта (код ${code})"
         notify "Аварийное завершение orblib_exp на ${HOSTNAME_ENV} (код ${code})" "urgent"
         # Попытаться сохранить наработанные библиотеки орбит перед выключением
-        upload_orblib_shard || true
-        schedule_shutdown 5 "аварийное завершение скрипта (код ${code})"
+        stop_workers "Controller exit ${code}"
+        schedule_shutdown 1 "checkpoint/остановка после ошибки (код ${code})"
     fi
 }
 trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 die() {
     log "ОШИБКА: $*"
     notify "ОШИБКА orblib_exp на ${HOSTNAME_ENV}: $*" "urgent"
-    schedule_shutdown 2 "критическая ошибка: $*"
     exit 1
 }
 
@@ -268,12 +328,14 @@ download_from_yadisk() {
     local remote_path="${RCLONE_REMOTE}:${REMOTE_DIR}/${fname}"
     rclone copyto "$remote_path" "${WORK_DIR}/${fname}" \
         --config "${RCLONE_CONF_DIR}/rclone.conf" \
-        --stats-one-line 2>>"$LOGFILE" \
+        --timeout 30s --contimeout 10s --max-duration 60s --cutoff-mode HARD \
+        --retries 1 --low-level-retries 1 --stats-one-line 2>>"$LOGFILE" \
         && log "  ✓ Скачан: $fname" \
         || { log "  ~ Не найден на Яндекс.Диске: $fname"; return 1; }
 }
 
 upload_to_yadisk() {
+    storage_stopped && return 0
     local filepath="$1"
     [ -f "$filepath" ] || return 0
     local fname
@@ -281,17 +343,20 @@ upload_to_yadisk() {
     rclone copyto "$filepath" \
         "${RCLONE_REMOTE}:${REMOTE_DIR}/${fname}" \
         --config "${RCLONE_CONF_DIR}/rclone.conf" \
-        --stats-one-line 2>>"$LOGFILE" \
+        --timeout 30s --contimeout 10s --max-duration 60s --cutoff-mode HARD \
+        --retries 1 --low-level-retries 1 --stats-one-line 2>>"$LOGFILE" \
         && log "  ✓ Загружено: $fname" \
         || log "  ✗ Ошибка загрузки: $fname"
 }
 
 delete_from_yadisk() {
+    storage_stopped && return 0
     local fname="$1"
     rclone deletefile \
         "${RCLONE_REMOTE}:${REMOTE_DIR}/${fname}" \
         --config "${RCLONE_CONF_DIR}/rclone.conf" \
-        2>>"$LOGFILE" \
+        --timeout 30s --contimeout 10s --max-duration 60s --cutoff-mode HARD \
+        --retries 1 --low-level-retries 1 2>>"$LOGFILE" \
         && log "  ✓ Удалено с Яндекс.Диска: $fname" \
         || log "  ~ Не найдено на диске: $fname"
 }
@@ -400,8 +465,9 @@ run_container() {
 
     log "  Контейнер $sfx: CPU=${cpu_start}-${cpu_end} flags='$flags'"
 
+    set +e
     docker run --rm \
-        --name "agama_orblib_${HOSTNAME_ENV}_${sfx}" \
+        --name "agama_orblib_${HOSTNAME_ENV}_${RUN_TAG}_${sfx}" \
         --cpuset-cpus="${cpu_start}-${cpu_end}" \
         \
         -e HOST_UID="$(id -u)" \
@@ -412,6 +478,7 @@ run_container() {
         \
         -e RCLONE_CONFIG="/workspace/.config/rclone/rclone.conf" \
         -e RCLONE_REMOTE="${RCLONE_REMOTE}" \
+        -e ORBLIB_RESERVE_BYTES="${ORBLIB_RESERVE_BYTES}" \
         -e HOSTNAME_SUFFIX="${HOSTNAME_ENV}" \
         -e NTFY_TOPIC="${NTFY_TOPIC}" \
         -e NTFY_SERVER="${NTFY_SERVER}" \
@@ -432,13 +499,27 @@ run_container() {
             $EXP_FLAGS \
             $flags \
             $EXTRA_ARGS \
-        2>&1 | tee "$proc_log" \
-        || exit_code=$?
+        2>&1 | tee "$proc_log"
+    local -a pipeline_codes=("${PIPESTATUS[@]}")
+    set -e
+    exit_code="${pipeline_codes[0]}"
+    if [ "${pipeline_codes[1]}" -ne 0 ]; then
+        storage_cli stop --reason "tee failed for ${sfx}: ${pipeline_codes[1]}" || true
+        [ "$exit_code" -ne 0 ] || exit_code=74
+    fi
+    if storage_stopped || [ "$exit_code" -eq 75 ]; then
+        log "  Остановка $sfx: docker=$exit_code tee=${pipeline_codes[1]}; файлы сохранены локально"
+        if [ ! -s "${WORK_DIR}/checkpoint_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.pkl" ]; then
+            log "  ВНИМАНИЕ: свежий checkpoint $sfx не подтверждён; сохранена доступная история"
+        fi
+        [ "$exit_code" -ne 0 ] || exit_code=75
+        return "$exit_code"
+    fi
 
     # --- Немедленное объединение истории после завершения контейнера ---
     local merge_label
     if [ $exit_code -eq 0 ]; then
-        touch "${WORK_DIR}/.done_orblib_${sfx}"
+        touch "${WORK_DIR}/.done_orblib_${RUN_TAG}_${sfx}"
         merge_label="RESULT-OK: incl=${INCL}, exp=${EXP_ID}, suffix=${sfx}, host=${HOSTNAME_ENV}"
         log "  ✓ Контейнер $sfx завершён успешно — объединяем файлы"
     else
@@ -456,7 +537,7 @@ run_container() {
     (
         flock -x 200
         upload_to_yadisk "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
-    ) 200>"${WORK_DIR}/.upload_lock_orblib"
+    ) 200>"${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 
     # Диагностический лог процесса (log_*) и лог контейнера — заливаем
     # ВСЕГДА (в т.ч. при ошибке), чтобы traceback был на Я.Диске независимо
@@ -486,9 +567,9 @@ log "  vCPU всего       = $N_VCPU"
 log "  Процессов        = $N_PROC"
 log "  Раскладка ядер   = ${CPU_RANGES[*]}"
 log "  Потоков/процесс  = ${THREADS_ARR[*]}"
-log "  Размер tar-части = ${ORBLIB_PART_SIZE_GB} GB"
-log "  Timeout upload   = ${ORBLIB_UPLOAD_TIMEOUT}"
-log "  Попыток/часть    = ${ORBLIB_UPLOAD_ATTEMPTS}"
+log "  Legacy tar size  = ${ORBLIB_PART_SIZE_GB} GB (не используется в streaming)"
+log "  Legacy timeout   = ${ORBLIB_UPLOAD_TIMEOUT} (не используется в streaming)"
+log "  Попыток/файл     = ${ORBLIB_UPLOAD_ATTEMPTS}"
 log "======================================================"
 
 [ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
@@ -497,8 +578,31 @@ log "======================================================"
 for f in "${CALC_SCRIPT}" table3.dat; do
     [ -f "${WORK_DIR}/${f}" ] || die "не найден ${WORK_DIR}/${f}"
 done
-[ -x "${WORK_DIR}/upload_orblib_parts.sh" ] \
-    || die "не найден исполняемый ${WORK_DIR}/upload_orblib_parts.sh"
+[ -f "${WORK_DIR}/orblib_storage.py" ] \
+    || die "не найден ${WORK_DIR}/orblib_storage.py"
+[[ "$ORBLIB_FILE_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$ORBLIB_FILE_TIMEOUT" -ge 1 ] \
+    || die "ORBLIB_FILE_TIMEOUT должен быть положительным целым числом секунд"
+[[ "$ORBLIB_RESERVE_BYTES" =~ ^[0-9]+$ ]] \
+    || die "ORBLIB_RESERVE_BYTES должен быть неотрицательным целым числом"
+mkdir -p "$ORBLIB_DIR"
+exec 201>"${ORBLIB_DIR}/.launcher.lock"
+if ! flock -n 201; then
+    SHUTDOWN_DONE=1
+    log "Другой launcher использует ${ORBLIB_DIR}; запуск отменён без shutdown"
+    exit 1
+fi
+STORAGE_STARTED=1
+if [ "$RESUME" -eq 0 ]; then
+    for sfx in "${SUFFIXES[@]}"; do
+        cp_file="${WORK_DIR}/checkpoint_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.pkl"
+        complete_file="${ORBLIB_DIR}/.storage/complete_${HOSTNAME_ENV}_${EXP_ID}_${sfx}"
+        if [ -f "$cp_file" ]; then
+            cp_hash=$(md5sum "$cp_file" | cut -d' ' -f1)
+            [ -f "$complete_file" ] && [ "$(cat "$complete_file")" = "$cp_hash" ] \
+                || die "Незавершённый checkpoint ${sfx}; используйте --resume"
+        fi
+    done
+fi
 
 docker image inspect "$IMAGE" > /dev/null 2>&1 \
     || die "Docker-образ $IMAGE не найден"
@@ -509,8 +613,13 @@ notify "Старт orblib_exp на ${HOSTNAME_ENV}, exp=${EXP_ID}, incl=${INCL}"
 # ШАГ 0: PRE-DOWNLOAD ШАРДОВ БИБЛИОТЕК ОРБИТ
 # ==============================================================
 log ""
-log "ШАГ 0: Pre-download tar-шардов библиотек орбит (KEY=${KEY})"
-download_orblib_shards
+log "ШАГ 0: Проверка индекса и досылка очереди без скачивания старых библиотек"
+log "Пофайловая выгрузка: attempts=${ORBLIB_UPLOAD_ATTEMPTS}, deadline=${ORBLIB_FILE_TIMEOUT}s, reserve=${ORBLIB_RESERVE_BYTES} bytes"
+PREPARE_FLAGS=()
+[ "$RESUME" -eq 0 ] || PREPARE_FLAGS+=(--resume)
+if ! storage_cli prepare "${PREPARE_FLAGS[@]}" >>"$LOGFILE" 2>&1; then
+    die "Хранилище не готово: проверьте лог; для старых tar нужен явный orblib_storage.py index"
+fi
 
 # ==============================================================
 # ШАГ 1: ПОДГОТОВКА ФАЙЛОВ
@@ -518,10 +627,10 @@ download_orblib_shards
 log ""
 log "ШАГ 1: Подготовка файлов"
 
-rm -f "${WORK_DIR}"/.done_orblib_*
-rm -f "${WORK_DIR}/.upload_lock_orblib"
+rm -f "${WORK_DIR}/.done_orblib_${RUN_TAG}_"*
+rm -f "${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 # Резервации точек прошлого запуска (от мёртвых процессов)
-rm -rf "${WORK_DIR}"/reservations_i*
+rm -f "${WORK_DIR}/reservations_i${INCL_FMT}_${EXP_ID}/"*.resv
 
 declare -A PROC_FLAGS
 
@@ -577,6 +686,8 @@ fi
 # ==============================================================
 log ""
 log "ШАГ 2: Запуск $N_PROC контейнеров..."
+storage_cli watch >>"$LOGFILE" 2>&1 &
+UPLOADER_PID=$!
 
 declare -a PIDS
 for i in $(seq 0 $((N_PROC - 1))); do
@@ -595,6 +706,18 @@ log "  Все контейнеры запущены: PIDs=${PIDS[*]}"
 # ==============================================================
 log ""
 log "ШАГ 3: Ожидание завершения всех контейнеров..."
+
+while :; do
+    running=0
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then running=1; fi
+    done
+    [ "$running" -eq 1 ] || break
+    if ! kill -0 "$UPLOADER_PID" 2>/dev/null && ! storage_stopped; then
+        storage_cli stop --reason "Background uploader exited before workers" || true
+    fi
+    sleep 1
+done
 
 FAILED=0
 declare -a EXIT_CODES
@@ -616,6 +739,12 @@ done
 # этой строке, минуя ШАГ 4-6 (в т.ч. финальную заливку лога и уведомление).
 # Считаем из уже отслеженного FAILED — без обращения к файловой системе.
 DONE_COUNT=$((N_PROC - FAILED))
+if storage_stopped; then
+    wait "$UPLOADER_PID" || true
+    notify "Расчёт остановлен: checkpoints и очередь сохранены на VM" "urgent"
+    schedule_shutdown 1 "остановка после отказа хранения; продолжение через --resume"
+    exit 75
+fi
 log "  Успешно: ${DONE_COUNT}/${N_PROC}, ошибок: ${FAILED}"
 # Промежуточная заливка мастер-лога — чтобы результат был на Я.Диске уже
 # здесь, даже если что-то в ШАГ 4-6 позже пойдёт не так.
@@ -639,8 +768,16 @@ done
 # ШАГ 5: MULTIPART UPLOAD БИБЛИОТЕК ОРБИТ (snapshot-diff)
 # ==============================================================
 log ""
-log "ШАГ 5: Multipart upload новых библиотек орбит..."
-upload_orblib_shard
+log "ШАГ 5: Ожидание подтверждения всех новых библиотек"
+storage_cli finish
+if ! wait "$UPLOADER_PID"; then
+    die "Очередь доставки не завершена; checkpoints и .npz остаются на VM"
+fi
+UPLOADER_PID=""
+storage_cli check || die "Есть недоставленные библиотеки; успешный финал запрещён"
+if storage_stopped; then
+    die "Доставка остановлена; продолжение через --resume"
+fi
 
 # ==============================================================
 # ШАГ 6: ФИНАЛЬНАЯ СИНХРОНИЗАЦИЯ ИСТОРИИ
@@ -651,15 +788,17 @@ log "ШАГ 6: Финальная синхронизация на Яндекс.�
 (
     flock -x 200
     upload_to_yadisk "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
-) 200>"${WORK_DIR}/.upload_lock_orblib"
+) 200>"${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 
 for sfx in "${SUFFIXES[@]}"; do
     delete_from_yadisk "out_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.txt"
-    delete_from_yadisk "checkpoint_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.pkl"
+    if [ "$FAILED" -eq 0 ]; then
+        delete_from_yadisk "checkpoint_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.pkl"
+    fi
 done
 
 upload_to_yadisk "$LOGFILE"
-rm -f "${WORK_DIR}/.upload_lock_orblib"
+rm -f "${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 rm -f "$SNAP_BEFORE"
 
 # ==============================================================

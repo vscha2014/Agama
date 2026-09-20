@@ -129,3 +129,104 @@ Hard constraint for any future harness/orchestration design:
   whole run finishes (no buffering results until completion).
 - Future duplicate-prevention must be **preventive** (e.g., reserving candidate
   points before evaluation), not post-hoc cleanup of duplicated computations.
+
+## 11. Experimental fixed-Q launch and lightweight verification
+
+- `py/launch_orblib_exp.sh --Q1 --incl=90.0 --no-shutdown` selects fixed `Q=1`
+  with ordinary doubling (`d1`); `--Q1 --no-double` is rejected. `incl` remains
+  fixed per launch, not optimized. Defaults remain `n_bin=250`, GH/Sersic IDs 0.
+- Use uppercase `Q` in halo-shape tags; the PI reserves lowercase `q` for the
+  intrinsic flattening of the stellar profile in the article. The CLI flag is `--Q1`.
+- Fixed-Q writes use `Q1d1_nb250_gh0_ser0`; free-Q writes retain `d1_nb250_gh0_ser0`.
+  Both modes read both histories with matching d/nb/gh/ser settings, including
+  per-process and merged files on all hosts. Fixed-Q readers additionally filter
+  rows to Q=1; free-Q readers accept all Q. Do not deduplicate results across files.
+  Cloud history is refreshed in both modes; local host files of both modes are
+  protected from overwrites. Logs/checkpoints and output writers remain separate.
+  External prior parameters are projected to Q=1 and their penalty is recomputed;
+  their old penalties are not training observations. Orbit cache keys retain Q
+  in the parameter hash, so compatible Q=1 libraries remain reusable.
+- PCA exponential weights use `exp(-(penalty - min(penalty))/0.1)` in all three
+  construction/update paths. This preserves normalized weights while preventing
+  all-zero underflow on cold-start penalties above 100.
+- Before initial PCA, Q1 seeding searches current-inclination history, falling
+  back to the nearest inclination. Each source (compatible out, canonical 4Ups,
+  opt-in PA46.8) contributes at most 24 nearest-Q candidates; old penalties rank
+  candidates only within their source, with rank-biased per-process RNG ordering.
+  At most 10 evaluations per process are attempted; existing target-Q1 points
+  and repeated projected candidates are skipped before calculation, not deleted
+  from history. Reservations use the target Q1 parameters and are always released.
+  Shared history is refreshed every 4 candidate visits and at the end; workers
+  can stop early once the shared history has 10 more valid points than at entry.
+  Having 10 points with penalty<10 skips this optional stage, but achieving that
+  threshold is NEVER required. If fewer than 10 valid evaluations remain, one
+  bounded LHS batch fills the deficit; persistent failures produce an explicit
+  insufficient-data error. Existing checkpoints skip nearest-Q seeding on resume;
+  the old post-PCA prior stage is disabled for Q1, unchanged for free Q.
+- Q1 checkpoints include physical parameters for reprojection into the PCA basis
+  rebuilt at resume. History is shared live, including merged files from other
+  hosts. Existing J-factor filename parsing does not yet accept `Q1d1_*` tags;
+  extending that post-processing is a separate task.
+- Safe tests (AST-extracted functions, NumPy PCA substitute, mocked Docker/rclone;
+  no AGAMA/BoTorch runs): from `tests/`, run
+  `../.venv-ai/bin/python -m pytest -q test_orblib_q1.py --rootdir=. --import-mode=importlib -p no:cacheprovider`.
+  Do not use `python -m pytest` from the repo root: local `py/` shadows pytest's
+  `py` compatibility module. Syntax checks from the root:
+  `python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py tests/test_orblib_q1.py`
+  and `bash -n py/launch_orblib_exp.sh`. Launcher `--help` is side-effect-free.
+
+## 12. Streaming orbit-library storage (single VM)
+
+- The experimental launcher now passes `--stream-orblib`. This supersedes the
+  legacy tar-download/final-snapshot flow still present as unused functions in
+  the launcher. New libraries are individual objects under `galAgama/orblib/objects/`,
+  with verified receipts under `catalog/`. Do not run the legacy tar uploader
+  concurrently with the streaming controller.
+- `py/orblib_storage.py` uses only the Python standard library on the host.
+  SQLite state, file locks, stop/finish markers and receipts live under the
+  already ignored `py/orblib/.storage/`. One launcher/controller per workspace;
+  multi-VM publication coordination is not implemented.
+- Existing tar archives require an explicit one-time `index` operation before
+  `prepare`. The indexer streams each tar, reuses matching local members or
+  stages at most one missing member, validates ZIP contents and the whole tar
+  MD5/size, and publishes a small index.
+  This is a real cloud operation and must NOT be run during development.
+  Production invocation from the workspace: `python3 orblib_storage.py index
+  --root ./orblib --timeout 7200` (supply `--remote`/`--config` if non-default).
+  Subsequent launches download metadata only, not old matrices.
+- Each new managed .npz is removed locally only after the final remote object
+  and its manifest pass size/MD5 checks. Existing untracked local libraries
+  are uploaded/verified but NOT automatically deleted. No penalty filtering.
+  A failed transfer keeps the sole local copy and durable queue.
+  For a separately authorized transition cleanup, `prune-verified --root ./orblib`
+  lists verified old local copies without deletion; adding `--apply` deletes only
+  those copies after fresh remote verification. Never run this against real data
+  without explicit permission for that deletion.
+- Defaults: `ORBLIB_UPLOAD_ATTEMPTS=3`, `ORBLIB_FILE_TIMEOUT=900` seconds for the
+  entire per-file attempt, `ORBLIB_RESERVE_BYTES=2000000000` for checkpoints/logs
+  and metadata. Workers additionally reserve the estimated uncompressed library
+  size plus ZIP overhead, sharing the budget across all processes.
+- Exhausted delivery attempts set STOP: no new models; already running models
+  finish and write local checkpoints without mandatory cloud sync. The launcher
+  waits for workers, then shuts down even with undelivered files. No unbounded
+  final-upload retry loop. `--no-shutdown` suppresses shutdown only. The VM disk
+  must survive power-off; never delete a VM/disk containing undelivered state.
+- `--resume` first drains the saved queue; persistent delivery failure powers off
+  without starting new workers. Initial-stage checkpoints rebuild seeding from
+  saved history; TuRBO checkpoints contain physical observations in both Q modes
+  and reproject into the rebuilt PCA basis. Old free-Q checkpoints without
+  physical parameters are rejected in streaming mode rather than interpreting
+  stale PCA coordinates. Interrupted checkpoints cannot silently be overwritten
+  by a clean launch; a completed checkpoint has a checksum-bound completion marker.
+- Completed-point prevention reads compatible out-history before expensive
+  evaluation and rechecks after claiming the library. No history rows are deleted
+  or deduplicated. New rows carry a storage-context marker for observation/numerical
+  settings. Untagged legacy out-history retains the existing experiment/inclination
+  compatibility assumption; changed legacy science settings require review.
+  Metadata/point comparisons allow only 1e-12 relative/absolute serialization
+  roundoff, not the much wider six-significant-digit filename quantization.
+- Safe checks from `tests/`: `../.venv-ai/bin/python -m pytest -q test_orblib_q1.py
+  test_orblib_storage.py --rootdir=. --import-mode=importlib -p no:cacheprovider`.
+  Tests use small arrays and mocked rclone/Docker/shutdown, never AGAMA or cloud.
+  Also compile the modified Python files, run `bash -n py/launch_orblib_exp.sh`,
+  and `git diff --check`. Helper and launcher `--help` are side-effect-free.

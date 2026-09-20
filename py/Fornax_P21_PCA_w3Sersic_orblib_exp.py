@@ -29,6 +29,7 @@ import pickle
 import socket
 import glob
 import time
+from orblib_storage import Store, StorageStop, LibraryBusy, atomic_bytes
 
 # BoTorch / GPyTorch
 from botorch.models import SingleTaskGP
@@ -44,7 +45,7 @@ from gpytorch.constraints import GreaterThan
 # Получаем имя хоста для суффикса файлов
 # hostname_proc = socket.gethostname()
 # В самом начале скрипта, после импортов и определения hostname_proc:
-parser = argparse.ArgumentParser(description='Schwarzschild orbit modelling')
+parser = argparse.ArgumentParser(description='Schwarzschild orbit modelling', allow_abbrev=False)
 parser.add_argument('--no-resume', action='store_true',
                     help='Запустить расчёт с нуля, игнорируя checkpoint')
 parser.add_argument('--delete-checkpoint', action='store_true',
@@ -85,7 +86,16 @@ parser.add_argument('--reuse-orblib', action='store_true',
                     help='Переиспользовать сохранённые библиотеки орбит: перед '
                          'agama.orbit искать .npz в --orblib-dir по контент-ключу '
                          '(ТОЛЬКО локальные файлы, без сети). По умолчанию ВЫКЛ.')
+parser.add_argument('--Q1', action='store_true',
+                    help='Фиксировать Q=1 и искать gh, rh, rho0 при штатном '
+                         'удвоении d1; запись в Q1d1, чтение общей истории d1/Q1d1 '
+                         'с фильтром Q=1. Несовместимо с --no-double.')
+parser.add_argument('--stream-orblib', action='store_true',
+                    help='Управляемая очередь библиотек; требует фонового загрузчика launcher.')
 args = parser.parse_args()
+Q1 = args.Q1
+if Q1 and args.no_double:
+    parser.error('--Q1 требует удвоения d1; уберите --no-double')
 
 if args.n_threads is not None:
     # Ограничиваем OpenMP ДО импорта agama
@@ -139,7 +149,9 @@ def orblib_key(Q, gh, rh, rho0):
 # Идентификатор эксперимента: кодирует (1) удвоение, (2) число звёзд/апертуру,
 # (3) реализацию GH, (4) реализацию Серсика. incl остаётся столбцом данных и
 # фильтруется в коде (как в проде), в имя файла не входит.
-EXP_ID = f"d{int(DOUBLE)}_nb{N_BIN}_gh{GH_ID}_ser{SER_ID}"
+HISTORY_ID = f"d{int(DOUBLE)}_nb{N_BIN}_gh{GH_ID}_ser{SER_ID}"
+EXP_ID = f"{'Q1' if Q1 else ''}{HISTORY_ID}"
+history_ids = [HISTORY_ID, f"Q1{HISTORY_ID}"] if DOUBLE else [HISTORY_ID]
 
 # hostname_proc несёт идентичность эксперимента → ВСЕ производные файлы
 # (out/log/checkpoint/diagnose) автоматически изолированы по эксперименту,
@@ -148,18 +160,19 @@ hostname_proc = f"{_hostname_env}_{EXP_ID}_{_proc}"
 
 print(f"Идентификатор процесса: {hostname_proc}")
 print(f"Эксперимент: double={DOUBLE}, n_bin={N_BIN}, gh_id={GH_ID}, "
-      f"ser_id={SER_ID}, save_orblib={SAVE_ORBLIB}")
+      f"ser_id={SER_ID}, save_orblib={SAVE_ORBLIB}, Q={'1 (fixed)' if Q1 else 'free'}")
 
 # Файлы своего сервера (не перезаписываются при синке) — того же эксперимента
 host_patterns = [
-    f"out_{_hostname_env}_{EXP_ID}.txt",
-    f"out_{_hostname_env}_{EXP_ID}_p*.txt",
+    f"out_{_hostname_env}_{tag}{suffix}.txt"
+    for tag in history_ids for suffix in ('', '_p*')
 ]
 
 # Пул для PCA/синка: все процессы (любой хост) ТОГО ЖЕ эксперимента.
 # Разделители '_' в EXP_ID защищают от ложных совпадений (nb250 != nb2500).
 storage_patterns = [
-    f"out_*_{EXP_ID}_*.txt",
+    f"out_*_{tag}{suffix}.txt"
+    for tag in history_ids for suffix in ('_*', '')
 ]
 
 # Canonical production history is a prior-only parameter source. Its penalty
@@ -200,6 +213,66 @@ RCLONE_REMOTE = os.environ.get('RCLONE_REMOTE', 'yandex')
 
 import agama
 
+orblib_store = (Store(ORBLIB_DIR, int(os.environ.get('ORBLIB_RESERVE_BYTES', '2000000000')))
+                if args.stream_orblib else None)
+if orblib_store is not None and not SAVE_ORBLIB:
+    parser.error('--stream-orblib требует --save-orblib')
+
+
+def check_storage_stop():
+    store = globals().get('orblib_store')
+    if store is not None:
+        store.check_stop()
+
+
+def completed_point(params):
+    if globals().get('orblib_store') is None:
+        return False
+    files = {path for pattern in storage_patterns + host_patterns for path in glob.glob(pattern)}
+    for path in files:
+        context = None
+        try:
+            stream = open(path, errors='replace')
+        except FileNotFoundError:
+            continue
+        with stream:
+            for line in stream:
+                if line.startswith('# storage-context '):
+                    context = line.split()[-1]
+                if line.startswith('#') or (context is not None and context != globals().get('EVALUATION_CONTEXT')):
+                    continue
+                try:
+                    row = numpy.array([float(v) for v in line.split()[:7]])
+                except ValueError:
+                    continue
+                if (len(row) == 7 and numpy.isfinite(row).all() and row[5] > 0
+                        and 0 <= row[6] < 1e5 and abs(row[0] - incl) < 1e-8
+                        and numpy.allclose(row[1:5], [params[n] for n in ('Q', 'gh', 'rh', 'rho0')],
+                                           rtol=1e-12, atol=1e-12)):
+                    return True
+    return False
+
+
+def save_initial_checkpoint():
+    path = f'checkpoint_{hostname_proc}.pkl'
+    if os.path.exists(path):
+        with open(path, 'rb') as stream:
+            previous = pickle.load(stream)
+        if do_resume and previous.get('phase', 'turbo') == 'turbo':
+            return
+    rows = []
+    if os.path.exists(UpsFile):
+        with open(UpsFile) as stream:
+            rows = [line for line in stream if line.strip() and not line.startswith('#')]
+    state = dict(phase='initial', q1=Q1, incl=incl, hostname_proc=hostname_proc,
+                 history_rows=rows, rng_state=proc_rng.bit_generator.state,
+                 evaluation_context=EVALUATION_CONTEXT, timestamp=datetime.datetime.now().isoformat())
+    atomic_bytes(path, pickle.dumps(state))
+
+
+checkpoint_for_stop = save_initial_checkpoint
+
+
 def send_ntfy(message, title='Galaxy Calc', priority='default', tags=None):
     """
     Отправка push-уведомления через ntfy.sh.
@@ -207,6 +280,8 @@ def send_ntfy(message, title='Galaxy Calc', priority='default', tags=None):
     tags: список эмодзи-тегов, например ['rocket'], ['warning']
     Документация: https://docs.ntfy.sh
     """
+    if globals().get('orblib_store') is not None and orblib_store.stopped():
+        return
     url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
     headers = {
         'Title': title.encode('utf-8'),
@@ -491,6 +566,8 @@ def pca_to_params_fixed(pc_coords, model_data, bounds_original):
         lo, hi = bounds_original[name]
         val = numpy.clip(val, lo, hi)
         result[name] = float(val)
+    if Q1:
+        result['Q'] = 1.0
     
     return result
 
@@ -501,6 +578,8 @@ def params_to_pca_fixed(params_dict, model_data):
     
     param_names = ['Q', 'gh', 'rh', 'rho0']
     X = numpy.array([[params_dict[name] for name in param_names]])
+    if Q1:
+        X[0, 0] = 1.0
     
     if use_log_scale:
         X_transformed = X.copy()
@@ -527,7 +606,7 @@ def params_to_pca_fixed(params_dict, model_data):
 _RESV_PARAM_NAMES = ['Q', 'gh', 'rh', 'rho0']
 
 def reservation_dir(incl):
-    d = f"reservations_i{incl}"
+    d = f"reservations_i{incl:.1f}_{EXP_ID}"
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -634,6 +713,10 @@ def _try_reserve_candidate(params, resv_dir, reserve_eps,
     использует основной цикл TuRBO (AGENTS §10: превентивно, без дедупа
     результатов).
     """
+    if globals().get('orblib_store') is not None:
+        check_storage_stop()
+        if completed_point(params):
+            return None, True
     if resv_dir is None:
         return None, False
     active = read_active_reservations(resv_dir, reserve_ttl_sec,
@@ -844,12 +927,19 @@ betah     = 3
 
 numOrbits = 100000
 trajsize = 1000
+EVALUATION_CONTEXT = hashlib.sha256(
+    repr((incl, DOUBLE, N_BIN, GH_ID, SER_ID, GEOM_HASH, alphah, betah,
+          numOrbits, trajsize, 100.0, 1.0, 0.1, 1.6,
+          UPS_XATOL, UPS_BRACKET_DELTA, UPS_BRACKET_NMED, UPS_SUBSAMPLE_FRAC)).encode()
+    + b''.join(numpy.asarray(value).tobytes() for dataset in datasets
+               for value in (dataset.cons_val, dataset.cons_err))
+).hexdigest()
 
 bounds_original = {
     'Q': (0.05, 2.5),
     'gh': (0.0, 1.6),
-    'rh': (0.5, 3.5),
-    'rho0': (34.0, 120.0),
+    'rh': (0.5, 7.0),
+    'rho0': (10.0, 120.0),
     'Upsilon': (0.1, 1.6)
 }
 
@@ -877,6 +967,8 @@ def sync_to_yadisk(local_dir='.', remote_dir='galAgama',
     Возвращает True при успехе.
     """
     # Список файлов для синхронизации
+    if globals().get('orblib_store') is not None and orblib_store.stopped():
+        return False
     files_to_sync = [
         UpsFile,
         torchFile_result,
@@ -886,6 +978,10 @@ def sync_to_yadisk(local_dir='.', remote_dir='galAgama',
     
     success = True
     for filepath in files_to_sync:
+        if globals().get('orblib_store') is not None:
+            if orblib_store.stopped():
+                return False
+            timeout = min(timeout, 60)
         if not os.path.exists(filepath):
             print(f"  Пропуск (не найден): {filepath}")
             continue
@@ -929,6 +1025,10 @@ def load_from_yadisk(storage_patterns, host_patterns,
     """
     
     
+    if globals().get('orblib_store') is not None:
+        if orblib_store.stopped():
+            return
+        timeout = min(timeout, 60)
     # Получаем список файлов в удалённой папке
     try:
         result = subprocess.run(
@@ -972,6 +1072,8 @@ def load_from_yadisk(storage_patterns, host_patterns,
     downloaded = 0
     skipped    = 0
     for remote_fname in remote_files:
+        if globals().get('orblib_store') is not None and orblib_store.stopped():
+            break
         # Проверяем совпадение с паттернами хранилища
         matches_storage = any(
             glob.fnmatch.fnmatch(remote_fname, os.path.basename(p))
@@ -1026,6 +1128,15 @@ def load_from_yadisk(storage_patterns, host_patterns,
             priority='high',
             tags=['white_check_mark'])
 
+def q1_checkpoint_coords(state, model_data):
+    params = state['params_obs']
+    if (state.get('q1') != Q1 or state.get('incl') != incl
+            or len(params) != len(state['Y_obs'])
+            or (Q1 and any(p['Q'] != 1.0 for p in params))):
+        raise ValueError('Checkpoint не соответствует режиму Q или текущему incl')
+    return numpy.array([params_to_pca_fixed(p, model_data) for p in params])
+
+
 def save_checkpoint(X_obs, Y_obs, turbo, iteration,
                                 sync=True):
     local_file = f"checkpoint_{hostname_proc}.pkl"
@@ -1044,11 +1155,27 @@ def save_checkpoint(X_obs, Y_obs, turbo, iteration,
         'best_target':    best_overall_target,
         'best_Upsilon':   best_overall_Upsilon,
     }
+    state.update(phase='turbo', q1=Q1, incl=incl, params_obs=getattr(turbo, 'params_obs', None))
+    if state['params_obs'] is None:
+        state['params_obs'] = [pca_to_params_fixed(pc, turbo.model_data, turbo.bounds_original)
+                               for pc in state['X_obs']]
+    if len(state['params_obs']) != len(state['Y_obs']):
+        raise ValueError('Checkpoint parameter/target count mismatch')
+    if globals().get('orblib_store') is not None:
+        state.update(rng_state=proc_rng.bit_generator.state,
+                     ups_recent=list(_ups_recent), evaluation_context=EVALUATION_CONTEXT)
    # Локальное сохранение
     tmp_file = local_file + '.tmp'
     with open(tmp_file, 'wb') as f:
         pickle.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp_file, local_file)   # атомарная замена
+    directory_fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
     print(f"  Checkpoint сохранён локально: итерация {iteration}")
     
     # Синхронизация на Яндекс.Диск
@@ -1123,6 +1250,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
    # --- РЕЖИМ БЕЗ PCA: direct_params передан напрямую ---
     if direct_params is not None:
         params = direct_params
+        if Q1:
+            params['Q'] = 1.0
         # Проверка границ
         param_names = ['Q', 'gh', 'rh', 'rho0']
         for name in param_names:
@@ -1157,6 +1286,12 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
 #    print(f"PCA coords: {pc_coords}")
     print(f"  → Q={Q:.4f}, gh={gh:.4f}, rh={rh:.4f}, rho0={rho0:.4f}")
     _ol_build_fp = None
+    _storage_claim = None
+    store = globals().get('orblib_store')
+    if store is not None:
+        store.check_stop()
+        if completed_point(params):
+            raise OrblibBusyError('completed point')
     
     try:
         densityHalo = agama.Density(
@@ -1181,6 +1316,27 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         # ТОЛЬКО локальные файлы в ORBLIB_DIR (никакой сети в горячем цикле);
         # синхронизацию с Я.Диском делает оркестратор до/после запуска.
         _ol_name, _ol_path = orblib_key(Q, gh, rh, rho0)
+        _archived = False
+        if store is not None:
+            try:
+                _expected = dict(Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
+                                 double=int(DOUBLE), n_bin=N_BIN, ser_id=SER_ID,
+                                 numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
+                                 degree=degree, ghorder=ghorder,
+                                 gridv_md5=hashlib.md5(gridv.tobytes()).hexdigest(),
+                                 gridv_dtype=gridv.dtype.str)
+                _archived = store.archived(_ol_name, _expected)
+                _bytes = int(1.1 * 8 * numOrbits * (7 + sum(len(d.target) for d in datasets))) + 1048576
+                _storage_claim = store.claim(_ol_name, 0 if _archived or os.path.exists(_ol_path) else _bytes)
+                if completed_point(params):
+                    raise OrblibBusyError('completed point')
+            except LibraryBusy:
+                raise OrblibBusyError(_ol_name)
+            except OrblibBusyError:
+                raise
+            except Exception as error:
+                store.stop(f'Library claim failed: {error}')
+                raise StorageStop(error)
         orblib_loaded = False
         if allow_orblib_reuse and REUSE_ORBLIB and os.path.exists(_ol_path):
             _t_load = time.perf_counter()
@@ -1257,7 +1413,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         # Матрицы хранятся в float64 (не float32) — для bit-воспроизводимости
         # penalty при reuse; цена — ~2x размер файла (логируется ниже).
         orblib_save_info = None
-        if SAVE_ORBLIB and not orblib_loaded:
+        if SAVE_ORBLIB and not orblib_loaded and not _archived:
             orblib_counter += 1
             if os.path.exists(_ol_path):
                 _ol_mb = os.path.getsize(_ol_path) / 1e6
@@ -1275,16 +1431,27 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                     )
                     _raw64_mb = sum(a.nbytes for a in _arr64.values()) / 1e6
                     # Файл-объект → numpy НЕ добавляет .npz к имени (детерминировано)
-                    with open(_ol_tmp, 'wb') as _fh:
-                        numpy.savez_compressed(
-                            _fh,
-                            **_arr64,
-                            Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
-                            numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
-                            gridv=gridv, degree=degree, ghorder=ghorder,
-                            n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID,
-                        )
+                    for _save_attempt in range(2 if store is not None else 1):
+                        try:
+                            with open(_ol_tmp, 'wb') as _fh:
+                                numpy.savez_compressed(
+                                    _fh,
+                                    **_arr64,
+                                    Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
+                                    numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
+                                    gridv=gridv, degree=degree, ghorder=ghorder,
+                                    n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID,
+                                )
+                                _fh.flush()
+                                os.fsync(_fh.fileno())
+                            break
+                        except OSError:
+                            if store is None or _save_attempt:
+                                raise
+                            time.sleep(1)
                     os.replace(_ol_tmp, _ol_path)   # атомарная публикация
+                    if store is not None:
+                        store.register(_ol_name)
                     _ol_dt = time.perf_counter() - _t_ol
                     _ol_mb = os.path.getsize(_ol_path) / 1e6
                     orblib_save_info = (_ol_name, _ol_mb, _ol_dt)
@@ -1295,6 +1462,9 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                           f"после сжатия {_ol_mb:.1f} MB")
                 except Exception as _e:
                     print(f"  [orblib] ОШИБКА сохранения {_ol_name}: {_e}")
+                    if store is not None:
+                        store.stop(f'Library save failed: {_ol_name}: {_e}')
+                        raise StorageStop(_e)
                     if os.path.exists(_ol_tmp):
                         try:
                             os.remove(_ol_tmp)
@@ -1308,6 +1478,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         return -1e6
     finally:
         release_reservation(_ol_build_fp)
+        if store is not None and _storage_claim is not None:
+            store.release(_storage_claim, _ol_name)
     
     num_dof = sum([sum(d.cons_err > 0) for d in datasets])
     mult = num_dof**0.5 * 10
@@ -1411,6 +1583,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         best_overall_Upsilon = min_Ups
     
     with open(UpsFile, 'a') as f:
+        if store is not None:
+            f.write(f'# storage-context {EVALUATION_CONTEXT}\n')
         f.write(f"# Server: {hostname_proc}\n")
         f.write(f"{incl:0.3f} {Q:0.15f} {gh:0.15f} {rh:0.15f} {rho0:0.15f} "
                 f"{min_Ups:0.15f} {min_pen:0.15f} {datetime.datetime.now()}\n")
@@ -1444,11 +1618,19 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                     f"save_s={orblib_save_info[2]:.3f}\n")
         elif orblib_loaded:
             f.write(f"# orblib reused: {_ol_name} load_s={orbit_time_s:.3f}\n")
+        elif _archived:
+            f.write(f"# orblib archive-first-wins: {_ol_name}; current evaluation rebuilt\n")
         f.write("# End of history\n\n")
+        if store is not None:
+            f.flush()
+            os.fsync(f.fileno())
     
     print("4UpsBoTorch writed")
     logger.clear_history()
     print("logger history cleaned")
+    if store is not None and checkpoint_for_stop is save_initial_checkpoint:
+        save_initial_checkpoint()
+        store.check_stop()
     return -min_pen
 
 
@@ -1470,7 +1652,7 @@ def find_nearest_incl_data(storage_patterns, host_patterns,
         dist         : float — расстояние |target_incl - nearest_incl|
     """
     # --- Скачиваем свежие файлы ---
-    load_from_yadisk(storage_patterns, host_patterns, timeout=timeout)
+    load_from_yadisk(storage_patterns, host_patterns, timeout=timeout, force_update=True)
 
     # --- Собираем список файлов ---
     all_files = []
@@ -1501,6 +1683,8 @@ def find_nearest_incl_data(storage_patterns, host_patterns,
                         if row[3] <= 0 or row[4] <= 0:
                             continue
                         if row[6] >= 1e5:
+                            continue
+                        if Q1 and row[1] != 1.0:
                             continue
                         all_rows.append(row)
                     except ValueError:
@@ -1618,7 +1802,7 @@ def select_bootstrap_candidates(data_nearest, n_bootstrap,
     candidates = []
     for row in selected:
         candidates.append({
-            'Q':    float(row[1]),
+            'Q':    1.0 if Q1 else float(row[1]),
             'gh':   float(row[2]),
             'rh':   float(row[3]),
             'rho0': float(row[4]),
@@ -1893,6 +2077,8 @@ def load_prior_candidates_from_patterns(patterns, target_incl,
         return None, None, len(all_files)
 
     data = numpy.array(rows)
+    if target_incl is None:
+        return data, None, len(all_files)
     exact = data[numpy.abs(data[:, 0] - target_incl) <= 0.01]
     if len(exact) > 0:
         return exact, float(target_incl), len(all_files)
@@ -1903,6 +2089,118 @@ def load_prior_candidates_from_patterns(patterns, target_incl,
     nearest = float(inclinations[numpy.argmin(numpy.abs(inclinations - target_incl))])
     selected = data[numpy.abs(data[:, 0] - nearest) <= 0.01]
     return selected, nearest, len(all_files)
+
+
+def seed_q1_from_nearest_q(data, storage_patterns, host_patterns, prior_patterns,
+                          bounds_original, seed_patterns=None, resv_dir=None,
+                          reserve_eps=0.02, reserve_ttl_sec=7200, output_file=None):
+    output_file = output_file or torchFile_result
+    data = numpy.empty((0, 7)) if data is None else data.copy()
+    results = []
+    budget = 10
+    if numpy.count_nonzero(data[:, 6] < 10.0) >= 10:
+        return data, results
+    target_count = len(data) + budget
+
+    def _write(text):
+        print(text)
+        with open(output_file, 'a') as stream:
+            stream.write(text + '\n')
+
+    def key(row):
+        return orblib_key(1.0, *row[2:5])[0]
+
+    known = {key(row) for row in data}
+    sources = [('out', host_patterns + storage_patterns, False),
+               ('canonical-4Ups', prior_patterns, True)]
+    if seed_patterns:
+        sources.append(('PA46.8', seed_patterns, True))
+    groups = []
+    for priority, (source, patterns, sync) in enumerate(sources):
+        if not patterns:
+            continue
+        rows, _, _ = load_prior_candidates_from_patterns(
+            patterns, None, sync_from_yadisk=sync)
+        if rows is None:
+            continue
+        valid = numpy.ones(len(rows), dtype=bool)
+        for j, name in enumerate(('Q', 'gh', 'rh', 'rho0'), start=1):
+            lo, hi = bounds_original[name]
+            valid &= (rows[:, j] >= lo) & (rows[:, j] <= hi)
+        rows = rows[valid & numpy.array([key(row) not in known for row in rows])]
+        if len(rows) == 0:
+            continue
+        distances = numpy.abs(rows[:, 0] - incl)
+        if numpy.any(distances <= 0.01):
+            source_incl = incl
+        else:
+            source_incl = float(rows[numpy.argmin(distances), 0])
+        rows = rows[numpy.abs(rows[:, 0] - source_incl) <= 0.01]
+        nearest = numpy.lexsort((rows[:, 6], numpy.abs(rows[:, 1] - 1.0)))[:24]
+        pool = rows[nearest]
+        pool = pool[numpy.argsort(pool[:, 6], kind='stable')]
+        ranks = numpy.arange(len(pool))
+        weights = numpy.exp(-ranks / max(1.0, len(pool) / 3.0))
+        order = proc_rng.choice(len(pool), size=len(pool), replace=False,
+                                p=weights / weights.sum())
+        groups.append((abs(source_incl - incl), priority, source, pool[order]))
+    candidates = [(source, row) for _, _, source, pool in sorted(groups, key=lambda g: g[:2])
+                  for row in pool]
+    _write(f"[Q1 seed] Кандидатов: {len(candidates)}; бюджет: {budget} попыток на процесс; "
+           "penalty < 10 не является условием завершения.")
+    attempts = 0
+    visited = 0
+    tried = set()
+    for i, (source, row) in enumerate(candidates):
+        if i and i % 4 == 0:
+            refreshed = _periodic_bootstrap_sync(i, 4, incl, storage_patterns, host_patterns, 0)
+            if refreshed is not None:
+                data = refreshed
+                known.update(key(r) for r in data)
+        if attempts >= budget or len(data) >= target_count:
+            break
+        visited += 1
+        candidate_key = key(row)
+        if candidate_key in known or candidate_key in tried:
+            continue
+        tried.add(candidate_key)
+        params = dict(Q=1.0, gh=float(row[2]), rh=float(row[3]), rho0=float(row[4]))
+        resv_fp, skip = _try_reserve_candidate(
+            params, resv_dir, reserve_eps, reserve_ttl_sec, bounds_original)
+        if skip:
+            continue
+        try:
+            local, _, _ = load_prior_candidates_from_patterns(host_patterns + storage_patterns, incl)
+            if local is not None:
+                known.update(key(r) for r in local if r[1] == 1.0)
+            if candidate_key in known:
+                continue
+            attempts += 1
+            pc = _params_to_dummy_pc(params, None, bounds_original)
+            _write(f"[Q1 seed] {attempts}/{budget}: source={source}, incl={row[0]:.2f}, "
+                   f"Q={row[1]:.6g} -> 1, old_penalty={row[6]:.6g}; "
+                   f"gh={params['gh']:.6g}, rh={params['rh']:.6g}, rho0={params['rho0']:.6g}")
+            penalty = -halo_IC_lib_weights_pca_fixed(
+                pc, None, bounds_original, densityStars, datasets, alphah, betah,
+                direct_params=params)
+            if numpy.isfinite(penalty) and penalty < 1e5:
+                results.append(dict(params=params, penalty=penalty, pc=pc))
+                data = numpy.vstack([data, [incl, 1.0, params['gh'], params['rh'],
+                                           params['rho0'], 0.0, penalty]])
+                known.add(candidate_key)
+            _write(f"[Q1 seed] Пересчитанный penalty={penalty:.6g}")
+        except OrblibBusyError:
+            _write('[Q1 seed] Библиотеку строит другой процесс; следующая точка.')
+        except Exception as error:
+            _write(f'[Q1 seed] Ошибка оценки: {error}')
+        finally:
+            release_reservation(resv_fp)
+    refreshed = _periodic_bootstrap_sync(visited, 1, incl, storage_patterns, host_patterns, 0)
+    if refreshed is not None:
+        data = refreshed
+    _write(f"[Q1 seed] Завершено: попыток={attempts}/{budget}, "
+           f"успешных={len(results)}, доступных точек Q=1: {len(data)}.")
+    return data, results
 
 
 def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
@@ -2092,7 +2390,7 @@ def build_initial_pca_from_bootstrap(bootstrap_results,
         X_tr = X_raw
 
     # Взвешенное масштабирование
-    weights       = numpy.exp(-penalties / 0.1)
+    weights       = numpy.exp(-(penalties - penalties.min()) / 0.1)
     weighted_mean = numpy.average(X_tr, weights=weights, axis=0)
     weighted_std  = numpy.sqrt(
         numpy.average((X_tr - weighted_mean)**2,
@@ -2103,7 +2401,7 @@ def build_initial_pca_from_bootstrap(bootstrap_results,
 
     # Если точек мало — уменьшаем n_components
     n_comp_actual = min(n_components, len(bootstrap_results) - 1,
-                        X_raw.shape[1])
+                        3 if Q1 else X_raw.shape[1])
     if n_comp_actual < n_components:
         _write(f"  [bootstrap PCA] ВНИМАНИЕ: уменьшаем n_components "
                f"{n_components} → {n_comp_actual} "
@@ -2334,7 +2632,7 @@ def load_fresh_data_from_files(storage_patterns,host_patterns, incl_filter,
     Возвращает: X_raw, penalties — все доступные точки
     """
     # --- Шаг 1: скачиваем свежие файлы с Яндекс.Диска ---
-    load_from_yadisk(storage_patterns, host_patterns, notify=notify)
+    load_from_yadisk(storage_patterns, host_patterns, notify=notify, force_update=True)
     
     # --- Шаг 2: собираем список файлов на диске ---
     all_files = []
@@ -2377,6 +2675,8 @@ def load_fresh_data_from_files(storage_patterns,host_patterns, incl_filter,
                         if row[3] <= 0 or row[4] <= 0:
                             continue
                         if row[6] >= 1e5:   # пропускаем failed runs
+                            continue
+                        if Q1 and row[1] != 1.0:
                             continue
                         raw.append(row)
                         count += 1
@@ -2570,7 +2870,7 @@ def _update_pca_model(model_data, data_good, new_params, new_penalties,
     # -------------------------------------------------------
     # Взвешенное масштабирование и PCA
     # -------------------------------------------------------
-    weights       = numpy.exp(-pen_all / 0.1)
+    weights       = numpy.exp(-(pen_all - pen_all.min()) / 0.1)
     weighted_mean = numpy.average(X_tr_all, weights=weights, axis=0)
     weighted_std  = numpy.sqrt(
         numpy.average((X_tr_all - weighted_mean)**2,
@@ -2695,7 +2995,7 @@ def _generate_random_initial_points(bounds_original, n_points,
     _write(f"\n  [random init] Генерация {n_points} случайных точек "
            f"(Latin Hypercube)")
 
-    param_names = ['Q', 'gh', 'rh', 'rho0']
+    param_names = ['gh', 'rh', 'rho0'] if Q1 else ['Q', 'gh', 'rh', 'rho0']
 
     # Latin Hypercube Sampling.
     # Per-process RNG (proc_rng) instead of a fixed seed → each parallel worker
@@ -2711,7 +3011,7 @@ def _generate_random_initial_points(bounds_original, n_points,
     # Масштабируем в пространство параметров
     candidates = []
     for i in range(n_points):
-        params = {}
+        params = {'Q': 1.0} if Q1 else {}
         for j, name in enumerate(param_names):
             lo, hi       = bounds_original[name]
             params[name] = lo + lhs[i, j] * (hi - lo)
@@ -2806,7 +3106,35 @@ def run_pca_optimization(
     global best_overall_Upsilon, best_overall_target, number_of_find_w_U
     global number_of_h_IC_lw, hostname_proc
     global densityStars, datasets, incl, alphah, betah
+    global checkpoint_for_stop
 
+    _resume_initial = False
+    if globals().get('orblib_store') is not None:
+        checkpoint_for_stop = save_initial_checkpoint
+        _checkpoint_path = f'checkpoint_{hostname_proc}.pkl'
+        if not resume and os.path.exists(_checkpoint_path):
+            _complete = orblib_store.control / f'complete_{hostname_proc}'
+            with open(_checkpoint_path, 'rb') as stream:
+                _checkpoint_hash = hashlib.file_digest(stream, 'md5').hexdigest()
+            if not _complete.exists() or _complete.read_text() != _checkpoint_hash:
+                raise RuntimeError('Unfinished checkpoint exists; use --resume')
+        if resume and os.path.exists(_checkpoint_path):
+            with open(_checkpoint_path, 'rb') as stream:
+                _saved = pickle.load(stream)
+            if _saved.get('incl', incl) != incl or _saved.get('q1', Q1) != Q1:
+                raise ValueError('Checkpoint mode/incl mismatch')
+            if _saved.get('evaluation_context', EVALUATION_CONTEXT) != EVALUATION_CONTEXT:
+                raise ValueError('Checkpoint observation/numerical context mismatch')
+            _resume_initial = _saved.get('phase') == 'initial'
+            if not _resume_initial and not Q1 and 'params_obs' not in _saved:
+                raise ValueError('Legacy free-Q checkpoint lacks physical parameters; unsafe PCA resume')
+            if 'rng_state' in _saved:
+                proc_rng.bit_generator.state = _saved['rng_state']
+            _ups_recent[:] = _saved.get('ups_recent', [])
+        check_storage_stop()
+
+    if Q1:
+        n_components = min(n_components, 3)
     if output_file is None:
         output_file = torchFile_result
     if storage_patterns is None:
@@ -2846,8 +3174,8 @@ def run_pca_optimization(
     bounds_original = {
         'Q':   (0.05, 2.5),
         'gh':  (0.0,  1.6),
-        'rh':  (0.5,  3.5),
-        'rho0':(34.0, 120.0),
+        'rh':  (0.5,  7.0),
+        'rho0':(10.0, 120.0),
     }
 
     # --- Каталог резерваций (общий для процессов одной VM) ---
@@ -2896,7 +3224,29 @@ def run_pca_optimization(
     nearest_incl_used   = None
     dist_used           = float('inf')
 
-    if not data_sufficient:
+    if Q1:
+        if not (resume and not _resume_initial and os.path.exists(f"checkpoint_{hostname_proc}.pkl")):
+            data, bootstrap_results = seed_q1_from_nearest_q(
+                data, storage_patterns, host_patterns, prior_patterns, bounds_original,
+                seed_patterns=seed_patterns if seed_from_pa468 else None,
+                resv_dir=resv_dir, reserve_eps=reserve_eps, reserve_ttl_sec=reserve_ttl_sec,
+                output_file=output_file)
+        n_have = len(data) if data is not None else 0
+        if n_have < MIN_POINTS_FOR_PCA:
+            data_lhs, lhs_results, lhs_refresh = _generate_random_initial_points(
+                bounds_original, MIN_POINTS_FOR_PCA - n_have, output_file=output_file,
+                sync_interval=bootstrap_sync_interval, storage_patterns=storage_patterns,
+                host_patterns=host_patterns, min_total_points=MIN_POINTS_FOR_PCA,
+                resv_dir=resv_dir, reserve_eps=reserve_eps, reserve_ttl_sec=reserve_ttl_sec)
+            data = (lhs_refresh if lhs_refresh is not None else
+                    numpy.vstack([data, data_lhs]) if n_have else data_lhs)
+            bootstrap_results.extend(lhs_results)
+        n_have = len(data) if data is not None else 0
+        data_sufficient = n_have >= MIN_POINTS_FOR_PCA
+        _write(f"[Q1 init] Доступно {n_have} корректных точек; "
+               "порог penalty < 10 для старта PCA не требуется.")
+
+    if not data_sufficient and not Q1:
         _write(f"\nДанных для incl={incl} недостаточно "
                f"({n_have} < {MIN_POINTS_FOR_PCA}).")
 
@@ -2946,7 +3296,7 @@ def run_pca_optimization(
                 n_have          = len(data) if data is not None else 0
                 data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)
 
-    if not data_sufficient:
+    if not data_sufficient and not Q1:
         _write("Запускаем bootstrap из ближайшего наклонения...")
 
         send_notification(
@@ -3098,6 +3448,9 @@ def run_pca_optimization(
 
     # --- Сортировка по penalty ---
     data_sort = data[numpy.argsort(data[:, 6])]
+    if (Q1 or globals().get('orblib_store') is not None) and data_sort[0, 5] > 0 and -data_sort[0, 6] > best_overall_target:
+        best_overall_target = -float(data_sort[0, 6])
+        best_overall_Upsilon = float(data_sort[0, 5])
     _write(f"Диапазон penalty: [{data_sort[:, 6].min():.4f}, "
            f"{data_sort[:, 6].max():.4f}]")
 
@@ -3131,7 +3484,7 @@ def run_pca_optimization(
     else:
         X_transformed = X_raw
 
-    weights       = numpy.exp(-data_good[:, 6] / 0.1)
+    weights       = numpy.exp(-(data_good[:, 6] - data_good[:, 6].min()) / 0.1)
     weighted_mean = numpy.average(X_transformed, weights=weights, axis=0)
     weighted_std  = numpy.sqrt(
         numpy.average((X_transformed - weighted_mean)**2,
@@ -3247,9 +3600,12 @@ def run_pca_optimization(
     prior_needed_count = max(0, prior_min_points - prior_good_count)
     prior_history_sufficient = prior_needed_count == 0
     prior_candidates = []
-    _write(f"Точек out_-истории с penalty < {prior_penalty_threshold:g}: "
-           f"{prior_good_count}/{prior_min_points}; "
-           f"добрать извне: {prior_needed_count}")
+    if Q1:
+        _write("[Q1 init] Начальные точки уже обработаны до PCA; повторного prior-набора нет.")
+    else:
+        _write(f"Точек out_-истории с penalty < {prior_penalty_threshold:g}: "
+               f"{prior_good_count}/{prior_min_points}; "
+               f"добрать извне: {prior_needed_count}")
 
     turbo = TuRBO_PCA_Fixed(
         model_data      = model_data,
@@ -3271,12 +3627,14 @@ def run_pca_optimization(
     start_iter      = 1
     do_prior        = True
 
-    if resume and os.path.exists(checkpoint_file):
+    if resume and not _resume_initial and os.path.exists(checkpoint_file):
         try:
             with open(checkpoint_file, 'rb') as f:
                 state = pickle.load(f)
 
-            X_obs = torch.tensor(state['X_obs'], dtype=dtype, device=device)
+            saved_coords = (q1_checkpoint_coords(state, model_data)
+                            if Q1 or 'params_obs' in state else state['X_obs'])
+            X_obs = torch.tensor(saved_coords, dtype=dtype, device=device)
             Y_obs = torch.tensor(state['Y_obs'], dtype=dtype, device=device)
 
             turbo.length        = state['turbo_length']
@@ -3314,6 +3672,8 @@ def run_pca_optimization(
             )
 
         except Exception as e:
+            if globals().get('orblib_store') is not None:
+                raise
             msg = (f"ПРЕДУПРЕЖДЕНИЕ: checkpoint повреждён ({e}),\n"
                    f"  стартуем с нуля")
             _write("# " + msg)
@@ -3321,6 +3681,16 @@ def run_pca_optimization(
             do_prior   = True
     else:
         _write("# Checkpoint не найден, запуск с нуля")
+
+    completed_iteration = start_iter - 1
+    if globals().get('orblib_store') is not None:
+        turbo.params_obs = (state['params_obs'] if resume and not _resume_initial
+                            and os.path.exists(checkpoint_file) and 'params_obs' in state else
+                            [dict(zip(('Q', 'gh', 'rh', 'rho0'), map(float, row[1:5]))) for row in data_good])
+        checkpoint_for_stop = lambda: save_checkpoint(X_obs, Y_obs, turbo, completed_iteration, sync=False)
+        check_storage_stop()
+    if Q1:
+        do_prior = False
 
     if do_prior and prior_history_sufficient:
         _write("Prior не требуется: в out_-истории достаточно точек "
@@ -3457,6 +3827,10 @@ def run_pca_optimization(
             ], dim=0)
             _write(f"  Априорная точка добавлена. Penalty={-prior_y:.6f}")
             prior_added = True
+            if globals().get('orblib_store') is not None:
+                turbo.params_obs.append(prior_eval_params.copy())
+                checkpoint_for_stop()
+                check_storage_stop()
         if not prior_added:
             _write("  [prior] весь prior pool занят — переходим к TuRBO без ожидания")
 
@@ -3474,6 +3848,8 @@ def run_pca_optimization(
     new_points_penalty = []   # буфер penalty текущего запуска
 
     for iteration in range(start_iter, n_iter + 1):
+        if globals().get('orblib_store') is not None:
+            check_storage_stop()
 
         # --- Заголовок итерации ---
         y_last_source = (
@@ -3565,6 +3941,11 @@ def run_pca_optimization(
         X_obs       = torch.cat([X_obs, X_next],  dim=0)
         Y_obs       = torch.cat([Y_obs, Y_next],  dim=0)
         y_last      = y_next
+        completed_iteration = iteration
+        if globals().get('orblib_store') is not None:
+            turbo.params_obs.append(new_params_i.copy())
+            checkpoint_for_stop()
+            check_storage_stop()
 
         # --- Перезапуск TR если схлопнулась ---
         if turbo.length < turbo.length_min:
@@ -3651,6 +4032,11 @@ def run_pca_optimization(
 
     _write(f"# End: {datetime.datetime.now()}")
 
+    if globals().get('orblib_store') is not None:
+        checkpoint_for_stop()
+        with open(f'checkpoint_{hostname_proc}.pkl', 'rb') as stream:
+            checksum = hashlib.file_digest(stream, 'md5').hexdigest()
+        atomic_bytes(orblib_store.control / f'complete_{hostname_proc}', checksum.encode())
     return best_params, best_overall_Upsilon, -best_target
 
 def compare_good_vs_acceptable(data, cutoff1=0.60, cutoff2=0.75,
@@ -3808,7 +4194,7 @@ def diagnose_pca_space(storage_patterns, host_patterns,
 
     X_with_ups = data_good[:, 1:6]
     scaler1    = StandardScaler()
-    pca1       = PCA(n_components=4)
+    pca1       = PCA(n_components=min(4, len(data_good)) if Q1 else 4)
     pca1.fit(scaler1.fit_transform(X_with_ups))
     _write(f"С Upsilon:\n"
            f"  Explained variance: {pca1.explained_variance_ratio_}\n"
@@ -3816,7 +4202,7 @@ def diagnose_pca_space(storage_patterns, host_patterns,
 
     X_no_ups = data_good[:, 1:5]
     scaler2  = StandardScaler()
-    pca2     = PCA(n_components=4)
+    pca2     = PCA(n_components=min(3, len(data_good)) if Q1 else 4)
     pca2.fit(scaler2.fit_transform(X_no_ups))
     _write(f"\nБез Upsilon:\n"
            f"  Explained variance: {pca2.explained_variance_ratio_}\n"
@@ -3828,7 +4214,7 @@ def diagnose_pca_space(storage_patterns, host_patterns,
     X_log[:, 2] = numpy.log10(X_no_ups[:, 2])
     X_log[:, 3] = numpy.log10(X_no_ups[:, 3])
     scaler3     = StandardScaler()
-    pca3        = PCA(n_components=4)
+    pca3        = PCA(n_components=min(3, len(data_good)) if Q1 else 4)
     pca3.fit(scaler3.fit_transform(X_log))
     _write(f"  Explained variance: {pca3.explained_variance_ratio_}\n"
            f"  Cumulative:         {numpy.cumsum(pca3.explained_variance_ratio_)}")
@@ -3941,7 +4327,13 @@ if __name__ == '__main__':
             seed_from_pa468  = args.seed_from_pa468,
         )
         
+        check_storage_stop()
         finalize(best_params, best_Upsilon, best_penalty)
+
+    except StorageStop as error:
+        checkpoint_for_stop()
+        print(f'Расчёт остановлен, локальный checkpoint сохранён: {error.reason}', flush=True)
+        raise SystemExit(75)
         
     except Exception as e:
         # При любой ошибке — сохранить что есть и уведомить
