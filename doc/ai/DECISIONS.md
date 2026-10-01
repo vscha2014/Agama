@@ -58,3 +58,21 @@ Format: `date | topic | decision | consequence`.
   `results/REGISTRY.md` | AGENTS.md stays ≤ 120 lines of pointers. `results/`
   and `paper/` are local-only (public repo): unpublished numbers are never
   committed, so the registry lives outside version control.
+
+## 2026-09-28 — Local archive indexing (PI-requested)
+
+- **MD5 interoperability** | accept case-insensitive hash names in rclone JSON;
+  reject missing/invalid hashes before reading archive data | add real-format
+  JSON tests and detailed size/hash/stream error reporting.
+- **Local-first indexing** | read already downloaded uncompressed tar members
+  directly, without extraction; stage JSON under `orblib-index-work/`, outside
+  the sync directory | no temporary orbit-library copies or AGAMA execution.
+- **Publication gate** | with the sync daemon stopped, verify cloud tar sizes
+  and MD5s before writing ready indexes into `orblib/catalog/` and uploading
+  only those indexes | failed verification must not publish indexes; existing
+  archives are never rewritten. Publication is separately retryable without
+  re-indexing unchanged local archives.
+- **Execution ownership** | the user runs indexing/publication from their local
+  installation with their configured rclone; the agent supplies code, commands
+  and isolated tests | no archive cleanup, credentials changes, VM launch or
+  shutdown is part of this task.

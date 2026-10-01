@@ -38,12 +38,16 @@ def digest(data):
     return hashlib.md5(data).hexdigest()
 
 
-def file_hash(path):
+def stream_md5(stream):
     checksum = hashlib.md5()
-    with open(path, 'rb') as stream:
-        while chunk := stream.read(1024 * 1024):
-            checksum.update(chunk)
+    while chunk := stream.read(1024 * 1024):
+        checksum.update(chunk)
     return checksum.hexdigest()
+
+
+def file_hash(path):
+    with open(path, 'rb') as stream:
+        return stream_md5(stream)
 
 
 def fsync_directory(path):
@@ -278,6 +282,25 @@ class Store:
             db.execute("UPDATE libraries SET state='remote' WHERE name=?", (name,))
 
 
+class RcloneError(RuntimeError):
+    def __init__(self, operation, returncode, stderr):
+        self.returncode = returncode
+        super().__init__(f'rclone {operation} failed ({returncode}): {stderr[-1000:]}')
+
+
+def remote_info(row):
+    name = row.get('Path', row.get('Name', '<unknown>'))
+    hashes = row.get('Hashes') or {}
+    checksums = {value.strip().lower() for key, value in hashes.items()
+                 if key.lower() == 'md5' and isinstance(value, str)}
+    if len(checksums) != 1 or not re.fullmatch(r'[0-9a-f]{32}', next(iter(checksums), '')):
+        raise ValueError(f'{name}: missing, invalid or conflicting MD5 in rclone metadata')
+    size = row.get('Size')
+    if type(size) is not int or size < 0:
+        raise ValueError(f'{name}: invalid size in rclone metadata: {size!r}')
+    return dict(size=size, md5=checksums.pop())
+
+
 class Rclone:
     def __init__(self, root, config, timeout=900):
         self.root = root.rstrip('/')
@@ -297,16 +320,23 @@ class Rclone:
         remaining = self.timeout if self.deadline is None else max(0.01, self.deadline - time.monotonic())
         result = subprocess.run(self.command(*args), capture_output=True, timeout=remaining)
         if result.returncode:
-            raise RuntimeError(f'rclone {args[0]} failed ({result.returncode}): '
-                               + result.stderr.decode(errors='replace')[-1000:])
+            raise RcloneError(args[0], result.returncode, result.stderr.decode(errors='replace'))
         return result.stdout
 
     def inventory(self):
         rows = json.loads(self.run('lsjson', self.root, '--recursive', '--files-only', '--hash'))
-        return {r['Path']: dict(size=r['Size'], md5=r.get('Hashes', {}).get('MD5', '').lower()) for r in rows}
+        return {r['Path']: remote_info(r) for r in rows if not r.get('IsDir', False)}
 
     def stat(self, name):
-        return self.inventory().get(name)
+        try:
+            row = json.loads(self.run('lsjson', self.root + '/' + name, '--stat', '--hash'))
+        except RcloneError as error:
+            if error.returncode in (3, 4):
+                return None
+            raise
+        if row is None or row.get('IsDir', False):
+            return None
+        return remote_info(row)
 
     def read(self, name):
         return self.run('cat', self.root + '/' + name)
@@ -323,7 +353,8 @@ class Rclone:
 def verify(remote, name, size, checksum):
     actual = remote.stat(name)
     if actual != dict(size=size, md5=checksum):
-        raise ValueError('Remote size/MD5 mismatch: ' + name)
+        raise ValueError(f'Remote size/MD5 mismatch: {name}; '
+                         f'expected size={size}, md5={checksum}; actual={actual!r}')
 
 
 def publish(remote, path, destination):
@@ -503,7 +534,7 @@ def index_stream(stream, directory, expected=None, existing_dir=None):
         pass
     actual = dict(size=stream.size, md5=stream.checksum.hexdigest())
     if expected is not None and expected != actual:
-        raise ValueError('Legacy archive stream size/MD5 mismatch')
+        raise ValueError(f'Legacy archive stream size/MD5 mismatch: expected={expected!r}; actual={actual!r}')
     return entries
 
 
@@ -511,13 +542,27 @@ def index_archives(store, remote):
     for name, info in remote.inventory().items():
         if not name.startswith('orblib_') or not name.endswith('.tar'):
             continue
+        if (type(info.get('size')) is not int or info['size'] < 0
+                or not re.fullmatch(r'[0-9a-f]{32}', info.get('md5') or '')):
+            raise ValueError(f'{name}: invalid expected size/MD5; refusing to read archive')
+        print(f'Indexing remote archive {name}: size={info["size"]}, md5={info["md5"]}', flush=True)
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(remote.command('cat', remote.root + '/' + name),
                                        stdout=subprocess.PIPE, stderr=errors)
             try:
                 entries = index_stream(process.stdout, store.control, expected=info, existing_dir=store.root)
                 if process.wait(timeout=remote.timeout):
-                    raise RuntimeError('Legacy archive streaming failed: ' + name)
+                    raise RuntimeError('Legacy archive streaming failed')
+            except Exception as error:
+                killed = process.poll() is None
+                if killed:
+                    process.kill()
+                code = process.wait()
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 4000))
+                stderr = errors.read().decode(errors='replace')
+                raise RuntimeError(f'{name}: {error}; rclone cat exit={code}, '
+                                   f'killed_by_indexer={killed}; stderr={stderr!r}') from error
             finally:
                 process.stdout.close()
                 if process.poll() is None:
@@ -529,6 +574,151 @@ def index_archives(store, remote):
         local = store.control / Path(destination).name
         atomic_bytes(local, json.dumps(record, sort_keys=True).encode())
         publish(remote, local, destination)
+
+
+def index_locations(work, archives):
+    work, archives = Path(work).resolve(), Path(archives).resolve(strict=True)
+    if not archives.is_dir():
+        raise ValueError(f'Archive directory not found: {archives}')
+    if work == archives or archives in work.parents or work in archives.parents:
+        raise ValueError('Index work directory and archive directory must not overlap')
+    return archives
+
+
+def source_stamp(path):
+    stat = Path(path).stat()
+    return dict(device=stat.st_dev, inode=stat.st_ino, size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns)
+
+
+def index_filename(record):
+    name, checksum = record['archive'], record['md5']
+    if Path(name).name != name or not name.startswith('orblib_') or not name.endswith('.tar'):
+        raise ValueError(f'Invalid archive name in index: {name}')
+    if not re.fullmatch(r'[0-9a-f]{32}', checksum):
+        raise ValueError(f'{name}: invalid index MD5')
+    return 'legacy_' + digest(name.encode()) + '_' + checksum + '.json'
+
+
+def local_archive_paths(archives):
+    paths = sorted(archives.glob('orblib_*.tar'))
+    if not paths:
+        raise ValueError(f'No orblib_*.tar archives found in {archives}')
+    if any(path.is_symlink() or not path.is_file() for path in paths):
+        raise ValueError('Expected regular tar files, not links or directories')
+    return paths
+
+
+def index_local_archive(path):
+    path = Path(path)
+    before = source_stamp(path)
+    entries = []
+    member_name = '<tar header>'
+    print(f'Indexing local {path.name}: {before["size"]} bytes, no extraction', flush=True)
+    try:
+        with path.open('rb') as stream:
+            with tarfile.open(fileobj=stream, mode='r:') as archive:
+                for member in archive:
+                    member_name = member.name
+                    validate_name(member.name)
+                    if not member.isfile():
+                        raise ValueError('Non-regular tar member')
+                    with archive.extractfile(member) as source:
+                        meta = metadata(source)
+                        source.seek(0)
+                        checksum = stream_md5(source)
+                    entries.append(dict(name=member.name, size=member.size,
+                                        md5=checksum, metadata=meta))
+                    print(f'  validated member {len(entries)}: {member.name}', flush=True)
+            stream.seek(0)
+            checksum = stream_md5(stream)
+    except Exception as error:
+        raise ValueError(f'{path.name}, member {member_name}: {error}') from error
+    if source_stamp(path) != before:
+        raise ValueError(f'{path.name}: archive changed during indexing; no index accepted')
+    return dict(archive=path.name, size=before['size'], md5=checksum,
+                entries=entries, _local_stat=before)
+
+
+def staged_index(store, path):
+    if (store.root / 'catalog').is_symlink():
+        raise ValueError('Staging catalog must not be a symlink')
+    stamp = source_stamp(path)
+    pattern = 'legacy_' + digest(path.name.encode()) + '_*.json'
+    matches = []
+    for index in sorted((store.root / 'catalog').glob(pattern)):
+        record = json.loads(index.read_bytes())
+        if record.get('_local_stat') != stamp:
+            continue
+        if (record.get('archive') != path.name or record.get('size') != stamp['size']
+                or index_filename(record) != index.name or not isinstance(record.get('entries'), list)):
+            raise ValueError(f'Invalid staged index: {index}')
+        matches.append(record)
+    if len(matches) > 1:
+        raise ValueError(f'{path.name}: multiple current staged indexes; review work directory')
+    return matches[0] if matches else None
+
+
+def index_local_archives(store, archives):
+    archives = index_locations(store.root, archives)
+    catalog = store.root / 'catalog'
+    if catalog.is_symlink():
+        raise ValueError(f'Staging catalog must not be a symlink: {catalog}')
+    catalog.mkdir(exist_ok=True)
+    for path in local_archive_paths(archives):
+        record = staged_index(store, path)
+        if record is not None:
+            print(f'Reusing staged index for unchanged local archive: {path.name}', flush=True)
+            continue
+        record = index_local_archive(path)
+        atomic_bytes(catalog / index_filename(record), json.dumps(record, sort_keys=True).encode())
+        print(f'Staged {path.name}: size={record["size"]}, md5={record["md5"]}', flush=True)
+    print(f'Local indexing complete; unpublished indexes: {catalog}', flush=True)
+
+
+def publish_local_indexes(store, remote, archives):
+    archives = index_locations(store.root, archives)
+    records = []
+    for path in local_archive_paths(archives):
+        record = staged_index(store, path)
+        if record is None:
+            raise ValueError(f'{path.name}: no current local index; run index --local-archives again')
+        records.append((path, record))
+    for path, record in records:
+        verify(remote, path.name, record['size'], record['md5'])
+        print(f'Cloud tar verified: {path.name}', flush=True)
+    catalog = archives / 'catalog'
+    if catalog.is_symlink():
+        raise ValueError(f'Publication catalog must not be a symlink: {catalog}')
+    prepared = []
+    for path, record in records:
+        if source_stamp(path) != record['_local_stat']:
+            raise ValueError(f'{path.name}: archive changed before publication')
+        public_record = {key: value for key, value in record.items() if key != '_local_stat'}
+        content = json.dumps(public_record, sort_keys=True).encode()
+        destination = catalog / index_filename(record)
+        if destination.is_symlink() or (destination.exists() and destination.read_bytes() != content):
+            raise FileExistsError(f'Conflicting local catalog file, not overwritten: {destination}')
+        prepared.append((path, record, destination, content))
+    catalog.mkdir(exist_ok=True)
+    for path, record, destination, content in prepared:
+        if source_stamp(path) != record['_local_stat']:
+            raise ValueError(f'{path.name}: archive changed before publication')
+        verify(remote, path.name, record['size'], record['md5'])
+        if destination.is_symlink():
+            raise FileExistsError(f'Conflicting local catalog link: {destination}')
+        if destination.exists():
+            if destination.is_symlink() or destination.read_bytes() != content:
+                raise FileExistsError(f'Conflicting local catalog file: {destination}')
+        else:
+            atomic_bytes(destination, content)
+        publish(remote, destination, 'catalog/' + destination.name)
+        verify(remote, path.name, record['size'], record['md5'])
+        print(f'Published and verified index: {destination.name}', flush=True)
+    for path, record in records:
+        if source_stamp(path) != record['_local_stat']:
+            raise ValueError(f'{path.name}: archive changed during publication')
+    print('All local indexes published; tar files were not uploaded or changed', flush=True)
 
 
 def prune_verified(store, remote, apply=False):
@@ -556,8 +746,10 @@ def prune_verified(store, remote, apply=False):
 
 def main():
     parser = argparse.ArgumentParser(description='Durable single-VM orbit library delivery')
-    parser.add_argument('action', choices=('prepare', 'watch', 'index', 'stop', 'finish', 'check', 'prune-verified'))
-    parser.add_argument('--root', required=True)
+    parser.add_argument('action', choices=('prepare', 'watch', 'index', 'publish-indexes', 'stop', 'finish', 'check', 'prune-verified'))
+    parser.add_argument('--root', help='Work directory; defaults to orblib-index-work with --local-archives')
+    parser.add_argument('--local-archives', type=Path, help='Read existing uncompressed tar files locally without extraction')
+    parser.add_argument('--publish', action='store_true', help='After local indexing, verify cloud tar hashes and publish only indexes')
     parser.add_argument('--remote', default='yandex:galAgama/orblib')
     parser.add_argument('--config', default=os.path.expanduser('~/.config/rclone/rclone.conf'))
     parser.add_argument('--attempts', type=int, default=3)
@@ -571,6 +763,18 @@ def main():
         parser.error('Invalid storage limits')
     if args.apply and args.action != 'prune-verified':
         parser.error('--apply is only valid with prune-verified')
+    if args.local_archives is not None and args.action not in ('index', 'publish-indexes'):
+        parser.error('--local-archives is only valid with index or publish-indexes')
+    if args.publish and (args.action != 'index' or args.local_archives is None):
+        parser.error('--publish requires index --local-archives')
+    if args.action == 'publish-indexes' and args.local_archives is None:
+        parser.error('publish-indexes requires --local-archives')
+    if args.root is None:
+        if args.local_archives is None:
+            parser.error('--root is required without --local-archives')
+        args.root = 'orblib-index-work'
+    if args.local_archives is not None:
+        args.local_archives = index_locations(args.root, args.local_archives)
     store = Store(args.root, args.reserve_bytes)
     remote = Rclone(args.remote, args.config, args.timeout)
     if args.action == 'stop':
@@ -589,7 +793,14 @@ def main():
             if args.action == 'prepare':
                 prepare(store, remote, args.resume, args.attempts)
             elif args.action == 'index':
-                index_archives(store, remote)
+                if args.local_archives is None:
+                    index_archives(store, remote)
+                else:
+                    index_local_archives(store, args.local_archives)
+                    if args.publish:
+                        publish_local_indexes(store, remote, args.local_archives)
+            elif args.action == 'publish-indexes':
+                publish_local_indexes(store, remote, args.local_archives)
             elif args.action == 'prune-verified':
                 prune_verified(store, remote, args.apply)
             elif args.action == 'check':
