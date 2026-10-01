@@ -79,6 +79,16 @@ must not be touched (see `../CONTRACT.md`, `production.md`).
   New rows carry a storage-context marker; untagged legacy rows keep the old
   experiment/inclination compatibility assumption. Metadata comparisons allow
   only 1e-12 roundoff, not the six-digit filename quantisation.
+- Archive-first-wins: if a library already has a receipt but no usable local
+  copy (deleted after delivery, or unreadable), the model is re-integrated and
+  its penalty recorded, but the new realisation is **not** stored. This is
+  reported before integration as `[orblib] ВНИМАНИЕ: … archived but not local
+  … result not stored (#N in this process)` and in the history comment
+  `# orblib archive-first-wins … archived_rebuilds=N`. There is no cloud fetch.
+- Indexing: stream-mode libraries need none (each is its own object plus
+  receipt, fetchable with `rclone copyto`). Legacy tar indexes store member
+  name/size/MD5/metadata but no tar offsets; fetching one member currently means
+  reading the tar (see `DECISIONS.md`, 2026-10-01).
 
 ### Local tar indexing and verified publication
 

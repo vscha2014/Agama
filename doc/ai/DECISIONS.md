@@ -118,3 +118,24 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Run order afterwards** (not started, needs explicit go-ahead): first a
   `--reuse-orblib` pass over the seven surviving libraries with 4 workers, only
   then a fresh 4-worker `--Q1` search on the widened bounds.
+
+## 2026-10-01 — Archived-but-not-local libraries; tar offsets deferred (agent, user-approved plan)
+
+- **Warning + counter, no behaviour change** | when `store.archived(name)` is true
+  but no usable local copy loads, `note_archived_rebuild()` prints
+  `[orblib] ВНИМАНИЕ: … archived but not local … result not stored (#N)` before
+  `agama.orbit`; the per-process `orblib_archived_rebuilds` also goes into the
+  `# orblib archive-first-wins … archived_rebuilds=N` history comment | the
+  evaluation still runs and its penalty is recorded; the wasted integration
+  (typical cause: changed `EVALUATION_CONTEXT` after local cleanup) is now visible.
+- **Legacy tar indexes: no re-indexing** | the user already ran
+  `index --local-archives orblib --publish`; the indexes hold member name, size,
+  MD5, metadata and archive size/MD5 — enough for `import_catalog`/`archived()`.
+  The next `prepare` fails on any cloud `orblib_*.tar` without an index, so
+  coverage is checked automatically | stream-mode libraries need no indexing
+  (individual `objects/<name>` + `catalog/<name>.json`).
+- **Tar offsets deferred** | only a future-fetch speed-up; revisit when a
+  re-score/fetch mode is designed and ranged `rclone cat --offset --count` is
+  confirmed on Yandex. Then: header-only `tarfile` scan (`offset_data`), a
+  separate sidecar file (never rewrite existing `legacy_*.json` — `publish()`
+  refuses different content under the same name), MD5 check of the fetched range.

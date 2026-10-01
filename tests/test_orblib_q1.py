@@ -882,6 +882,27 @@ def test_initial_checkpoint_is_not_a_turbo_checkpoint(tmp_path, monkeypatch):
     assert 'rng_state' in state
 
 
+def test_archived_rebuild_is_counted_and_reported(capsys):
+    ns = functions('note_archived_rebuild', orblib_archived_rebuilds=0)
+    ns['note_archived_rebuild']('orblib_x.npz', False)
+    ns['note_archived_rebuild']('orblib_y.npz', True)
+    assert ns['orblib_archived_rebuilds'] == 2
+    out = capsys.readouterr().out
+    assert 'orblib_x.npz archived but not local (local_exists=False)' in out
+    assert 'result not stored (#2 in this process)' in out
+
+
+def test_archived_rebuild_warning_precedes_integration():
+    function = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                    and node.name == 'halo_IC_lib_weights_pca_fixed')
+    warn = next(node for node in ast.walk(function) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == '_archived'
+                and 'note_archived_rebuild' in ast.unparse(node.body))
+    orbit = next(node for node in ast.walk(function) if isinstance(node, ast.Call)
+                 and ast.unparse(node.func) == 'agama.orbit')
+    assert warn.lineno < orbit.lineno
+
+
 def test_launcher_help_is_side_effect_free():
     result = subprocess.run(['bash', str(LAUNCHER), '--help'],
                             text=True, capture_output=True, check=True)

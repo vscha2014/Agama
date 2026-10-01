@@ -23,20 +23,20 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 - Harness (`py/Fornax_P21_PCA_w3Sersic_orblib_exp.py`, `py/launch_orblib_exp.sh`,
   `py/orblib_storage.py`): `--Q1`, widened bounds, aperture-vertex datacube grid,
   streaming orbit-library delivery.
-- **2026-10-01 — memory fix implemented** (details: `harness/orblib_exp.md` §3a,
-  `DECISIONS.md`): no trajectory request (Q21 answered), `trajsize` out of the
-  compatibility key, block `.npz` writer with no float64 duplicate, size+MD5 from
-  the writing pass, `ORBLIB_SAVE_SLOTS=2`, SIGTERM → STOP → checkpoint → exit 75,
-  per-phase RSS logging. Launcher: 4 workers by default, host swapfile, swapless
-  container memory limit, resource sampler, fast MemAvailable/PSI trigger + 3600 s
-  no-progress backstop, emergency log upload before shutdown, failed `sudo
-  shutdown` reported. 127 mocked tests pass; no AGAMA/docker/cloud run. Expected
-  per-worker peak ≈1.5–2 GB vs ≈4–5 GB — **not yet measured on the VM**.
-- Production scripts (`*_yaVM.py`, `J_factor_*.py`, `launch_docker_parallel.sh`)
-  untouched; the `pipefail`/`ls .done_*` latent bug found in the experimental
-  launcher still exists there (Q20, unanswered).
-- Memory fix committed as `92f009e`. The branch is ahead of `origin/master`
-  (pushes fail: no git credentials).
+- **Memory fix** committed as `92f009e` (details: `harness/orblib_exp.md` §3a,
+  `DECISIONS.md`): no trajectories, block `.npz` writer, 2 save slots, SIGTERM →
+  STOP → checkpoint, RSS logging; launcher with 4 workers, host swap, swapless
+  container limit, PSI/no-progress watchdogs, emergency upload. Expected peak
+  ≈1.5–2 GB/worker — **not yet measured on the VM**. Branch ahead of origin (no
+  git credentials for push).
+- 2026-10-01 (uncommitted): archived-but-not-local libraries are warned about
+  before integration and counted (`orblib_archived_rebuilds`, also in history);
+  behaviour unchanged. 129 mocked tests pass.
+- Legacy tars indexed and published (user-run, local archives); the next
+  `prepare` refuses any cloud tar without an index. Tar offsets deferred;
+  stream-mode libraries need no indexing.
+- Production scripts untouched; the `pipefail`/`ls .done_*` latent bug still
+  exists in the production launcher (Q20, unanswered).
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
@@ -47,8 +47,8 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
    vs a stored library) — the only open item of the memory fix.
 2. Only then a fresh 4-worker `--Q1` search on the widened bounds; or profile
    runs at fixed `rh = 3.5 / 5 / 7 kpc`, re-optimising `gh, rho0, Upsilon`.
-3. User-run `orblib_storage.py index --local-archives orblib --publish` with the
-   sync daemon stopped; restart sync only after verified publication.
+3. Later: a batch re-score/fetch mode for changed data (download archived
+   libraries, then `--reuse-orblib`); add tar offsets only then.
 4. Decide the J-factor weighting method (Q16) before finalising article numbers.
 5. Recompute the 77 lost orbit libraries targeted, not by rerunning the search.
 

@@ -121,6 +121,7 @@ SAVE_ORBLIB = args.save_orblib       # сохранять библиотеку �
 ORBLIB_DIR  = args.orblib_dir
 REUSE_ORBLIB = args.reuse_orblib     # lookup сохранённых библиотек перед agama.orbit
 orblib_counter = 0                   # сквозной счётчик сохранённых библиотек орбит
+orblib_archived_rebuilds = 0         # архивирована, но локально нет → пересчёт без сохранения
 
 # Пункты 3-4 (возмущение GH / Серсика) — задел для дальнейшей доработки.
 # Пока реализован только номинал (id=0); запуск с id>0 дал бы результат,
@@ -291,6 +292,16 @@ def write_orblib_npz(stream, matrices, ic, inttime, scalars,
         for name, value in scalars.items():
             with archive.open(name + '.npy', 'w') as member:
                 numpy.lib.format.write_array(member, numpy.asarray(value), allow_pickle=False)
+
+
+def note_archived_rebuild(name, local_exists):
+    # Библиотека уже в облаке (есть receipt), но локальной пригодной копии нет:
+    # оценка интегрируется заново, а результат НЕ сохраняется (archive-first-wins).
+    global orblib_archived_rebuilds
+    orblib_archived_rebuilds += 1
+    print(f"  [orblib] ВНИМАНИЕ: {name} archived but not local "
+          f"(local_exists={local_exists}) → reintegration, result not stored "
+          f"(#{orblib_archived_rebuilds} in this process)", flush=True)
 
 
 def completed_point(params):
@@ -1343,7 +1354,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     # НОВЫЙ параметр: прямые параметры без PCA
                                     direct_params=None,
                                     allow_orblib_reuse=True):
-    global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent, orblib_counter
+    global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent, orblib_counter, orblib_archived_rebuilds
     
    # --- РЕЖИМ БЕЗ PCA: direct_params передан напрямую ---
     if direct_params is not None:
@@ -1471,6 +1482,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                       f"dens={matrices[0].shape} kinem={matrices[1].shape}")
 
         if not orblib_loaded:
+            if _archived:
+                note_archived_rebuild(_ol_name, os.path.exists(_ol_path))
             if SAVE_ORBLIB:
                 _ol_build_fp = f"{_ol_path}.building"
                 _build_payload = f"{hostname_proc} {time.time():.6f}\n"
@@ -1735,7 +1748,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         elif orblib_loaded:
             f.write(f"# orblib reused: {_ol_name} load_s={orbit_time_s:.3f}\n")
         elif _archived:
-            f.write(f"# orblib archive-first-wins: {_ol_name}; current evaluation rebuilt\n")
+            f.write(f"# orblib archive-first-wins: {_ol_name}; current evaluation rebuilt "
+                    f"archived_rebuilds={orblib_archived_rebuilds}\n")
         f.write("# End of history\n\n")
         if store is not None:
             f.flush()
