@@ -27,9 +27,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 import pickle
 import socket
+import contextlib
 import glob
+import signal
 import time
-from orblib_storage import Store, StorageStop, LibraryBusy, atomic_bytes
+import zipfile
+from orblib_storage import Store, StorageStop, LibraryBusy, HashingWriter, atomic_bytes
 
 # BoTorch / GPyTorch
 from botorch.models import SingleTaskGP
@@ -213,7 +216,9 @@ RCLONE_REMOTE = os.environ.get('RCLONE_REMOTE', 'yandex')
 
 import agama
 
-orblib_store = (Store(ORBLIB_DIR, int(os.environ.get('ORBLIB_RESERVE_BYTES', '2000000000')))
+ORBLIB_SAVE_SLOTS = int(os.environ.get('ORBLIB_SAVE_SLOTS', '2'))
+orblib_store = (Store(ORBLIB_DIR, int(os.environ.get('ORBLIB_RESERVE_BYTES', '2000000000')),
+                      save_slots=ORBLIB_SAVE_SLOTS)
                 if args.stream_orblib else None)
 if orblib_store is not None and not SAVE_ORBLIB:
     parser.error('--stream-orblib требует --save-orblib')
@@ -223,6 +228,69 @@ def check_storage_stop():
     store = globals().get('orblib_store')
     if store is not None:
         store.check_stop()
+
+
+def log_mem(tag):
+    """RSS процесса и MemAvailable хоста — диагностика пиков памяти.
+
+    Пишется в расчётный лог вокруг каждой тяжёлой фазы: после зависания
+    2026-09-29 без этих строк нельзя было отличить рост RSS от page-cache.
+    """
+    try:
+        with open('/proc/self/statm') as stream:
+            pages = int(stream.read().split()[1])
+        rss_mb = pages * os.sysconf('SC_PAGE_SIZE') / 1e6
+    except (OSError, IndexError, ValueError):
+        rss_mb = float('nan')
+    available_mb = float('nan')
+    try:
+        with open('/proc/meminfo') as stream:
+            for line in stream:
+                if line.startswith('MemAvailable:'):
+                    available_mb = float(line.split()[1]) / 1e3
+                    break
+    except (OSError, IndexError, ValueError):
+        pass
+    print(f"  [mem] {tag}: rss={rss_mb:.0f} MB available={available_mb:.0f} MB", flush=True)
+
+
+# Блок построчной конвертации при записи .npz: ~8 MB на блок, поэтому пик
+# памяти писателя не зависит от numOrbits.
+_NPZ_BLOCK_BYTES = 8 * 1024 * 1024
+
+
+def write_orblib_npz(stream, matrices, ic, inttime, scalars,
+                     block_bytes=_NPZ_BLOCK_BYTES):
+    """Записать библиотеку орбит в .npz без полной float64-копии матриц.
+
+    Прежний путь (`numpy.savez_compressed(**{...astype(float64)})`) держал в
+    памяти float64-дубликаты matrix_dens/matrix_kinem рядом с живыми float32
+    оригиналами (~1.14 GB на процесс при numOrbits=100000). Здесь большие
+    матрицы пишутся блоками строк: заголовок .npy объявляет '<f8', а данные
+    конвертируются по ~8 MB за раз. Набор имён членов архива и их dtype
+    совпадают с прежним форматом, поэтому старые файлы остаются читаемыми тем
+    же кодом, а новые — прежними читателями.
+    """
+    with zipfile.ZipFile(stream, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        for name, value in matrices.items():
+            array = numpy.asarray(value)
+            row_bytes = max(1, 8 * int(numpy.prod(array.shape[1:], dtype=numpy.int64)))
+            rows = max(1, block_bytes // row_bytes)
+            with archive.open(name + '.npy', 'w', force_zip64=True) as member:
+                numpy.lib.format.write_array_header_1_0(
+                    member, dict(descr='<f8', fortran_order=False, shape=array.shape))
+                for start in range(0, array.shape[0], rows):
+                    member.write(numpy.ascontiguousarray(
+                        array[start:start + rows], dtype=numpy.float64).tobytes())
+        # ic/inttime маленькие (~3 MB вместе) — пишутся целиком, но с явным
+        # float64: metadata() требует '<f8' для них.
+        for name, value in (('ic', ic), ('inttime', inttime)):
+            with archive.open(name + '.npy', 'w') as member:
+                numpy.lib.format.write_array(
+                    member, numpy.asarray(value, dtype=numpy.float64), allow_pickle=False)
+        for name, value in scalars.items():
+            with archive.open(name + '.npy', 'w') as member:
+                numpy.lib.format.write_array(member, numpy.asarray(value), allow_pickle=False)
 
 
 def completed_point(params):
@@ -271,6 +339,33 @@ def save_initial_checkpoint():
 
 
 checkpoint_for_stop = save_initial_checkpoint
+
+
+def _handle_stop_signal(number, frame):
+    """SIGTERM/SIGINT → штатный путь остановки, а не мгновенная смерть.
+
+    Со store'ом пишем маркер STOP: существующие check_stop()/
+    check_storage_stop() превратят его в StorageStop, а верхний обработчик — в
+    checkpoint и код выхода 75, который понимает оркестратор. Без store'а
+    сохраняем checkpoint напрямую.
+    ВАЖНО: сигнал, пришедший внутри длинного C-вызова (agama.orbit,
+    agama.solveOpt), обрабатывается только после его возврата — поэтому
+    оркестратор даёт контейнеру grace-период (docker stop -t ...).
+    """
+    name = signal.Signals(number).name
+    store = globals().get('orblib_store')
+    print(f'Получен {name}: инициирована штатная остановка', flush=True)
+    if store is not None:
+        store.stop(f'signal {name} from controller')
+        return
+    try:
+        checkpoint_for_stop()
+    finally:
+        raise SystemExit(75)
+
+
+for _stop_signal in (signal.SIGTERM, signal.SIGINT):
+    signal.signal(_stop_signal, _handle_stop_signal)
 
 
 def send_ntfy(message, title='Galaxy Calc', priority='default', tags=None):
@@ -926,10 +1021,13 @@ alphah    = 2.0
 betah     = 3
 
 numOrbits = 100000
-trajsize = 1000
+# Траектории не запрашиваются у agama.orbit (целевые матрицы накапливает
+# RuntimeFncTarget во время интегрирования и от записи траекторий не зависят);
+# поле trajsize остаётся в .npz только как обязательный скаляр формата.
+TRAJSIZE_STORED = 0
 EVALUATION_CONTEXT = hashlib.sha256(
     repr((incl, DOUBLE, N_BIN, GH_ID, SER_ID, GEOM_HASH, alphah, betah,
-          numOrbits, trajsize, 100.0, 1.0, 0.1, 1.6,
+          numOrbits, 100.0, 1.0, 0.1, 1.6,
           UPS_XATOL, UPS_BRACKET_DELTA, UPS_BRACKET_NMED, UPS_SUBSAMPLE_FRAC)).encode()
     + b''.join(numpy.asarray(value).tobytes() for dataset in datasets
                for value in (dataset.cons_val, dataset.cons_err))
@@ -1240,7 +1338,7 @@ def finalize(best_params, best_Upsilon, best_penalty):
 def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     densityStars, datasets, alphah, betah,
                                     Upsilon_lower=0.1, Upsilon_upper=1.6,
-                                    numOrbits=100000, trajsize=1000, intTime=100.,
+                                    numOrbits=100000, intTime=100.,
                                     regul=1.,
                                     # НОВЫЙ параметр: прямые параметры без PCA
                                     direct_params=None,
@@ -1319,9 +1417,12 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         _archived = False
         if store is not None:
             try:
+                # trajsize НЕ входит в ключ совместимости: он не влияет на
+                # matrix_dens/matrix_kinem/ic/inttime, поэтому старая библиотека
+                # (trajsize=1000) и новая (0) равно пригодны для переиспользования.
                 _expected = dict(Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
                                  double=int(DOUBLE), n_bin=N_BIN, ser_id=SER_ID,
-                                 numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
+                                 numOrbits=numOrbits, intTime=intTime,
                                  degree=degree, ghorder=ghorder,
                                  gridv_md5=hashlib.md5(gridv.tobytes()).hexdigest(),
                                  gridv_dtype=gridv.dtype.str)
@@ -1385,18 +1486,24 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
 
             _t_orbit = time.perf_counter()
             inttime = pot_gal.Tcirc(ic) * intTime
+            log_mem('before integration')
+            # Траектории НЕ запрашиваются: при trajsize=1000 agama.orbit
+            # выделял ~3.2 GB на процесс (100000 × (1000×6 float32 + 1000
+            # float64)), и этот массив выбрасывался следующей же строкой.
             matrices = agama.orbit(
                 potential=pot_gal,
                 ic=ic,
                 time=inttime,
                 Omega=0.0,
-                targets=[d.target for d in datasets],
-                trajsize=trajsize
+                targets=[d.target for d in datasets]
             )
             orbit_time_s = time.perf_counter() - _t_orbit
-            matrices = matrices[:-1]
+            if len(matrices) != len(datasets):
+                raise RuntimeError(f'agama.orbit вернул {len(matrices)} матриц '
+                                   f'при {len(datasets)} датасетах')
+            log_mem('after integration')
             print(f"  [orbitlib] sample={sample_time_s:.1f}s orbit={orbit_time_s:.1f}s "
-                  f"(numOrbits={numOrbits}, trajsize={trajsize}, intTime={intTime})")
+                  f"(numOrbits={numOrbits}, intTime={intTime}, траектории не записываются)")
 
         # --- Сохранение библиотеки орбит (matrices + ic) ---
         # Имя КОНТЕНТ-АДРЕСНОЕ по физике модели: (incl, удвоение, n_bin,
@@ -1423,42 +1530,49 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                 _t_ol  = time.perf_counter()
                 _ol_tmp = f"{_ol_path}.{os.getpid()}.tmp"
                 try:
-                    _arr64 = dict(
-                        ic           = ic.astype(numpy.float64),
-                        inttime      = numpy.asarray(inttime, dtype=numpy.float64),
-                        matrix_dens  = numpy.asarray(matrices[0], dtype=numpy.float64),
-                        matrix_kinem = numpy.asarray(matrices[1], dtype=numpy.float64),
-                    )
-                    _raw64_mb = sum(a.nbytes for a in _arr64.values()) / 1e6
-                    # Файл-объект → numpy НЕ добавляет .npz к имени (детерминировано)
-                    for _save_attempt in range(2 if store is not None else 1):
-                        try:
-                            with open(_ol_tmp, 'wb') as _fh:
-                                numpy.savez_compressed(
-                                    _fh,
-                                    **_arr64,
-                                    Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
-                                    numOrbits=numOrbits, trajsize=trajsize, intTime=intTime,
-                                    gridv=gridv, degree=degree, ghorder=ghorder,
-                                    n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID,
-                                )
-                                _fh.flush()
-                                os.fsync(_fh.fileno())
-                            break
-                        except OSError:
-                            if store is None or _save_attempt:
-                                raise
-                            time.sleep(1)
-                    os.replace(_ol_tmp, _ol_path)   # атомарная публикация
-                    if store is not None:
-                        store.register(_ol_name)
+                    _mats = dict(matrix_dens=matrices[0], matrix_kinem=matrices[1])
+                    _raw64_mb = 8 * sum(numpy.asarray(a).size for a in
+                                        (*_mats.values(), ic, inttime)) / 1e6
+                    # save_slot ограничивает число одновременных писателей на
+                    # VM (ORBLIB_SAVE_SLOTS): конвертация + deflate + hashing у
+                    # всех процессов разом и вызвали зависание 2026-09-29.
+                    with (store.save_slot() if store is not None
+                          else contextlib.nullcontext()):
+                        log_mem(f'before npz write {_ol_name}')
+                        # Файл-объект → numpy НЕ добавляет .npz к имени (детерминировано)
+                        for _save_attempt in range(2 if store is not None else 1):
+                            try:
+                                with open(_ol_tmp, 'wb') as _fh:
+                                    # size+MD5 считаются в том же проходе, что и запись,
+                                    # поэтому register() не перечитывает файл дважды.
+                                    _hashed = HashingWriter(_fh)
+                                    write_orblib_npz(
+                                        _hashed, _mats, ic, inttime,
+                                        dict(Q=Q, gh=gh, rh=rh, rho0=rho0, incl=incl,
+                                             numOrbits=numOrbits, trajsize=TRAJSIZE_STORED,
+                                             intTime=intTime, gridv=gridv,
+                                             degree=degree, ghorder=ghorder,
+                                             n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID))
+                                    _fh.flush()
+                                    os.fsync(_fh.fileno())
+                                break
+                            except OSError:
+                                if store is None or _save_attempt:
+                                    raise
+                                time.sleep(1)
+                        log_mem(f'after npz write {_ol_name}')
+                        os.replace(_ol_tmp, _ol_path)   # атомарная публикация
+                        if store is not None:
+                            store.register(_ol_name, size=_hashed.size,
+                                           md5=_hashed.checksum.hexdigest())
+                        log_mem(f'after register {_ol_name}')
                     _ol_dt = time.perf_counter() - _t_ol
                     _ol_mb = os.path.getsize(_ol_path) / 1e6
                     orblib_save_info = (_ol_name, _ol_mb, _ol_dt)
                     print(f"  [orblib] saved {_ol_name} ({_ol_mb:.1f} MB, {_ol_dt:.1f}s, "
                           f"dens={numpy.shape(matrices[0])} kinem={numpy.shape(matrices[1])})")
                     print(f"  [orblib] float64: raw={_raw64_mb:.1f} MB "
-                          f"(float32 было бы {_raw64_mb/2:.1f} MB), "
+                          f"(блочная конвертация, без полной копии в памяти), "
                           f"после сжатия {_ol_mb:.1f} MB")
                 except Exception as _e:
                     print(f"  [orblib] ОШИБКА сохранения {_ol_name}: {_e}")
@@ -1575,6 +1689,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             del _ups_recent[0]
     
     number_of_h_IC_lw += 1
+    log_mem('after Upsilon search')
     print("number_of_h_IC_lw = ",number_of_h_IC_lw, "N_U = ", number_of_find_w_U)
     print(f"  → min_penalty={min_pen:.6f}, Upsilon={min_Ups:.4f}")
     
@@ -1611,7 +1726,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         f.write(f"# orbitlib times (s): sample_s={sample_time_s:.6f} "
                 f"orbit_s={orbit_time_s:.6f} "
                 f"total_s={sample_time_s + orbit_time_s:.6f} "
-                f"(numOrbits={numOrbits} trajsize={trajsize} intTime={intTime})\n")
+                f"(numOrbits={numOrbits} trajsize_stored={TRAJSIZE_STORED} "
+                f"intTime={intTime})\n")
         if orblib_save_info is not None:
             f.write(f"# orblib saved: {orblib_save_info[0]} "
                     f"size_MB={orblib_save_info[1]:.3f} "

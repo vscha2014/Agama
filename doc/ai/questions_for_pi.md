@@ -86,19 +86,3 @@ Reproduced with mocked docker/rclone/curl. Fixed in `launch_orblib_exp.sh`
 log uploaded right after step 3, `curl -f` checked). The identical construct is
 still in `py/launch_docker_parallel.sh`. **Question:** approve a separate task
 to fix production?
-
-## Q21. Stop requesting orbit trajectories that are immediately discarded?  [affects: evaluation path]
-
-`halo_IC_lib_weights_pca_fixed` calls `agama.orbit(..., trajsize=1000)` and the
-very next line does `matrices = matrices[:-1]`, i.e. the trajectories are thrown
-away unused. Estimated cost per worker: ≈ 2.4 GB of phase-space points
-(`NPY_FLOAT`, 100000·1000·6) + ≈ 0.8 GB of timestamps ⇒ ≈ 3.2 GB, ≈ 25 GB for
-eight workers on a 31 GiB VM with no swap. This is the leading suspect for the
-2026-09-29 stall (`results/Q1d1_nb250_gh0_ser0_i90.0_20260929/postmortem.md`).
-
-Dropping `trajsize` (or setting it to 1) does not change the target matrices and
-therefore should not change `penalty`, but it does change the `agama.orbit` call
-in the evaluation path, so it needs approval. **Question:** may we drop the
-trajectory request in the experimental script (and re-verify that the stored
-`matrix_dens`/`matrix_kinem` and a recomputed `penalty` are unchanged for one
-control model)? Related: Q18 (`ic`/`inttime` are still stored).

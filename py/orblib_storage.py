@@ -84,7 +84,7 @@ def npy_header(stream):
     return ast.literal_eval(stream.read(length).decode('latin1').strip())
 
 
-def metadata(path):
+def metadata(path, deep=True):
     with zipfile.ZipFile(path) as archive:
         result = {}
         for name in SCALARS:
@@ -110,7 +110,7 @@ def metadata(path):
                 raise ValueError('Expected float64: ' + name)
             if not header['shape'] or header['shape'][0] != result['numOrbits']:
                 raise ValueError('Invalid array shape: ' + name)
-        if archive.testzip() is not None:
+        if deep and archive.testzip() is not None:
             raise ValueError('Corrupt npz member')
     return result
 
@@ -136,12 +136,13 @@ def validate_name(name):
 
 
 class Store:
-    def __init__(self, root, reserve_bytes=2_000_000_000):
+    def __init__(self, root, reserve_bytes=2_000_000_000, save_slots=2):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.control = self.root / '.storage'
         self.control.mkdir(exist_ok=True)
         self.reserve_bytes = reserve_bytes
+        self.save_slots = max(1, int(save_slots))
         self.stop_path = self.control / 'STOP'
         self.finish_path = self.control / 'FINISH'
         self.db = self.control / 'queue.sqlite'
@@ -198,6 +199,33 @@ class Store:
             raise LibraryBusy(name)
         return stream
 
+    @contextmanager
+    def save_slot(self):
+        # Caps how many workers may convert/compress/hash a library at the same
+        # time: the 2026-09-29 stall was eight simultaneous savers on one VM.
+        # No check_stop() on entry: a model whose integration already finished
+        # must still be saved after a delivery STOP, exactly as claim() allows.
+        # While *waiting* for a slot the stop is honoured, so a jammed queue
+        # cannot hold a worker forever.
+        stream = None
+        while stream is None:
+            for index in range(self.save_slots):
+                candidate = open(self.control / f'save{index}.slot', 'a')
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    candidate.close()
+                    continue
+                stream = candidate
+                break
+            if stream is None:
+                self.check_stop()
+                time.sleep(1)
+        try:
+            yield
+        finally:
+            stream.close()
+
     def claim(self, name, size):
         self.check_stop()
         stream = self.lock(name)
@@ -228,13 +256,21 @@ class Store:
             finally:
                 stream.close()
 
-    def register(self, name, managed=True):
+    def register(self, name, managed=True, size=None, md5=None):
         validate_name(name)
         path = self.root / name
         if path.is_symlink() or not path.is_file():
             raise ValueError('Not a regular library: ' + name)
-        meta = metadata(path)
+        # A writer that hashed the bytes as it produced them supplies its own
+        # size/MD5: the fsynced file is then validated by one full read
+        # (hash comparison) instead of a testzip() pass plus a hash pass.
+        meta = metadata(path, deep=size is None or md5 is None)
         checksum = file_hash(path)
+        if size is not None and path.stat().st_size != size:
+            raise ValueError(f'Written size mismatch: {name}; '
+                             f'expected={size}, actual={path.stat().st_size}')
+        if md5 is not None and checksum != md5:
+            raise ValueError(f'Written MD5 mismatch: {name}; expected={md5}, actual={checksum}')
         with open(path, 'rb') as stream:
             os.fsync(stream.fileno())
         fsync_directory(self.root)
@@ -501,6 +537,33 @@ class HashingReader:
         self.checksum.update(data)
         self.size += len(data)
         return data
+
+
+class HashingWriter:
+    """Size + MD5 of everything written, computed in the writing pass.
+
+    Deliberately offers no seek(): zipfile then writes data descriptors instead
+    of rewinding to patch local headers, so the bytes we hash are exactly the
+    bytes that reach the file.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.checksum = hashlib.md5()
+        self.size = 0
+
+    def write(self, data):
+        view = memoryview(data)
+        self.stream.write(view)
+        self.checksum.update(view)
+        self.size += view.nbytes
+        return view.nbytes
+
+    def tell(self):
+        return self.size
+
+    def flush(self):
+        self.stream.flush()
 
 
 def index_stream(stream, directory, expected=None, existing_dir=None):

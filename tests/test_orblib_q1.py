@@ -435,7 +435,9 @@ python3() {
 sudo() { printf 'UNEXPECTED sudo\\n' >> "$HOME/calls.txt"; return 1; }
 docker() {
     printf 'docker %s\\n' "$*" >> "$HOME/calls.txt"
-    if [ "$1" = image ]; then return 0; fi
+    case "$1" in
+        image|info|stats|stop|kill) return 0 ;;
+    esac
     printf '90 1 0.5 1.5 80 0.6 0.5\\n' > "$WORK_DIR/out_${HOSTNAME_ENV}_${EXP_ID}_p0.txt"
     printf 'mock diagnostic\\n' > "$WORK_DIR/log_${HOSTNAME_ENV}_${EXP_ID}_p0.txt"
     return "$MOCK_EXIT_CODE"
@@ -445,8 +447,9 @@ source "$0" "$@"
     args = ['bash', '-c', prefix, str(launcher), '--Q1', '--nproc=1', '--no-shutdown']
     if resume:
         args.append('--resume')
-    result = subprocess.run(args, cwd=tmp_path, text=True, capture_output=True, timeout=15,
-                            env=dict(os.environ, HOME=str(tmp_path), MOCK_EXIT_CODE=str(exit_code)))
+    result = subprocess.run(args, cwd=tmp_path, text=True, capture_output=True, timeout=30,
+                            env=dict(os.environ, HOME=str(tmp_path), MOCK_EXIT_CODE=str(exit_code),
+                                     ORBLIB_SWAPFILE='0'))
     assert result.returncode == exit_code, result.stdout + result.stderr
     calls = (tmp_path / 'calls.txt').read_text()
     assert '--Q1' in calls and '--no-double' not in calls

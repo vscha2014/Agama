@@ -138,6 +138,93 @@ and actual size/MD5, rclone exit status and stderr. Tests exercise lowercase
 JSON, missing hashes, tiny local tar files, publication failure/retry and
 mocked rclone CLI, with no real cloud operations.
 
+## 3a. Memory budget and watchdogs (after the 2026-09-29 stall)
+
+The stall was a memory-reclaim livelock, not an OOM: with `swap 0` the kernel
+could only reclaim file pages, so eight workers saving libraries at once kept
+allocating while the VM spent hours refaulting pages (84 MB/s reads, dead SSH).
+Everything below exists to keep that from recurring.
+
+- **No trajectories.** `agama.orbit()` is called without `trajsize`; target
+  matrices are accumulated during integration and do not depend on trajectory
+  recording. Previously `trajsize=1000` allocated ≈3.2 GB per worker that the
+  next line discarded. The script asserts one matrix per dataset.
+- **`trajsize` is outside the library compatibility key.** New files store
+  `trajsize=TRAJSIZE_STORED=0` (the field stays present because
+  `orblib_storage.SCALARS` requires it), and the `_expected` dict omits it, so a
+  legacy library (`1000`) and a new one (`0`) are equally reusable. It is also
+  out of `EVALUATION_CONTEXT`; no history row carried a `# storage-context`
+  line when this changed, so nothing was invalidated.
+- **Block writer.** `write_orblib_npz()` writes the `.npz` member by member:
+  the two big matrices get a hand-written `'<f8'` `.npy` header plus ~8 MB row
+  blocks converted on the fly, so no full float64 duplicate of
+  `matrix_dens`/`matrix_kinem` ever exists (previously ≈1.14 GB per worker).
+  Member names, dtypes and values are identical to the old
+  `savez_compressed` output. Atomic `.tmp` → `fsync` → `os.replace` is kept.
+- **Hash while writing.** `HashingWriter` yields size + MD5 in the writing pass;
+  `store.register(name, size=…, md5=…)` then validates with one full read and
+  `metadata(deep=False)` instead of a `testzip()` pass plus a hash pass. Deep
+  validation stays on every path inspecting files this process did not write
+  (`prepare`, `prune-verified`, indexing).
+- **Save slots.** Convert + write + register run inside `store.save_slot()`,
+  `ORBLIB_SAVE_SLOTS=2` flock slots under `.storage/`. There is deliberately no
+  stop check on entry — a model whose integration finished must still be saved
+  after a delivery STOP — but the stop is honoured while waiting for a slot.
+- **Signals.** SIGTERM/SIGINT write the storage `STOP` marker with reason
+  `signal <name> from controller`; the existing polls turn that into
+  `StorageStop` → checkpoint → exit 75, which the launcher understands. Without
+  a store the checkpoint is written directly. A signal arriving inside a long C
+  call (`agama.orbit`, `agama.solveOpt`) is acted on only after that call
+  returns — hence the launcher's `ORBLIB_STOP_GRACE`. A container killed by the
+  cgroup OOM gets SIGKILL and writes **no** checkpoint; what survives: history
+  rows already written, delivered `.npz`, released `flock`s, expiring claims.
+- **`log_mem(tag)`** prints RSS and `MemAvailable` before/after integration,
+  around the npz write, after `register` and after the Upsilon search.
+- **Worker default** is `nproc/8` (4 on 32 vCPU, 8 threads each) because the
+  binding constraint is memory, not CPU. `--nproc=` still overrides.
+- **Host swapfile** (step 0a, `ORBLIB_SWAPFILE=16G`, `0` disables): protects
+  host processes (sshd, journald, orchestrator, rclone) only. Failure is a
+  warning, never fatal.
+- **Swapless container limit:** `--memory=$LIM --memory-swap=$LIM`, where
+  `LIM = (MemTotal − 4 GB)/N_PROC` (override with `ORBLIB_MEM_LIMIT`, bytes).
+  In docker `--memory-swap` is the *combined* RAM+swap ceiling, so equality
+  means no container swap and an OOM-kill at the limit; leaving it unset
+  defaults to `2 × --memory`. `check_swap_limit_support` asks
+  `docker info --format '{{.SwapLimit}}'` (and falls back to the
+  `No swap limit support` warning); where accounting is missing docker ignores
+  `--memory-swap` silently, so the launcher warns, sets `vm.swappiness=1` and
+  caps `ORBLIB_STALL_TIMEOUT` at 900 s. Exit 137 lands in the existing
+  per-container error path.
+- **Resource sampler** every `ORBLIB_MONITOR_INTERVAL=60` s →
+  `monitor_{RUN_TAG}_{TIMESTAMP}.log` (`free -m`, `/proc/pressure/memory`,
+  `docker stats`, `df`), uploaded with the other logs.
+- **Two stall triggers** in the step-3 wait loop, sampled every
+  `ORBLIB_WATCH_INTERVAL=10` s:
+  *fast* — `MemAvailable` below `ORBLIB_MIN_AVAIL_MB=2048`, or
+  `/proc/pressure/memory` `some avg60` above `ORBLIB_PSI_LIMIT=20` % for
+  `ORBLIB_PSI_SAMPLES=3` consecutive samples;
+  *slow backstop* — newest mtime across `dockerlog_*`, `log_*_p*.txt`,
+  `out_*_p*.txt`, `orblib/*.npz*` not advancing for
+  `ORBLIB_STALL_TIMEOUT=3600` s. `ORBLIB_MEMINFO`/`ORBLIB_PSI_PATH` exist so
+  tests can drive both triggers without real memory pressure.
+- **Fixed graceful order** (`handle_stall`): diagnostics (free, pressure,
+  top-10 by RSS, `docker stats`, `df`) → `storage_cli stop` →
+  `docker stop -t ${ORBLIB_STOP_GRACE:-1800}` → bounded wait on worker PIDs,
+  then `docker kill` → `emergency_upload` → urgent notify →
+  `schedule_shutdown 1`. Upload always precedes shutdown.
+- **`emergency_upload()`** copies `$LOGFILE`, `monitor_*.log`, `dockerlog_*`,
+  `log_*_p*.txt`, `out_*` and `.storage/STOP` to
+  `galaxy_results_emergency/{RUN_TAG}_{TIMESTAMP}/`, deliberately bypassing the
+  `storage_stopped && return 0` guard in `upload_to_yadisk` — that guard is why
+  the 09-29 logs had to be copied off the VM by hand. Called from both triggers,
+  from the `storage_stopped` branch of step 3 and from `on_exit`.
+- **Shutdown accountability:** a failed `sudo shutdown` is no longer hidden by
+  `|| true`; the exit status is logged explicitly and an `urgent` notification
+  is sent so the VM cannot silently keep burning quota.
+
+Expected per-worker peak afterwards: ≈1.5–2 GB instead of ≈4–5 GB ⇒ ≈8 GB for
+four workers on 31 GiB.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.

@@ -1,13 +1,16 @@
 import ast
+import contextlib
 import importlib.util
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tarfile
 import time
+import zipfile
 from types import SimpleNamespace
 
 import numpy
@@ -19,6 +22,27 @@ SPEC = importlib.util.spec_from_file_location('orblib_storage', ROOT / 'py/orbli
 storage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(storage)
 NAME = 'orblib_i90.0_d1_nb250_ser0_geomabcdef_1234567890.npz'
+CALC_SCRIPT = ROOT / 'py/Fornax_P21_PCA_w3Sersic_orblib_exp.py'
+
+
+def script_namespace(names, **extra):
+    """Функции расчётного скрипта по именам, без импорта модуля.
+
+    Скрипт монолитный и выполняет код верхнего уровня (argparse, agama),
+    поэтому тесты вытаскивают нужные определения через ast.
+    """
+    nodes = [node for node in ast.parse(CALC_SCRIPT.read_text()).body
+             if isinstance(node, ast.FunctionDef) and node.name in names]
+    assert {node.name for node in nodes} == set(names), sorted(names)
+    ns = dict(extra)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(CALC_SCRIPT), 'exec'), ns)
+    return ns
+
+
+def writer_namespace():
+    import zipfile as zipfile_module
+    return script_namespace(['write_orblib_npz'], numpy=numpy,
+                            zipfile=zipfile_module, _NPZ_BLOCK_BYTES=4096)
 
 
 def library(path):
@@ -353,7 +377,7 @@ hostname() { printf 'testhost'; }
 nproc() { printf '8'; }
 curl() { return 1; }
 rclone() { printf 'network %s\n' "$*" >> "$HOME/events"; return 0; }
-sudo() { printf 'shutdown\n' >> "$HOME/events"; return 0; }
+sudo() { [ "$1" = shutdown ] && printf 'shutdown\n' >> "$HOME/events"; return 0; }
 python3() {
     mkdir -p "$WORK_DIR/orblib/.storage"
     printf 'storage %s\n' "$2" >> "$HOME/events"
@@ -374,7 +398,9 @@ python3() {
     return 0
 }
 docker() {
-    if [ "$1" = image ]; then return 0; fi
+    case "$1" in
+        image|info|stats|stop|kill) return 0 ;;
+    esac
     local previous='' suffix=''
     for arg in "$@"; do
         if [ "$previous" = --suffix ]; then suffix="$arg"; fi
@@ -394,8 +420,9 @@ source "$0" "$@"
     args = ['bash', '-c', prefix, str(launcher), '--Q1', '--nproc=2', '--resume']
     if no_shutdown:
         args.append('--no-shutdown')
-    result = subprocess.run(args, cwd=tmp_path, text=True, capture_output=True, timeout=15,
-                            env=dict(os.environ, HOME=str(tmp_path), SCENARIO=scenario))
+    result = subprocess.run(args, cwd=tmp_path, text=True, capture_output=True, timeout=30,
+                            env=dict(os.environ, HOME=str(tmp_path), SCENARIO=scenario,
+                                     ORBLIB_SWAPFILE='0'))
     assert result.returncode != 0, result.stdout + result.stderr
     events = (tmp_path / 'events').read_text().splitlines()
     assert ('shutdown' in events) != no_shutdown
@@ -406,7 +433,13 @@ source "$0" "$@"
         assert not any(event.startswith('started_') for event in events)
     else:
         exhausted = events.index('delivery_exhausted')
-        assert not any(event.startswith('network ') for event in events[exhausted:])
+        # Единственная разрешённая сеть после STOP — аварийная выгрузка логов
+        # (обычный upload_to_yadisk при STOP остаётся no-op).
+        after = [event for event in events[exhausted:] if event.startswith('network ')]
+        assert after and all('galaxy_results_emergency' in event for event in after)
+        if not no_shutdown:
+            last = max(i for i, event in enumerate(events) if 'galaxy_results_emergency' in event)
+            assert last < events.index('shutdown')
         for suffix in ('p0', 'p1'):
             assert events.count('started_' + suffix) == 1
             assert events.index('checkpoint_' + suffix) > exhausted
@@ -414,6 +447,107 @@ source "$0" "$@"
                 assert events.index('checkpoint_' + suffix) < events.index('shutdown')
             assert (tmp_path / f'orblib/pending_{suffix}.npz').exists()
             assert (tmp_path / f'checkpoint_testhost_Q1d1_nb250_gh0_ser0_{suffix}.pkl').exists()
+
+
+WATCHDOG_PREFIX = r'''
+hostname() { printf 'testhost'; }
+nproc() { printf '8'; }
+curl() { printf 'notify %s\n' "$*" >> "$HOME/events"; return 0; }
+rclone() { printf 'network %s\n' "$*" >> "$HOME/events"; return 0; }
+sudo() {
+    if [ "$1" = shutdown ]; then
+        printf 'shutdown\n' >> "$HOME/events"
+        return "${SHUTDOWN_RC:-0}"
+    fi
+    return 0
+}
+swapon() { return 0; }
+python3() {
+    mkdir -p "$WORK_DIR/orblib/.storage"
+    printf 'storage %s\n' "$2" >> "$HOME/events"
+    case "$2" in
+        watch) while [ ! -f "$WORK_DIR/orblib/.storage/STOP" ]; do sleep 0.05; done; return 0 ;;
+        stop) touch "$WORK_DIR/orblib/.storage/STOP" ;;
+    esac
+    return 0
+}
+docker() {
+    case "$1" in
+        image|info|stats) return 0 ;;
+        stop) printf 'docker_stop\n' >> "$HOME/events"; return 0 ;;
+        kill) return 0 ;;
+    esac
+    printf 'run %s\n' "$*" >> "$HOME/events"
+    while [ ! -f "$WORK_DIR/orblib/.storage/STOP" ]; do sleep 0.05; done
+    return 75
+}
+source "$0" "$@"
+'''
+
+
+def watchdog_workdir(tmp_path, avail_mb, psi):
+    launcher = tmp_path / 'launch_orblib_exp.sh'
+    launcher.write_text((ROOT / 'py/launch_orblib_exp.sh').read_text())
+    for name in ('Fornax_P21_PCA_w3Sersic_orblib_exp.py', 'table3.dat', 'orblib_storage.py'):
+        (tmp_path / name).touch()
+    config = tmp_path / '.config/rclone'
+    config.mkdir(parents=True)
+    (config / 'rclone.conf').touch()
+    (tmp_path / 'meminfo').write_text(
+        f'MemTotal:       32000000 kB\nMemAvailable:   {avail_mb * 1024} kB\n')
+    (tmp_path / 'psi').write_text(f'some avg10=0.00 avg60={psi} avg300=0.00 total=1\n'
+                                  f'full avg10=0.00 avg60=0.00 avg300=0.00 total=1\n')
+    return launcher
+
+
+@pytest.mark.parametrize('trigger', ['pressure', 'memavail', 'stall'])
+def test_launcher_watchdog_stops_workers_and_uploads_before_shutdown(tmp_path, trigger):
+    """Оба триггера ватчдога: порядок — docker stop → аварийная выгрузка → shutdown."""
+    avail, psi = 8000, '0.00'
+    env = dict(os.environ, HOME=str(tmp_path), ORBLIB_SWAPFILE='0',
+               ORBLIB_WATCH_INTERVAL='1', ORBLIB_STOP_GRACE='1',
+               ORBLIB_MEMINFO=str(tmp_path / 'meminfo'), ORBLIB_PSI_PATH=str(tmp_path / 'psi'),
+               ORBLIB_MIN_AVAIL_MB='100', ORBLIB_PSI_LIMIT='1000',
+               ORBLIB_PSI_SAMPLES='1', ORBLIB_STALL_TIMEOUT='3600')
+    if trigger == 'pressure':
+        psi, env['ORBLIB_PSI_LIMIT'] = '55.00', '20'
+    elif trigger == 'memavail':
+        avail, env['ORBLIB_MIN_AVAIL_MB'] = 500, '2048'
+    else:
+        env['ORBLIB_STALL_TIMEOUT'] = '3'
+    launcher = watchdog_workdir(tmp_path, avail, psi)
+    result = subprocess.run(['bash', '-c', WATCHDOG_PREFIX, str(launcher), '--Q1', '--nproc=2'],
+                            cwd=tmp_path, text=True, capture_output=True, timeout=60, env=env)
+    assert result.returncode == 75, result.stdout[-4000:] + result.stderr[-4000:]
+    events = (tmp_path / 'events').read_text().splitlines()
+    runs = [event for event in events if event.startswith('run ')]
+    assert len(runs) == 2
+    limit = next(part for part in runs[0].split() if part.startswith('--memory='))
+    assert f'--memory-swap={limit.split("=")[1]}' in runs[0].split()
+    assert 'docker_stop' in events
+    assert 'storage stop' in events
+    emergency = max(i for i, event in enumerate(events) if 'galaxy_results_emergency' in event)
+    assert emergency < events.index('shutdown')
+    log = next(tmp_path.glob('launch_orblib_*.log')).read_text()
+    assert 'СРАБОТАЛ ВАТЧДОГ' in log
+    assert list(tmp_path.glob('monitor_Q1d1_nb250_gh0_ser0_i90.0_*.log'))
+
+
+def test_launcher_reports_a_failed_shutdown_instead_of_hiding_it(tmp_path):
+    env = dict(os.environ, HOME=str(tmp_path), ORBLIB_SWAPFILE='0', SHUTDOWN_RC='1',
+               ORBLIB_WATCH_INTERVAL='1', ORBLIB_STOP_GRACE='1',
+               ORBLIB_MEMINFO=str(tmp_path / 'meminfo'), ORBLIB_PSI_PATH=str(tmp_path / 'psi'),
+               ORBLIB_MIN_AVAIL_MB='2048', ORBLIB_PSI_LIMIT='1000', ORBLIB_PSI_SAMPLES='1',
+               ORBLIB_STALL_TIMEOUT='3600')
+    launcher = watchdog_workdir(tmp_path, 500, '0.00')
+    result = subprocess.run(['bash', '-c', WATCHDOG_PREFIX, str(launcher), '--Q1', '--nproc=2'],
+                            cwd=tmp_path, text=True, capture_output=True, timeout=60, env=env)
+    assert result.returncode == 75, result.stdout[-4000:] + result.stderr[-4000:]
+    log = next(tmp_path.glob('launch_orblib_*.log')).read_text()
+    assert 'НЕ УДАЛОСЬ запланировать выключение' in log
+    events = (tmp_path / 'events').read_text().splitlines()
+    assert any(event.startswith('notify ') and 'Priority: urgent' in event
+               and 'shutdown' in event for event in events)
 
 
 def test_legacy_index_is_required_to_be_current(store):
@@ -435,38 +569,39 @@ def test_evaluation_saves_same_arrays_or_stops_without_fake_penalty(store, monke
         def __gt__(self, other):
             raise BeforeSolve
 
-    original = numpy.savez_compressed
     calls = []
     orbits = []
 
-    def save(*args, **kwargs):
-        calls.append(kwargs['matrix_kinem'])
-        if len(calls) <= failures:
-            raise OSError('temporary write error')
-        return original(*args, **kwargs)
-
     def orbit(**kwargs):
-        orbits.append(True)
+        orbits.append(kwargs)
         if stop_during_orbit:
             store.stop('delivery exhausted while model was running')
-        return [numpy.ones((2, 3)), numpy.ones((2, 3)), None]
+        return [numpy.ones((2, 3)), numpy.ones((2, 3))]
 
-    monkeypatch.setattr(numpy, 'savez_compressed', save)
     monkeypatch.setattr(time, 'sleep', lambda seconds: None)
-    source = ROOT / 'py/Fornax_P21_PCA_w3Sersic_orblib_exp.py'
-    nodes = [node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef)
-             and node.name in ('halo_IC_lib_weights_pca_fixed', 'orblib_key')]
-    ns = dict(numpy=numpy, os=os, time=time, hashlib=storage.hashlib,
-              orblib_store=store, StorageStop=storage.StorageStop, LibraryBusy=storage.LibraryBusy,
-              OrblibBusyError=RuntimeError, completed_point=lambda params: False,
-              Q1=True, DOUBLE=True, N_BIN=250, SER_ID=0, GEOM_HASH='abcdef', incl=90.0,
-              ORBLIB_DIR=str(store.root), SAVE_ORBLIB=True, REUSE_ORBLIB=True,
-              hostname_proc='test', _ORBLIB_BUILD_TTL_SEC=7200, _claim_file=lambda *a: True,
-              release_reservation=lambda *a: None, orblib_counter=0,
-              gridv=numpy.arange(5.0), degree=2, ghorder=6,
-              agama=SimpleNamespace(Density=lambda *a, **kw: None, orbit=orbit,
-                                    Potential=lambda **kw: SimpleNamespace(Tcirc=lambda ic: numpy.ones(2))))
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), ns)
+    ns = script_namespace(
+        ['halo_IC_lib_weights_pca_fixed', 'orblib_key', 'write_orblib_npz', 'log_mem'],
+        numpy=numpy, os=os, time=time, contextlib=contextlib, zipfile=zipfile,
+        hashlib=storage.hashlib, _NPZ_BLOCK_BYTES=4096, TRAJSIZE_STORED=0,
+        HashingWriter=storage.HashingWriter,
+        orblib_store=store, StorageStop=storage.StorageStop, LibraryBusy=storage.LibraryBusy,
+        OrblibBusyError=RuntimeError, completed_point=lambda params: False,
+        Q1=True, DOUBLE=True, N_BIN=250, SER_ID=0, GEOM_HASH='abcdef', incl=90.0,
+        ORBLIB_DIR=str(store.root), SAVE_ORBLIB=True, REUSE_ORBLIB=True,
+        hostname_proc='test', _ORBLIB_BUILD_TTL_SEC=7200, _claim_file=lambda *a: True,
+        release_reservation=lambda *a: None, orblib_counter=0,
+        gridv=numpy.arange(5.0), degree=2, ghorder=6,
+        agama=SimpleNamespace(Density=lambda *a, **kw: None, orbit=orbit,
+                              Potential=lambda **kw: SimpleNamespace(Tcirc=lambda ic: numpy.ones(2))))
+    original = ns['write_orblib_npz']
+
+    def save(stream, matrices, *args, **kwargs):
+        calls.append(matrices['matrix_kinem'])
+        if len(calls) <= failures:
+            raise OSError('temporary write error')
+        return original(stream, matrices, *args, **kwargs)
+
+    ns['write_orblib_npz'] = save
     stars = SimpleNamespace(sample=lambda *a, **kw: [numpy.zeros((2, 6))])
     datasets = [SimpleNamespace(target=[0, 1, 2], cons_err=Constraints())] * 2
     bounds = dict(Q=(0.05, 2.5), gh=(0, 1.6), rh=(0.5, 7), rho0=(10, 120))
@@ -476,6 +611,7 @@ def test_evaluation_saves_same_arrays_or_stops_without_fake_penalty(store, monke
             None, None, bounds, stars, datasets, 2, 3, numOrbits=2,
             direct_params=dict(Q=1.0, gh=0.4, rh=7.0, rho0=10.0))
     assert len(orbits) == 1
+    assert 'trajsize' not in orbits[0]
     assert len(calls) == (1 if failures == 0 else 2)
     assert all(array is calls[0] for array in calls)
     if failures == 2:
@@ -484,6 +620,142 @@ def test_evaluation_saves_same_arrays_or_stops_without_fake_penalty(store, monke
     else:
         assert len(store.pending()) == 1
         assert len(list(store.root.glob('*.npz'))) == 1
+
+
+def written_library(scalars=None, rows=40):
+    """Библиотека, записанная новым блочным писателем; возвращает (bytes, writer)."""
+    dens = numpy.arange(rows * 3, dtype=numpy.float32).reshape(rows, 3)
+    kinem = numpy.arange(rows * 7, dtype=numpy.float32).reshape(rows, 7) * 0.5
+    ic = numpy.arange(rows * 6, dtype=numpy.float64).reshape(rows, 6)
+    inttime = numpy.arange(rows, dtype=numpy.float64) + 1.0
+    meta = dict(Q=1.0, gh=0.0, rh=7.0, rho0=10.0, incl=90.0, numOrbits=rows,
+                trajsize=0, intTime=100.0, gridv=numpy.arange(5.0), degree=2,
+                ghorder=6, n_bin=250, double=1, ser_id=0)
+    meta.update(scalars or {})
+    stream = io.BytesIO()
+    writer = storage.HashingWriter(stream)
+    writer_namespace()['write_orblib_npz'](
+        writer, dict(matrix_dens=dens, matrix_kinem=kinem), ic, inttime, meta)
+    return stream.getvalue(), writer, dict(matrix_dens=dens, matrix_kinem=kinem,
+                                           ic=ic, inttime=inttime)
+
+
+def test_block_writer_reproduces_savez_content_and_hashes_in_one_pass():
+    data, writer, arrays = written_library()
+    assert writer.size == len(data)
+    assert writer.checksum.hexdigest() == storage.digest(data)
+    reference = io.BytesIO()
+    numpy.savez_compressed(
+        reference, matrix_dens=arrays['matrix_dens'].astype(numpy.float64),
+        matrix_kinem=arrays['matrix_kinem'].astype(numpy.float64),
+        ic=arrays['ic'], inttime=arrays['inttime'],
+        Q=1.0, gh=0.0, rh=7.0, rho0=10.0, incl=90.0, numOrbits=40, trajsize=0,
+        intTime=100.0, gridv=numpy.arange(5.0), degree=2, ghorder=6,
+        n_bin=250, double=1, ser_id=0)
+    reference.seek(0)
+    with numpy.load(io.BytesIO(data)) as new, numpy.load(reference) as old:
+        assert sorted(new.files) == sorted(old.files)
+        for name in old.files:
+            assert new[name].dtype == old[name].dtype, name
+            assert numpy.array_equal(new[name], old[name]), name
+        assert new['matrix_kinem'].dtype == numpy.dtype('<f8')
+    assert storage.metadata_bytes(data)['trajsize'] == 0
+
+
+def test_block_writer_never_materialises_a_float64_copy():
+    import tracemalloc
+    big = numpy.ones((200000, 7), dtype=numpy.float32)
+    write = writer_namespace()['write_orblib_npz']
+    sink = SimpleNamespace(write=lambda data: None, tell=lambda: 0, flush=lambda: None)
+    tracemalloc.start()
+    write(sink, dict(matrix_kinem=big), numpy.zeros((2, 6)), numpy.zeros(2), {})
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < big.size * 8 / 10, peak
+
+
+@pytest.mark.parametrize('damage', ['truncate', 'flip'])
+def test_written_identity_rejects_a_damaged_file(store, damage):
+    data, writer, _ = written_library()
+    path = store.root / NAME
+    if damage == 'truncate':
+        path.write_bytes(data[:-64])
+    else:
+        index = len(data) // 2
+        path.write_bytes(data[:index] + bytes([data[index] ^ 0xFF]) + data[index + 1:])
+    with pytest.raises((ValueError, zipfile.BadZipFile, EOFError)):
+        store.register(NAME, size=writer.size, md5=writer.checksum.hexdigest())
+    assert not store.pending()
+
+
+def test_register_rejects_a_mismatching_identity(store):
+    data, writer, _ = written_library()
+    (store.root / NAME).write_bytes(data)
+    with pytest.raises(ValueError, match='MD5 mismatch'):
+        store.register(NAME, size=writer.size, md5=storage.digest(b'other'))
+    with pytest.raises(ValueError, match='size mismatch'):
+        store.register(NAME, size=writer.size + 1, md5=writer.checksum.hexdigest())
+    store.register(NAME, size=writer.size, md5=writer.checksum.hexdigest())
+    assert store.row(NAME)['md5'] == writer.checksum.hexdigest()
+
+
+def test_shallow_metadata_skips_the_crc_pass_but_still_reads_headers(store, monkeypatch):
+    data, _, _ = written_library()
+    path = store.root / NAME
+    path.write_bytes(data)
+    monkeypatch.setattr(zipfile.ZipFile, 'testzip', lambda self: pytest.fail('deep CRC pass'))
+    assert storage.metadata(path, deep=False)['numOrbits'] == 40
+
+
+def test_trajsize_is_outside_the_compatibility_key(store):
+    """Старая (trajsize=1000) и новая (0) библиотеки равно пригодны."""
+    expected = dict(Q=1.0, gh=0.0, rh=7.0, rho0=10.0, incl=90.0, numOrbits=40,
+                    intTime=100.0, degree=2, ghorder=6, n_bin=250, double=1, ser_id=0,
+                    gridv_md5=storage.digest(numpy.arange(5.0).tobytes()),
+                    gridv_dtype='<f8')
+    for stored in (0, 1000):
+        data, _, _ = written_library(dict(trajsize=stored))
+        assert storage.compatible_metadata(storage.metadata_bytes(data), expected)
+    data, _, _ = written_library()
+    conflicting = dict(expected, gridv_md5=storage.digest(b'other grid'))
+    assert not storage.compatible_metadata(storage.metadata_bytes(data), conflicting)
+
+
+def test_save_slot_caps_concurrent_writers_and_observes_stop(store, monkeypatch):
+    store.save_slots = 2
+    with store.save_slot(), store.save_slot():
+        monkeypatch.setattr(storage.time, 'sleep', lambda seconds: store.stop('no free slot'))
+        with pytest.raises(storage.StorageStop):
+            with store.save_slot():
+                pytest.fail('a third writer must wait for a slot')
+    store.stop_path.unlink()
+    monkeypatch.undo()
+    with pytest.raises(RuntimeError):
+        with store.save_slot():
+            raise RuntimeError('writer failed')
+    with store.save_slot(), store.save_slot():
+        pass
+
+
+def test_sigterm_requests_a_stop_that_becomes_a_checkpoint(store, tmp_path):
+    checkpoints = []
+    ns = script_namespace(['_handle_stop_signal'], signal=signal, orblib_store=store,
+                          checkpoint_for_stop=lambda: checkpoints.append('written'))
+    ns['_handle_stop_signal'](int(signal.SIGTERM), None)
+    assert store.stop_path.read_text() == 'signal SIGTERM from controller'
+    # Расчётный цикл опрашивает STOP и превращает его в StorageStop(75),
+    # который верхний обработчик скрипта конвертирует в checkpoint + exit 75.
+    with pytest.raises(storage.StorageStop) as error:
+        store.check_stop()
+    assert error.value.code == 75
+    assert not checkpoints
+    # Без хранилища checkpoint пишется напрямую.
+    bare = script_namespace(['_handle_stop_signal'], signal=signal, orblib_store=None,
+                            checkpoint_for_stop=lambda: checkpoints.append('direct'))
+    with pytest.raises(SystemExit) as exit_error:
+        bare['_handle_stop_signal'](int(signal.SIGINT), None)
+    assert exit_error.value.code == 75
+    assert checkpoints == ['direct']
 
 
 ARCHIVE = 'orblib_i90.0_d1_nb250_ser0__test_20260919_011920_part000.tar'

@@ -28,8 +28,10 @@ set -euo pipefail
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="agama:latest"
 N_VCPU=$(nproc)
-# Число параллельных процессов на VM: авто ~1 процесс на 4 vCPU.
-_NPROC_AUTO=$(( N_VCPU / 4 ))
+# Число параллельных процессов на VM: ~1 процесс на 8 vCPU (⇒ 4 на 32 vCPU).
+# Для запусков, СОХРАНЯЮЩИХ библиотеки орбит, ограничение задаёт не CPU, а
+# память: 8 процессов на 31 GiB без swap привели к зависанию 2026-09-29.
+_NPROC_AUTO=$(( N_VCPU / 8 ))
 [ "$_NPROC_AUTO" -lt 1 ] && _NPROC_AUTO=1
 N_PROC="${N_PROC:-$_NPROC_AUTO}"
 
@@ -61,6 +63,10 @@ for arg in "$@"; do
                 'Новые .npz выгружаются по мере готовности; старые tar не скачиваются.' \
                 'После отказа доставки: завершение текущих моделей, checkpoint, выключение VM.' \
                 'ORBLIB_FILE_TIMEOUT=900 (сек), ORBLIB_UPLOAD_ATTEMPTS=3, ORBLIB_RESERVE_BYTES=2000000000.' \
+                'Память: ORBLIB_SWAPFILE=16G (0 — не создавать), ORBLIB_MEM_LIMIT (байт/контейнер),' \
+                '  ORBLIB_SAVE_SLOTS=2, ORBLIB_MIN_AVAIL_MB=2048, ORBLIB_PSI_LIMIT=20,' \
+                '  ORBLIB_PSI_SAMPLES=3, ORBLIB_STALL_TIMEOUT=3600, ORBLIB_STOP_GRACE=1800.' \
+                'По умолчанию процессов: nproc/8 (запуск с сохранением библиотек ограничен памятью).' \
                 'Сохранение/локальное переиспользование включены. Без --no-shutdown VM выключается.'
             exit 0
             ;;
@@ -95,6 +101,21 @@ ORBLIB_PART_SIZE_GB="${ORBLIB_PART_SIZE_GB:-40}"
 ORBLIB_UPLOAD_TIMEOUT="${ORBLIB_UPLOAD_TIMEOUT:-2h}"
 ORBLIB_FILE_TIMEOUT="${ORBLIB_FILE_TIMEOUT:-900}"
 ORBLIB_RESERVE_BYTES="${ORBLIB_RESERVE_BYTES:-2000000000}"
+# --- Защита от нехватки памяти (см. doc/ai/harness/orblib_exp.md) ---
+# Swap нужен ХОСТУ (sshd, journald, оркестратор, rclone), а не раздувшемуся
+# worker'у: контейнеру swap запрещён, чтобы он получал явный OOM-kill.
+ORBLIB_SWAPFILE="${ORBLIB_SWAPFILE:-16G}"
+ORBLIB_SAVE_SLOTS="${ORBLIB_SAVE_SLOTS:-2}"
+ORBLIB_MEM_LIMIT="${ORBLIB_MEM_LIMIT:-}"
+ORBLIB_MIN_AVAIL_MB="${ORBLIB_MIN_AVAIL_MB:-2048}"
+ORBLIB_PSI_LIMIT="${ORBLIB_PSI_LIMIT:-20}"
+ORBLIB_PSI_SAMPLES="${ORBLIB_PSI_SAMPLES:-3}"
+ORBLIB_STALL_TIMEOUT="${ORBLIB_STALL_TIMEOUT:-3600}"
+ORBLIB_STOP_GRACE="${ORBLIB_STOP_GRACE:-1800}"
+ORBLIB_MONITOR_INTERVAL="${ORBLIB_MONITOR_INTERVAL:-60}"
+ORBLIB_WATCH_INTERVAL="${ORBLIB_WATCH_INTERVAL:-10}"
+ORBLIB_MEMINFO="${ORBLIB_MEMINFO:-/proc/meminfo}"
+ORBLIB_PSI_PATH="${ORBLIB_PSI_PATH:-/proc/pressure/memory}"
 
 # --- Идентификаторы эксперимента ---
 # EXP_ID — как в Python-скрипте (входит в имена out_/log_/checkpoint_).
@@ -160,11 +181,14 @@ for ((i = 0; i < N_PROC; i++)); do
 done
 
 LOGFILE="${WORK_DIR}/launch_orblib_${EXP_ID}_i${INCL}_${TIMESTAMP}.log"
+MONITOR_LOG="${WORK_DIR}/monitor_${RUN_TAG}_${TIMESTAMP}.log"
 
 MAIN_PID=$$
 SHUTDOWN_DONE=0
 UPLOADER_PID=""
+MONITOR_PID=""
 STORAGE_STARTED=0
+EMERGENCY_DONE=0
 declare -a PIDS=()
 
 storage_cli() {
@@ -232,7 +256,14 @@ schedule_shutdown() {
         return 0
     fi
     log "Выключение VM через ${delay} мин (${reason})..."
-    sudo shutdown -h +"$delay" "AGAMA orblib_exp: ${reason}" || true
+    # Молчаливое `|| true` здесь недопустимо: не сработавший shutdown оставляет
+    # VM жечь квоту, и в логе 2026-09-29 это было не отличить от успеха.
+    local code=0
+    sudo shutdown -h +"$delay" "AGAMA orblib_exp: ${reason}" || code=$?
+    [ "$code" -eq 0 ] && return 0
+    log "  ✗ НЕ УДАЛОСЬ запланировать выключение (код ${code}): VM продолжит работу — выключите вручную"
+    notify "VM ${HOSTNAME_ENV}: sudo shutdown провалился (код ${code}); выключите вручную. Причина: ${reason}" "urgent"
+    return 0
 }
 
 on_exit() {
@@ -243,8 +274,11 @@ on_exit() {
         notify "Аварийное завершение orblib_exp на ${HOSTNAME_ENV} (код ${code})" "urgent"
         # Попытаться сохранить наработанные библиотеки орбит перед выключением
         stop_workers "Controller exit ${code}"
+        stop_resource_sampler
+        emergency_upload
         schedule_shutdown 1 "checkpoint/остановка после ошибки (код ${code})"
     fi
+    stop_resource_sampler
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -347,6 +381,193 @@ upload_to_yadisk() {
         --retries 1 --low-level-retries 1 --stats-one-line 2>>"$LOGFILE" \
         && log "  ✓ Загружено: $fname" \
         || log "  ✗ Ошибка загрузки: $fname"
+}
+
+# --------------------------------------------------------------
+# emergency_upload: доставка ЛОГОВ при аварии, в обход storage_stopped.
+# upload_to_yadisk при активном STOP молча ничего не делает (и именно поэтому
+# логи 2026-09-29 пришлось снимать с VM руками). Здесь заливаем напрямую.
+# --------------------------------------------------------------
+emergency_upload() {
+    [ "$EMERGENCY_DONE" -eq 1 ] && return 0
+    EMERGENCY_DONE=1
+    local dest="${RCLONE_REMOTE}:${REMOTE_DIR}/galaxy_results_emergency/${RUN_TAG}_${TIMESTAMP}"
+    log "  Аварийная выгрузка логов в ${dest}"
+    local f
+    for f in "$LOGFILE" "$MONITOR_LOG" \
+             "${WORK_DIR}/dockerlog_"*"_${TIMESTAMP}.log" \
+             "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_p"*.txt \
+             "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}"*.txt \
+             "${ORBLIB_DIR}/.storage/STOP"
+    do
+        [ -f "$f" ] || continue
+        if rclone copyto "$f" "${dest}/$(basename "$f")" \
+                --config "${RCLONE_CONF_DIR}/rclone.conf" \
+                --timeout 30s --contimeout 10s --max-duration 120s \
+                --cutoff-mode HARD --retries 1 --low-level-retries 1 \
+                --stats-one-line 2>>"$LOGFILE"; then
+            log "    ✓ $(basename "$f")"
+        else
+            log "    ✗ $(basename "$f")"
+        fi
+    done
+}
+
+# --------------------------------------------------------------
+# ensure_host_swap (ШАГ 0a): swapfile ТОЛЬКО для защиты хоста.
+# Без swap давление памяти превращается не в быстрый OOM-kill, а в многочасовой
+# reclaim-livelock (84 MB/s чтений, мёртвый SSH) — сценарий 2026-09-29.
+# Контейнерам swap запрещён отдельно (--memory-swap == --memory).
+# Любая неудача — предупреждение, но не остановка запуска.
+# --------------------------------------------------------------
+ensure_host_swap() {
+    if [ "$ORBLIB_SWAPFILE" = "0" ]; then
+        log "  Swapfile отключён (ORBLIB_SWAPFILE=0)"
+        return 0
+    fi
+    if [ -n "$(swapon --show --noheadings 2>/dev/null || true)" ]; then
+        log "  Swap уже активен: $(swapon --show --noheadings 2>/dev/null | tr '\n' ' ')"
+        return 0
+    fi
+    log "  Создание swapfile /swapfile размером ${ORBLIB_SWAPFILE} (защита host-процессов)"
+    if sudo fallocate -l "$ORBLIB_SWAPFILE" /swapfile 2>>"$LOGFILE" \
+            && sudo chmod 600 /swapfile 2>>"$LOGFILE" \
+            && sudo mkswap /swapfile >>"$LOGFILE" 2>&1 \
+            && sudo swapon /swapfile 2>>"$LOGFILE"; then
+        sudo sysctl -w vm.swappiness=10 >>"$LOGFILE" 2>&1 || true
+        log "  ✓ Swap включён, vm.swappiness=10"
+    else
+        log "  ~ ВНИМАНИЕ: swapfile не создан (нет sudo/места?) — host без защиты от давления памяти"
+        sudo rm -f /swapfile 2>>"$LOGFILE" || true
+    fi
+}
+
+# --------------------------------------------------------------
+# check_swap_limit_support (C3a): без учёта swap в cgroup docker МОЛЧА
+# игнорирует --memory-swap, и лимит контейнера перестаёт быть «без swap».
+# --------------------------------------------------------------
+check_swap_limit_support() {
+    # Авторитетный источник — сам docker: .SwapLimit (cgroup v2) либо
+    # предупреждение 'No swap limit support' (cgroup v1 без swapaccount=1).
+    local supported
+    supported=$(docker info --format '{{.SwapLimit}}' 2>/dev/null || true)
+    if [ "$supported" = "true" ]; then
+        log "  ✓ Учёт swap в cgroup доступен: --memory-swap будет соблюдён"
+        return 0
+    fi
+    if [ "$supported" != "false" ] \
+       && ! docker info 2>/dev/null | grep -qi 'No swap limit support'; then
+        log "  ~ Поддержку swap-лимита определить не удалось; считаем её возможной"
+        return 0
+    fi
+    log "  ~ ВНИМАНИЕ: cgroup без учёта swap — docker проигнорирует --memory-swap."
+    log "    Контейнер сможет уйти в swap; ставим vm.swappiness=1, снижаем порог простоя."
+    sudo sysctl -w vm.swappiness=1 >>"$LOGFILE" 2>&1 || true
+    [ "$ORBLIB_STALL_TIMEOUT" -gt 900 ] && ORBLIB_STALL_TIMEOUT=900
+    return 0
+}
+
+# --------------------------------------------------------------
+# container_mem_limit: (MemTotal − 4 GB) / N_PROC, в байтах.
+# --------------------------------------------------------------
+container_mem_limit() {
+    if [ -n "$ORBLIB_MEM_LIMIT" ]; then
+        printf '%s' "$ORBLIB_MEM_LIMIT"
+        return 0
+    fi
+    local total_kb
+    total_kb=$(awk '/^MemTotal:/ {print $2}' "$ORBLIB_MEMINFO" 2>/dev/null || echo 0)
+    local limit=$(( (total_kb * 1024 - 4 * 1024 * 1024 * 1024) / N_PROC ))
+    [ "$limit" -lt $((2 * 1024 * 1024 * 1024)) ] && limit=$((2 * 1024 * 1024 * 1024))
+    printf '%s' "$limit"
+}
+
+# Источники данных о памяти вынесены в переменные: иначе ватчдог нельзя
+# проверить тестом, не доводя машину до реального давления памяти.
+mem_available_mb() {
+    local value
+    value=$(awk '/^MemAvailable:/ {printf "%d", $2 / 1024}' "$ORBLIB_MEMINFO" 2>/dev/null || true)
+    printf '%s' "${value:-999999}"
+}
+
+mem_pressure_avg60() {
+    awk '/^some /{for(i=1;i<=NF;i++) if($i ~ /^avg60=/){sub("avg60=","",$i); print $i; exit}}' \
+        "$ORBLIB_PSI_PATH" 2>/dev/null || true
+}
+
+start_resource_sampler() {
+    # Вывод сэмплера направлен только в MONITOR_LOG, а stdout/stderr отвязаны:
+    # иначе фоновый `sleep` держал бы pipe запустившего процесса открытым.
+    # trap убивает именно текущий sleep, чтобы не оставлять сирот.
+    (
+        _sleep_pid=''
+        trap 'kill "$_sleep_pid" 2>/dev/null; exit 0' TERM
+        while :; do
+            {
+                echo "=== $(date '+%Y-%m-%d %H:%M:%S') ==="
+                free -m 2>/dev/null || true
+                cat "$ORBLIB_PSI_PATH" 2>/dev/null || echo 'pressure: n/a'
+                docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' 2>/dev/null || true
+                df -h "$ORBLIB_DIR" 2>/dev/null || true
+            } >> "$MONITOR_LOG" 2>&1
+            sleep "$ORBLIB_MONITOR_INTERVAL" &
+            _sleep_pid=$!
+            wait "$_sleep_pid" || true
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    MONITOR_PID=$!
+    log "  Сэмплер ресурсов: PID ${MONITOR_PID} → $(basename "$MONITOR_LOG")"
+}
+
+stop_resource_sampler() {
+    [ -n "$MONITOR_PID" ] || return 0
+    kill "$MONITOR_PID" 2>/dev/null || true
+    MONITOR_PID=""
+}
+
+dump_diagnostics() {
+    log "  --- Диагностика ($1) ---"
+    {
+        free -m 2>/dev/null || true
+        cat /proc/pressure/memory 2>/dev/null || true
+        ps -eo rss,pid,comm --sort=-rss 2>/dev/null | head -11 || true
+        docker stats --no-stream 2>/dev/null || true
+        df -h "$ORBLIB_DIR" 2>/dev/null || true
+    } >> "$LOGFILE" 2>&1
+}
+
+# --------------------------------------------------------------
+# handle_stall (C5a): фиксированный порядок аварийного завершения.
+# Выгрузка ОБЯЗАТЕЛЬНО до выключения.
+# --------------------------------------------------------------
+handle_stall() {
+    local trigger="$1"
+    log "СРАБОТАЛ ВАТЧДОГ: ${trigger}"
+    dump_diagnostics "$trigger"
+    notify "Ватчдог orblib_exp на ${HOSTNAME_ENV}: ${trigger}" "urgent"
+    storage_cli stop --reason "$trigger" || true
+    local sfx
+    for sfx in "${SUFFIXES[@]}"; do
+        docker stop -t "$ORBLIB_STOP_GRACE" \
+            "agama_orblib_${HOSTNAME_ENV}_${RUN_TAG}_${sfx}" >>"$LOGFILE" 2>&1 || true
+    done
+    local waited=0 limit=$((ORBLIB_STOP_GRACE + 300)) pid running
+    while [ "$waited" -lt "$limit" ]; do
+        running=0
+        for pid in "${PIDS[@]}"; do
+            kill -0 "$pid" 2>/dev/null && running=1
+        done
+        [ "$running" -eq 1 ] || break
+        sleep 5
+        waited=$((waited + 5))
+    done
+    for sfx in "${SUFFIXES[@]}"; do
+        docker kill "agama_orblib_${HOSTNAME_ENV}_${RUN_TAG}_${sfx}" >>"$LOGFILE" 2>&1 || true
+    done
+    stop_resource_sampler
+    emergency_upload
+    notify "orblib_exp остановлен ватчдогом на ${HOSTNAME_ENV}; логи в galaxy_results_emergency/${RUN_TAG}_${TIMESTAMP}" "urgent"
+    schedule_shutdown 1 "ватчдог: ${trigger}"
 }
 
 delete_from_yadisk() {
@@ -466,9 +687,15 @@ run_container() {
     log "  Контейнер $sfx: CPU=${cpu_start}-${cpu_end} flags='$flags'"
 
     set +e
+    # --memory-swap == --memory: в docker это СУММАРНЫЙ потолок RAM+swap, то
+    # есть swap контейнеру запрещён и при превышении лимита worker получает
+    # явный OOM-kill (код 137) вместо многочасового thrashing'а всей VM.
+    # Оставить --memory-swap незаданным нельзя: по умолчанию это 2×--memory.
     docker run --rm \
         --name "agama_orblib_${HOSTNAME_ENV}_${RUN_TAG}_${sfx}" \
         --cpuset-cpus="${cpu_start}-${cpu_end}" \
+        --memory="${MEM_LIMIT}" \
+        --memory-swap="${MEM_LIMIT}" \
         \
         -e HOST_UID="$(id -u)" \
         -e HOST_GID="$(id -g)" \
@@ -479,6 +706,7 @@ run_container() {
         -e RCLONE_CONFIG="/workspace/.config/rclone/rclone.conf" \
         -e RCLONE_REMOTE="${RCLONE_REMOTE}" \
         -e ORBLIB_RESERVE_BYTES="${ORBLIB_RESERVE_BYTES}" \
+        -e ORBLIB_SAVE_SLOTS="${ORBLIB_SAVE_SLOTS}" \
         -e HOSTNAME_SUFFIX="${HOSTNAME_ENV}" \
         -e NTFY_TOPIC="${NTFY_TOPIC}" \
         -e NTFY_SERVER="${NTFY_SERVER}" \
@@ -525,6 +753,10 @@ run_container() {
     else
         merge_label="RESULT-ERR(${exit_code}): incl=${INCL}, exp=${EXP_ID}, suffix=${sfx}, host=${HOSTNAME_ENV}"
         log "  ✗ Контейнер $sfx завершён с кодом $exit_code — объединяем частичные файлы"
+        if [ "$exit_code" -eq 137 ]; then
+            log "  ! $sfx убит по лимиту памяти контейнера (OOM-kill, код 137):"
+            log "    checkpoint не записан (SIGKILL); уцелели строки истории и доставленные .npz"
+        fi
         # Немедленное уведомление о падении ЭТОГО контейнера — не ждём
         # финального summary (который может не наступить, если упадут все).
         local err_msg="Контейнер ${sfx} (${HOSTNAME_ENV}, exp=${EXP_ID}, incl=${INCL}) завершился с ошибкой (код ${exit_code}). Лог: dockerlog_${sfx}_${EXP_ID}_i${INCL}_${TIMESTAMP}.log"
@@ -570,6 +802,11 @@ log "  Потоков/процесс  = ${THREADS_ARR[*]}"
 log "  Legacy tar size  = ${ORBLIB_PART_SIZE_GB} GB (не используется в streaming)"
 log "  Legacy timeout   = ${ORBLIB_UPLOAD_TIMEOUT} (не используется в streaming)"
 log "  Попыток/файл     = ${ORBLIB_UPLOAD_ATTEMPTS}"
+log "  Слотов записи    = ${ORBLIB_SAVE_SLOTS}"
+log "  Swapfile (host)  = ${ORBLIB_SWAPFILE}"
+log "  Порог MemAvail   = ${ORBLIB_MIN_AVAIL_MB} MB"
+log "  Порог PSI avg60  = ${ORBLIB_PSI_LIMIT}% × ${ORBLIB_PSI_SAMPLES}"
+log "  Таймаут простоя  = ${ORBLIB_STALL_TIMEOUT} s"
 log "======================================================"
 
 [ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
@@ -608,6 +845,16 @@ docker image inspect "$IMAGE" > /dev/null 2>&1 \
     || die "Docker-образ $IMAGE не найден"
 
 notify "Старт orblib_exp на ${HOSTNAME_ENV}, exp=${EXP_ID}, incl=${INCL}"
+
+# ==============================================================
+# ШАГ 0a: ЗАЩИТА ПАМЯТИ (host swap + лимит контейнера)
+# ==============================================================
+log ""
+log "ШАГ 0a: Защита памяти"
+ensure_host_swap
+check_swap_limit_support
+MEM_LIMIT="$(container_mem_limit)"
+log "  Лимит памяти контейнера: ${MEM_LIMIT} байт (~$((MEM_LIMIT / 1024 / 1024 / 1024)) GiB) × ${N_PROC}"
 
 # ==============================================================
 # ШАГ 0: PRE-DOWNLOAD ШАРДОВ БИБЛИОТЕК ОРБИТ
@@ -688,6 +935,7 @@ log ""
 log "ШАГ 2: Запуск $N_PROC контейнеров..."
 storage_cli watch >>"$LOGFILE" 2>&1 &
 UPLOADER_PID=$!
+start_resource_sampler
 
 declare -a PIDS
 for i in $(seq 0 $((N_PROC - 1))); do
@@ -707,6 +955,16 @@ log "  Все контейнеры запущены: PIDs=${PIDS[*]}"
 log ""
 log "ШАГ 3: Ожидание завершения всех контейнеров..."
 
+# Два независимых триггера (см. doc/ai/harness/orblib_exp.md):
+#   * быстрый — нехватка MemAvailable или PSI some avg60 выше порога подряд
+#     ORBLIB_PSI_SAMPLES раз: подпись 2026-09-29 (первое сообщение о давлении
+#     16:26:53, SSH мёртв к 16:29) была бы поймана за минуты;
+#   * медленный — ни один файл прогресса не обновлялся ORBLIB_STALL_TIMEOUT
+#     секунд: случай «процессы живы, но не продвигаются».
+PSI_HITS=0
+LAST_PROGRESS=$(date +%s)
+LAST_MTIME=0
+WATCH_TICK=0
 while :; do
     running=0
     for pid in "${PIDS[@]}"; do
@@ -716,8 +974,51 @@ while :; do
     if ! kill -0 "$UPLOADER_PID" 2>/dev/null && ! storage_stopped; then
         storage_cli stop --reason "Background uploader exited before workers" || true
     fi
+
+    if [ $((WATCH_TICK % ORBLIB_WATCH_INTERVAL)) -eq 0 ]; then
+        avail=$(mem_available_mb)
+        if [ "$avail" -lt "$ORBLIB_MIN_AVAIL_MB" ]; then
+            handle_stall "MemAvailable=${avail} MB < ${ORBLIB_MIN_AVAIL_MB} MB"
+            exit 75
+        fi
+        psi=$(mem_pressure_avg60)
+        if [ -n "$psi" ] \
+           && awk -v v="$psi" -v lim="$ORBLIB_PSI_LIMIT" 'BEGIN{exit !(v > lim)}'; then
+            PSI_HITS=$((PSI_HITS + 1))
+            log "  ~ Давление памяти: some avg60=${psi}% (${PSI_HITS}/${ORBLIB_PSI_SAMPLES})"
+            if [ "$PSI_HITS" -ge "$ORBLIB_PSI_SAMPLES" ]; then
+                handle_stall "memory pressure some avg60=${psi}% > ${ORBLIB_PSI_LIMIT}%"
+                exit 75
+            fi
+        else
+            PSI_HITS=0
+        fi
+
+        now=$(date +%s)
+        newest=$(find "$WORK_DIR" -maxdepth 1 \
+                     \( -name "dockerlog_*_${TIMESTAMP}.log" \
+                        -o -name "log_${HOSTNAME_ENV}_${EXP_ID}_p*.txt" \
+                        -o -name "out_${HOSTNAME_ENV}_${EXP_ID}_p*.txt" \) \
+                     -printf '%T@\n' 2>/dev/null \
+                  | sort -n | tail -1 | cut -d. -f1)
+        newest_lib=$(find "$ORBLIB_DIR" -maxdepth 1 -name '*.npz*' -printf '%T@\n' 2>/dev/null \
+                     | sort -n | tail -1 | cut -d. -f1)
+        if [ -n "$newest_lib" ] && [ "$newest_lib" -gt "${newest:-0}" ]; then
+            newest="$newest_lib"
+        fi
+        if [ -n "${newest:-}" ] && [ "$newest" -gt "$LAST_MTIME" ]; then
+            LAST_MTIME="$newest"
+            LAST_PROGRESS="$now"
+        fi
+        if [ $((now - LAST_PROGRESS)) -ge "$ORBLIB_STALL_TIMEOUT" ]; then
+            handle_stall "no progress for $((now - LAST_PROGRESS))s (limit ${ORBLIB_STALL_TIMEOUT}s)"
+            exit 75
+        fi
+    fi
+    WATCH_TICK=$((WATCH_TICK + 1))
     sleep 1
 done
+stop_resource_sampler
 
 FAILED=0
 declare -a EXIT_CODES
@@ -741,6 +1042,9 @@ done
 DONE_COUNT=$((N_PROC - FAILED))
 if storage_stopped; then
     wait "$UPLOADER_PID" || true
+    # При активном STOP обычный upload_to_yadisk — no-op, поэтому логи
+    # доставляем в обход него (иначе их можно снять только с самой VM).
+    emergency_upload
     notify "Расчёт остановлен: checkpoints и очередь сохранены на VM" "urgent"
     schedule_shutdown 1 "остановка после отказа хранения; продолжение через --resume"
     exit 75
@@ -797,6 +1101,7 @@ for sfx in "${SUFFIXES[@]}"; do
     fi
 done
 
+upload_to_yadisk "$MONITOR_LOG"
 upload_to_yadisk "$LOGFILE"
 rm -f "${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 rm -f "$SNAP_BEFORE"

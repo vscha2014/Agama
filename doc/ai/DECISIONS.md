@@ -76,3 +76,45 @@ Format: `date | topic | decision | consequence`.
   installation with their configured rclone; the agent supplies code, commands
   and isolated tests | no archive cleanup, credentials changes, VM launch or
   shutdown is part of this task.
+
+## 2026-10-01 — Memory fix for library-saving runs (approved plan, now implemented)
+
+Diagnosis of the 2026-09-29 stall (kernel journal + docker logs): a
+memory-reclaim livelock, not an OOM — with `swap 0` only file pages were
+reclaimable, so eight concurrent library savers kept the VM refaulting for hours.
+Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
+
+- **Q21 answered: trajectories dropped** | `agama.orbit()` is called without
+  `trajsize` (the result was discarded one line later, ≈3.2 GB per worker) |
+  **open verification**: §9.1 of the retired plan still has to be run — recompute
+  a penalty from a stored library and re-integrate one control model to show
+  `matrix_dens`/`matrix_kinem`/`penalty` are unchanged. Until that is done,
+  treat the change as justified-but-unverified on real data.
+- **`trajsize` out of the compatibility key** | new files store `0`, `_expected`
+  omits the field, `EVALUATION_CONTEXT` no longer hashes it | the seven surviving
+  2026-09-29 libraries (`trajsize=1000`) stay reusable; no history row was
+  invalidated because none carried a `# storage-context` line yet.
+- **Block npz writer + hash while writing** | no full float64 duplicate of the
+  big matrices; `HashingWriter` + `register(size=…, md5=…)` + `metadata(deep=False)`
+  replace a `testzip()` pass plus a separate hash pass | file format unchanged
+  (same member names/dtypes/values); deep validation stays on every path that
+  inspects files the process did not write.
+- **Save slots** | `ORBLIB_SAVE_SLOTS=2` flock slots cap concurrent savers; no
+  stop check on entry | a model whose integration finished is still saved after a
+  delivery STOP, as `claim()` already allowed.
+- **Host-only swap + swapless container** | `ORBLIB_SWAPFILE=16G` protects sshd/
+  journald/orchestrator/rclone; `--memory=$LIM --memory-swap=$LIM` forbids
+  container swap so a runaway worker is OOM-killed (137) instead of thrashing the
+  VM | a legitimate spike now loses one model without a checkpoint; mitigated by
+  the 4-worker default and a generous limit. If the kernel lacks swap accounting
+  docker ignores `--memory-swap`, so that case is detected and logged.
+- **Fast trigger + 60-minute backstop + fixed graceful order** | PSI/MemAvailable
+  trigger in minutes, no-progress backstop at 3600 s; stop → docker stop →
+  bounded wait → emergency upload → notify → shutdown | logs now reach
+  `galaxy_results_emergency/` even during a STOP, and a failed `sudo shutdown` is
+  logged and notified instead of swallowed by `|| true`.
+- **Default 4 workers** (`nproc/8`) for library-building runs | the binding
+  constraint is memory, not CPU | `--nproc=` still overrides.
+- **Run order afterwards** (not started, needs explicit go-ahead): first a
+  `--reuse-orblib` pass over the seven surviving libraries with 4 workers, only
+  then a fresh 4-worker `--Q1` search on the widened bounds.
