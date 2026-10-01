@@ -35,8 +35,8 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 - Production scripts (`*_yaVM.py`, `J_factor_*.py`, `launch_docker_parallel.sh`)
   untouched; the `pipefail`/`ls .done_*` latent bug found in the experimental
   launcher still exists there (Q20, unanswered).
-- Committed through `76fbd4f`; the memory fix is **uncommitted** in the working
-  tree. The branch is ahead of `origin/master` (pushes fail: no git credentials).
+- Memory fix committed as `92f009e`. The branch is ahead of `origin/master`
+  (pushes fail: no git credentials).
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
