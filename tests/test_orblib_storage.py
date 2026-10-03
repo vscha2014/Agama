@@ -590,8 +590,9 @@ def test_evaluation_saves_same_arrays_or_stops_without_fake_penalty(store, monke
         ORBLIB_DIR=str(store.root), SAVE_ORBLIB=True, REUSE_ORBLIB=True,
         hostname_proc='test', _ORBLIB_BUILD_TTL_SEC=7200, _claim_file=lambda *a: True,
         release_reservation=lambda *a: None, orblib_counter=0,
-        gridv=numpy.arange(5.0), degree=2, ghorder=6,
+        gridv=numpy.arange(5.0), degree=2, ghorder=6, AGAMA_ORBIT_THREADS=8,
         agama=SimpleNamespace(Density=lambda *a, **kw: None, orbit=orbit,
+                              setNumThreads=lambda n: contextlib.nullcontext(),
                               Potential=lambda **kw: SimpleNamespace(Tcirc=lambda ic: numpy.ones(2))))
     original = ns['write_orblib_npz']
 

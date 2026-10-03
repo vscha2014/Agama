@@ -105,6 +105,7 @@ if args.n_threads is not None:
     os.environ['OMP_NUM_THREADS']      = str(args.n_threads)
     os.environ['MKL_NUM_THREADS']      = str(args.n_threads)
     os.environ['OPENBLAS_NUM_THREADS'] = str(args.n_threads)
+AGAMA_ORBIT_THREADS = args.n_threads or len(os.sched_getaffinity(0))
 
 # Формируем идентификатор процесса и эксперимента:
 # hostname_proc берётся из переменной окружения (передаётся из контейнера)
@@ -1503,20 +1504,22 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             # Траектории НЕ запрашиваются: при trajsize=1000 agama.orbit
             # выделял ~3.2 GB на процесс (100000 × (1000×6 float32 + 1000
             # float64)), и этот массив выбрасывался следующей же строкой.
-            matrices = agama.orbit(
-                potential=pot_gal,
-                ic=ic,
-                time=inttime,
-                Omega=0.0,
-                targets=[d.target for d in datasets]
-            )
+            with agama.setNumThreads(AGAMA_ORBIT_THREADS):
+                matrices = agama.orbit(
+                    potential=pot_gal,
+                    ic=ic,
+                    time=inttime,
+                    Omega=0.0,
+                    targets=[d.target for d in datasets]
+                )
             orbit_time_s = time.perf_counter() - _t_orbit
             if len(matrices) != len(datasets):
                 raise RuntimeError(f'agama.orbit вернул {len(matrices)} матриц '
                                    f'при {len(datasets)} датасетах')
             log_mem('after integration')
             print(f"  [orbitlib] sample={sample_time_s:.1f}s orbit={orbit_time_s:.1f}s "
-                  f"(numOrbits={numOrbits}, intTime={intTime}, траектории не записываются)")
+                  f"(numOrbits={numOrbits}, intTime={intTime}, omp_threads={AGAMA_ORBIT_THREADS}, "
+                  f"траектории не записываются)")
 
         # --- Сохранение библиотеки орбит (matrices + ic) ---
         # Имя КОНТЕНТ-АДРЕСНОЕ по физике модели: (incl, удвоение, n_bin,
@@ -1740,7 +1743,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                 f"orbit_s={orbit_time_s:.6f} "
                 f"total_s={sample_time_s + orbit_time_s:.6f} "
                 f"(numOrbits={numOrbits} trajsize_stored={TRAJSIZE_STORED} "
-                f"intTime={intTime})\n")
+                f"intTime={intTime} omp_threads={AGAMA_ORBIT_THREADS})\n")
         if orblib_save_info is not None:
             f.write(f"# orblib saved: {orblib_save_info[0]} "
                     f"size_MB={orblib_save_info[1]:.3f} "

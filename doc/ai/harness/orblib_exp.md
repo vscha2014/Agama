@@ -1,8 +1,9 @@
 # Runbook — experimental harness `orblib_exp`
 
 Files: `py/Fornax_P21_PCA_w3Sersic_orblib_exp.py`, `py/launch_orblib_exp.sh`,
-`py/orblib_storage.py`, tests in `tests/test_orblib_q1.py`,
-`tests/test_orblib_storage.py`. Production scripts are **not** part of this and
+`py/orblib_storage.py`, single-model check `py/run_single_model.py` +
+`py/launch_single_model.sh` (§3b), tests in `tests/test_orblib_q1.py`,
+`tests/test_orblib_storage.py`, `tests/test_single_model.py`. Production scripts are **not** part of this and
 must not be touched (see `../CONTRACT.md`, `production.md`).
 
 ## 1. Experiment identity
@@ -159,6 +160,18 @@ Everything below exists to keep that from recurring.
   matrices are accumulated during integration and do not depend on trajectory
   recording. Previously `trajsize=1000` allocated ≈3.2 GB per worker that the
   next line discarded. The script asserts one matrix per dataset.
+- **Explicit OpenMP thread count for `agama.orbit`.** torch ships its own
+  `libgomp.so.1` with the system SONAME, so AGAMA binds to it, and
+  `torch.set_num_threads(1)` at import sets the main thread's OpenMP limit to 1:
+  until 2026-10-03 every integration ran on one core. The call is now wrapped in
+  `with agama.setNumThreads(AGAMA_ORBIT_THREADS)`, where
+  `AGAMA_ORBIT_THREADS = --n_threads or len(os.sched_getaffinity(0))` (the
+  container cpuset). It must be explicit: `setNumThreads(0)` restores the value
+  seen at its first call, i.e. 1. IC sampling stays outside, so libraries for the
+  same point stay bit-identical; torch/BoTorch keep one thread. The count is
+  logged in `[orbitlib]` and in the `# orbitlib times` history comment
+  (`omp_threads=`). Verified 2026-10-03: same library MD5 as the single-thread
+  run, integration ≈20× faster on 32 vCPU. Production has the same issue (Q23).
 - **`trajsize` is outside the library compatibility key.** New files store
   `trajsize=TRAJSIZE_STORED=0` (the field stays present because
   `orblib_storage.SCALARS` requires it), and the `_expected` dict omits it, so a
@@ -235,6 +248,90 @@ Everything below exists to keep that from recurring.
 Expected per-worker peak afterwards: ≈1.5–2 GB instead of ≈4–5 GB ⇒ ≈8 GB for
 four workers on 31 GiB.
 
+## 3b. Single-model check (`run_single_model.py`, `launch_single_model.sh`)
+
+Purpose: verify the memory fix and the experimental pipeline on real data by
+re-evaluating one known model, not by searching. Tests: `tests/test_single_model.py`.
+
+- `bash launch_single_model.sh` (from the installed `py/`): default point is
+  the minimum-penalty row at `--incl` (default 90) of the production free-Q
+  history `4UpsBoTorch_PCA_Sersic_*.txt` in the working directory, resolved at
+  run time and logged verbatim (no result numbers in tracked files); its
+  penalty/Upsilon are the reference. Configuration `d1_nb250_gh0_ser0`.
+  Without those files all four `--Q= --gh= --rh= --rho0=` (or
+  `--params-from=`) are required; layouts of `out_*`/`4Ups*`, `J_factor_*` and
+  `Jcomputed_*` are detected by token count.
+  Flags: `--repeats=4`, `--no-shutdown`, `--no-upload`, `--preflight`
+  (one container, geometry/library name only, no uploads, no shutdown),
+  `--Q= --gh= --rh= --rho0= --ref-penalty= --ref-upsilon= --params-from=GLOB
+  --protocols=`. Refuses to start while `orblib/.launcher.lock` is held or when
+  free disk < `repeats × SINGLE_BYTES_PER_REPEAT + ORBLIB_RESERVE_BYTES`.
+- The runner imports the experimental script as a module (`--save-orblib
+  --reuse-orblib --orblib-dir`, no `--stream-orblib`/`--Q1`/`--no-double`),
+  installs a **local** `Store` (claim → save slot → block writer + hashing →
+  `register`), replaces `completed_point` (otherwise the point already in the
+  pool would be refused) and `checkpoint_for_stop` (no search checkpoint), and
+  initialises the globals that normally come from `run_pca_optimization`.
+  `pc_coords` is a dummy vector: `None` would crash the row writer.
+- Protocols on **one** integration, each with an empty `_ups_recent` (full
+  bracket) and `proc_rng` reseeded by `--subsample-seed` (AGAMA RNG untouched):
+  `exp` (module defaults; integrates and saves; the only row written to the
+  shared d1 pool, `out_<host>_d1_nb250_gh0_ser0_single<TS>r<i>.txt`),
+  `reuse` (same settings on the reloaded float64 library) and `prod`
+  (`xatol=1e-3`, no sub-sample, `min_pen=res.fun`). `reuse`/`prod` rows go to
+  `single_<hostname_proc>.txt`, which no pool glob matches (a reuse row is the
+  same IC realisation, and a prod row would carry a wrong `storage-context`).
+- Report `report_single_<TS>_r<i>.json/.txt`: penalties, Upsilon, probes,
+  wall time, peak RSS (`VmHWM`, reset per protocol), orbit/save/load times,
+  deltas vs reference, both datacube grid upper bounds (`grid_identical` vs the
+  production `bound_circR` formula), `GEOM_HASH`, `EVALUATION_CONTEXT`,
+  library size/MD5/deep metadata check and store consistency.
+  `run_single_model.py --summarize report_*.json` (stdlib only) aggregates.
+- Each realisation has its own suffix and `orblib_single/<TS>_r<i>/`: the
+  library name depends only on the parameters, so all realisations share it.
+  Consequently each container has its own two save slots (four concurrent
+  savers — stricter than the search). After the containers: pool files are
+  uploaded as-is to `galAgama/` (unique names, no merge into the host file),
+  reports/side files/logs to `galAgama/single_model/<RUN_TAG>_<TS>/`, and **only
+  r0's** library goes to the shared catalog via `orblib_storage.py prepare
+  --resume --root orblib_single/<TS>_r0` (size + MD5, receipt; the managed local
+  copy is deleted after verification). If `catalog/<name>.json` already exists
+  the upload is skipped and the file kept. r1… stay on the VM.
+- Memory protections, watchdogs, emergency upload and verified shutdown are
+  copies of §3a (`ORBLIB_*` variables keep their meaning); SIGTERM from
+  `docker stop` makes the runner write a partial report and exit 75.
+- Reading the result: `grid_identical=false` ⇒ the comparison with the
+  production penalty is biased by geometry; `prod − ref` against the scatter of
+  the repeats ⇒ consistency with production; `prod − exp` ⇒ Upsilon speed-up
+  effect (Q15); `reuse − exp` ⇒ storage round trip (≈0 expected).
+
+## 3c. Several different models in parallel (`launch_multi_model.sh`)
+
+Re-evaluates N **different** known models at once (one container each, cores
+split evenly), without protocol comparison: `run_single_model.py --protocols exp`
+= one integration + the standard Upsilon search + library save. Tests:
+`tests/test_single_model.py` (`*multi*`, `*models_file*`).
+
+- `bash launch_multi_model.sh --models=FILE [--no-shutdown] [--no-upload] [--preflight]`.
+  FILE: one history row per container in any layout the runner parses
+  (`out_*`/`4Ups*`, `J_factor_*`, `Jcomputed_*`), optional trailing `# label`;
+  comments/garbage lines are skipped; duplicate parameter sets are refused
+  (same library name and, with AGAMA's fixed start seed, the same realisation).
+  `run_single_model.py --list-models FILE` (stdlib) shows what will run.
+  `incl` and `Q gh rh rho0` come from the row, its penalty/Upsilon are the
+  reference (`--ref-penalty/--ref-upsilon`, label → `--ref-source`). The file is
+  kept outside the repository (no result numbers in tracked files).
+- Names: suffix `multi<TS>m<i>`, library dir `orblib_single/<TS>_m<i>/`, report
+  `report_multi_<TS>_m<i>.json/.txt`, pool row
+  `out_<host>_d1_nb250_gh0_ser0_multi<TS>m<i>.txt` (uploaded as-is to `galAgama/`),
+  results/logs/models file → `galAgama/single_model/multi_d1_nb250_gh0_ser0_n<N>_<TS>/`,
+  summary `summary_multi_<TS>.txt` = the per-model text reports concatenated.
+- **Every** model's library goes to the shared catalog (`prepare --resume` +
+  `check` per directory, skipped when `catalog/<name>.json` exists).
+- `--preflight` runs all N containers without integration, no history/`.npz`
+  upload, no shutdown. Lock `orblib_single/.launcher.lock` is shared with
+  `launch_single_model.sh`; memory protections/watchdogs/shutdown as §3b.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -245,10 +342,10 @@ four workers on 31 GiB.
 
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
-    test_orblib_storage.py --rootdir=. --import-mode=importlib -p no:cacheprovider
+    test_orblib_storage.py test_single_model.py --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
-    py/orblib_storage.py tests/test_orblib_q1.py
-bash -n py/launch_orblib_exp.sh && git diff --check
+    py/orblib_storage.py py/run_single_model.py tests/test_orblib_q1.py
+bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh && git diff --check
 ```
 
 Do not run `python -m pytest` from the repo root: local `py/` shadows pytest's

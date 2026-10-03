@@ -85,9 +85,11 @@ only when a *universal* rule changes, and it stays ≤120 lines.
 
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
-    test_orblib_storage.py --rootdir=. --import-mode=importlib -p no:cacheprovider
-cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py py/orblib_storage.py
-bash -n py/launch_orblib_exp.sh && git diff --check && git status --short
+    test_orblib_storage.py test_single_model.py --rootdir=. --import-mode=importlib -p no:cacheprovider
+cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py py/orblib_storage.py \
+    py/run_single_model.py
+bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh
+git diff --check && git status --short
 ```
 
 Do not run `python -m pytest` from the repo root: the local `py/` directory

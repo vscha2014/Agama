@@ -139,3 +139,59 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   confirmed on Yandex. Then: header-only `tarfile` scan (`offset_data`), a
   separate sidecar file (never rewrite existing `legacy_*.json` — `publish()`
   refuses different content under the same name), MD5 check of the fetched range.
+
+## 2026-10-01 — Single-model check of the memory fix (user-approved plan)
+
+- **Separate runner + orchestrator** (`py/run_single_model.py`,
+  `py/launch_single_model.sh`) instead of a new mode in the tested launcher |
+  the experimental script is imported as a module and only module globals are
+  patched inside the runner process; production, the exp script and
+  `launch_orblib_exp.sh` stay unchanged.
+- **Point** | the free-Q best row at `incl=90` of the production history,
+  configuration `d1_nb250_gh0_ser0` (production always doubles). Resolved at run
+  time from `4UpsBoTorch_PCA_Sersic_*.txt` rather than hard-coded, so no result
+  numbers enter the public repository.
+- **4 parallel realisations** | memory stress test like the launcher's 4
+  workers plus the IC-realisation scatter needed to judge `prod − ref`. Each
+  has its own orbit-library directory (same parameter-derived name).
+- **No trajectory A/B re-integration** | not requested; the check rests on the
+  penalty comparison and on peak-RSS measurements.
+- **History** | only the `exp` row (exactly what the search writes) enters the
+  shared d1 pool, under a unique file name; `reuse` (same realisation) and
+  `prod` (would carry a wrong `storage-context`) go to a side file.
+- **Libraries** | r0's library is delivered to the shared catalog
+  (`prepare --resume`, size + MD5, receipt); skipped when the name is already
+  archived; r1… stay on the VM.
+- **Shutdown by default**, as the launcher; `--no-shutdown` disables.
+- Not run yet: the VM run needs an explicit go-ahead.
+
+## 2026-10-03 — Parallel re-evaluation of several known models (user request)
+
+- **Selection** | local d1 free-Q history (production `4UpsBoTorch_PCA_Sersic_*`
+  + `Jcomputed_from_raw_*`; d0 and `PA46.8` excluded). First the global best
+  plus the next three by penalty; revised the same day on request to the global
+  best plus three *distant* good regions: farthest-point selection among rows
+  within Δpenalty < 0.06 of the best (≈ realisation scatter), parameters
+  normalised by production bounds. The history has a single basin, so these are
+  the three ends of its valley (large rh, small rh, gh > 0); genuinely different
+  regions all have Δpenalty ≳ 0.6. Rows live in a local-only models file.
+- **New orchestrator** `py/launch_multi_model.sh` (copy of the single-model
+  memory protections) instead of a mode in the tested `launch_single_model.sh`;
+  runner reused with `--protocols exp` plus two small additions
+  (`--list-models`, `--ref-source`).
+- **Upsilon is still searched** (standard `exp` protocol): the penalty is
+  defined as the minimum over Upsilon (CONTRACT); no exp/reuse/prod comparison.
+- **All libraries delivered** to the shared catalog (each model is distinct).
+- Not run yet: the VM run needs an explicit go-ahead.
+
+## 2026-10-03 — OpenMP threads for orbit integration in the harness (user request)
+
+- **Cause confirmed** | torch's bundled `libgomp.so.1` is shared with AGAMA;
+  `torch.set_num_threads(1)` ⇒ `omp_get_max_threads()` = 1 in the main thread
+  (8 without torch, 8 inside `agama.setNumThreads(8)`), so `agama.orbit` ran on
+  one core per container.
+- **Harness fix** | only `agama.orbit` is wrapped in
+  `agama.setNumThreads(AGAMA_ORBIT_THREADS)` (`--n_threads` or cpuset size);
+  IC sampling, torch/BoTorch and solveOpt unchanged. Results must be
+  bit-identical (orbits are independent rows); only wall time changes.
+- **Production** untouched; porting is Q23.

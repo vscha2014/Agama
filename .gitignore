@@ -39,3 +39,8 @@ py/log_*.txt
 # сборки (остаются лишь при аварии) и tar-файлы, если окажутся в py/.
 py/.orblib_shards_*/
 py/orblib_*.tar
+# Проверка одной модели (run_single_model.py / launch_single_model.sh).
+py/orblib_single/
+py/single_*.txt
+py/report_single_*
+py/summary_single_*

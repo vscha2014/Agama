@@ -15,7 +15,11 @@ allowed-tools:
 ## Границы
 
 - Редактируемо: `py/Fornax_P21_PCA_w3Sersic_orblib_exp.py`,
-  `py/launch_orblib_exp.sh`, `py/orblib_storage.py`, `tests/test_orblib_*.py`.
+  `py/launch_orblib_exp.sh`, `py/orblib_storage.py`, `tests/test_orblib_*.py`,
+  проверка одной модели `py/run_single_model.py`, `py/launch_single_model.sh`,
+  несколько моделей параллельно `py/launch_multi_model.sh`,
+  `tests/test_single_model.py` (раннер патчит глобалы скрипта по имени —
+  переименование ловит `test_every_name_the_runner_relies_on_exists_in_the_script`).
 - Не трогать: `*_yaVM.py`, `J_factor_*.py`, `launch_docker_parallel.sh`,
   `src/**`, `schwarzlib.py`, `table3.dat`. Найденный в проде баг → вопрос PI.
 - Не запускать: реальные расчёты AGAMA, Docker, rclone/Яндекс.Диск,
@@ -52,9 +56,11 @@ allowed-tools:
 
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
-    test_orblib_storage.py --rootdir=. --import-mode=importlib -p no:cacheprovider
-cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py py/orblib_storage.py
-bash -n py/launch_orblib_exp.sh && git diff --check
+    test_orblib_storage.py test_single_model.py --rootdir=. --import-mode=importlib -p no:cacheprovider
+cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py py/orblib_storage.py \
+    py/run_single_model.py
+bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
+    && bash -n py/launch_multi_model.sh && git diff --check
 git diff --stat   # прод-скрипты должны отсутствовать в списке
 ```
 

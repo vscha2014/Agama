@@ -903,6 +903,25 @@ def test_archived_rebuild_warning_precedes_integration():
     assert warn.lineno < orbit.lineno
 
 
+def test_orbit_thread_count_comes_from_cli_or_affinity(monkeypatch):
+    assert configuration(monkeypatch, '--n_threads', '6')['AGAMA_ORBIT_THREADS'] == 6
+    assert configuration(monkeypatch)['AGAMA_ORBIT_THREADS'] == len(os.sched_getaffinity(0))
+
+
+def test_orbit_integration_runs_inside_explicit_agama_thread_count():
+    function = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                    and node.name == 'halo_IC_lib_weights_pca_fixed')
+    block = next(node for node in ast.walk(function) if isinstance(node, ast.With)
+                 and any(ast.unparse(item.context_expr) ==
+                         'agama.setNumThreads(AGAMA_ORBIT_THREADS)' for item in node.items))
+    calls = {ast.unparse(node.func) for node in ast.walk(block) if isinstance(node, ast.Call)}
+    assert 'agama.orbit' in calls
+    assert 'densityStars.sample' not in calls
+    orbits = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+              and ast.unparse(node.func) == 'agama.orbit']
+    assert len(orbits) == 1
+
+
 def test_launcher_help_is_side_effect_free():
     result = subprocess.run(['bash', str(LAUNCHER), '--help'],
                             text=True, capture_output=True, check=True)

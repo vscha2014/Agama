@@ -86,3 +86,40 @@ Reproduced with mocked docker/rclone/curl. Fixed in `launch_orblib_exp.sh`
 log uploaded right after step 3, `curl -f` checked). The identical construct is
 still in `py/launch_docker_parallel.sh`. **Question:** approve a separate task
 to fix production?
+
+## Q22. Distinct AGAMA IC seeds for diagnostic repeats  [affects: CONTRACT §Randomness, `run_single_model.py`]
+
+AGAMA's RNG starts from the same seed in every fresh process, so the 4 parallel
+repeats of the single-model check produced bit-identical libraries (same MD5)
+and the IC-realisation scatter needed to judge `prod − ref` was not measured.
+In the search the stream differs only because each process advances it.
+The 2026-10-03 multi-model run shows the consequence: four different models,
+re-evaluated in fresh processes, all came out above their production penalties
+by a similar amount — same seed and halo-independent Sersic positions ⇒ shared
+noise, so a harness-vs-production offset cannot be told from one realisation.
+Options: (A) `agama.setRandomSeed(base + k)` per repeat in the diagnostic runner
+only (search/production untouched); (B) no seeding — use production's
+near-duplicate rows as the scatter estimate (cheap, but neighbours are not
+exactly the same point). Recommendation: A, plus logging the seed. Blocked: a
+quantitative "within scatter" verdict of the memory-fix check.
+
+## Q23. Orbit integration runs on one thread (torch shares AGAMA's libgomp)  [affects: production speed, `_yaVM.py`]
+
+Live check 2026-10-03: during `agama.orbit` one thread at ~100 %, no OpenMP team,
+although `OMP_NUM_THREADS=8`. The process maps only
+`torch/lib/libgomp.so.1` (same SONAME as the system libgomp ⇒ AGAMA binds to it),
+so `torch.set_num_threads(1)` at import calls `omp_set_num_threads(1)` for the
+main thread and AGAMA's parallel loops get a team of 1 — confirmed in `agama:latest`:
+`omp_get_max_threads()` = 8 without torch, 1 after `torch.set_num_threads(1)`,
+8 inside `agama.setNumThreads(8)`. Production has the same
+lines (`_yaVM.py:21–22`, before `import agama`). Import order does not help.
+Proposed minimal fix (harness first, production only with approval):
+`with agama.setNumThreads(N): matrices = agama.orbit(...)` with explicit
+`N = args.n_threads or len(os.sched_getaffinity(0))` (`setNumThreads(0)` would
+restore 1, the value seen at its first call). IC sampling left outside, so the
+libraries stay bit-identical (each orbit row is computed independently).
+Validation: rerun the single-model point ⇒ same MD5 and penalty, ~N× faster
+integration. The harness fix was applied on 2026-10-03 (user request, see
+`DECISIONS.md`) and verified on the VM: bit-identical library (same MD5),
+penalty equal to round-off, orbit integration ≈20× faster on 32 vCPU.
+**Question:** port the same wrap to `_yaVM.py`?
