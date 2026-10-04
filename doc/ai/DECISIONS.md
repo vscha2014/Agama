@@ -216,3 +216,19 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   the peak at ≈10 GB; 8 × 4 gains little with ~1 GB margin per container.
   The run also measures the 4 × 8 throughput (`models_per_hour`).
 - Not run yet: the VM run needs an explicit go-ahead.
+
+## 2026-10-05 — TuRBO trust-region upper bound fixed in harness and production (user acting for the PI)
+
+- **Bug** | `TuRBO_PCA_Fixed._tr_bounds` computed the upper TR bound as
+  `hi_norm·range + pca_bounds_upper` instead of `+ pca_bounds_lower`, so in every
+  PC the TR reached from `centre − L/2` to above the PCA box; proposals left the
+  box and were clipped to `bounds_original` in `pca_to_params_fixed` (consistent
+  with boundary pile-ups). Same line in all four scripts.
+- **Decision** | fixed (one line, `+ self.pca_bounds_lower`) in the harness and,
+  on the user's explicit instruction, in `Fornax_P21_symm_PCA_w3Sersic_yaVM.py`,
+  `_yaVM_timed.py` and `Fornax_P21_symm_PCA_w3Sersic.py` (the handoff's Q24 is
+  thereby answered as option A and not filed). Penalty, apertures, Upsilon search
+  and bounds unchanged: only the search dynamics change. Histories produced
+  before this commit (incl. the free-Q baseline and the 09-19 Q=1 run) were
+  searched with the wide upper TR; their rows stay valid evaluations.
+- Test: `test_trust_region_bounds_stay_inside_pca_box` (all four scripts).

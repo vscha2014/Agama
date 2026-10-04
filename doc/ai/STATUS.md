@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-04 (IC-seed scan mode).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-05 (TuRBO TR bound fix).
 
 ## Where the science stands
 
@@ -34,21 +34,21 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
   2026-10-01 (local `results/single_d1_nb250_gh0_ser0_i90.0/NOTES.md`), but its
   repeats were one AGAMA realisation (same start seed per process). OpenMP fix
   for `agama.orbit` verified 10-03 (same MD5, ≈20× faster); production port = Q23.
-- **New, uncommitted, not run:** IC-seed scan (Q22 option A, DECISIONS
-  2026-10-04, §3d): `launch_single_model.sh --ic-seeds=1-100 --repeats=4` —
-  `agama.setRandomSeed(K)` per seed in the runner only, no libraries, rows in
-  separate `seeds_*` files (`# ic_seed: K`) + `.tsv`, resumable, `seed_scan`
-  summary (mean/std/SEM, seed-42 check, throughput). 170 mocked tests pass;
-  production scripts and the search untouched.
+- IC-seed scan (Q22 option A, §3d, committed `64afb3e`): `launch_single_model.sh
+  --ic-seeds=1-100 --repeats=4` **ran OK 2026-10-04** (local `results/seed/NOTES.md`,
+  REGISTRY): seeding works (seed 42 bit-identical to the default stream); the
+  production reference is a winner's-curse minimum, harness − production offset
+  consistent with zero ⇒ memory-fix/harness check closed. Penalty noise of one
+  evaluation measured (numbers in NOTES) — matters for Q16 and best-model ranking.
+  4×8 layout faster than 1×32; peak memory well below limits.
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
-1. On go-ahead: copy `run_single_model.py` + `launch_single_model.sh` to the VM,
-   `bash launch_single_model.sh --ic-seeds=1-100 --repeats=4 --preflight`, then
-   without `--preflight` (≈4–4.5 h estimated, 4×8). Check seed 42 = default
-   stream, then std/SEM vs production neighbours (rule in `HANDOFF_Q22.md`).
-2. `--reuse-orblib` pass over the seven 09-29 libraries, 4 workers (no `prepare`/`prune` first);
-   then a 4-worker `--Q1` search on widened bounds or fixed-`rh` profile runs (3.5/5/7 kpc).
+1. Optional: one 8×4 throughput measurement (memory allows it).
+2. Q=1 on widened bounds: TuRBO TR upper-bound bug **fixed 2026-10-05** (harness + 3
+   production copies, committed). Next: PI questions (PCA std floor, GP noise, per-process
+   seed), `rh` probes via `launch_multi_model.sh`, then decide on the full `--Q1` search.
+   Hand-off: `results/Q1d1_nb250_gh0_ser0_i90.0_widened/HANDOFF.md` (local-only).
 3. Later: batch re-score/fetch mode (tar offsets then); Q16 J weighting before
    final article numbers; targeted recompute of the 77 lost libraries.
 
@@ -56,5 +56,5 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 
 Q15 (Upsilon Brent speed-ups into production), Q16 (J weighting / sampling
 density), Q17–Q19 (shard consolidation, `ic`/`inttime` storage, shard naming),
-Q20 (`pipefail` bug in the production launcher), Q23 (OpenMP wrap in
-production) — see `questions_for_pi.md`. Q21, Q22 are answered (`DECISIONS.md`).
+Q20 (`pipefail` bug in the production launcher), Q23 (OpenMP wrap in production)
+— see `questions_for_pi.md`. Q21, Q22, TR-bound fix: answered (`DECISIONS.md`).

@@ -44,6 +44,9 @@ must not be touched (see `../CONTRACT.md`, `production.md`).
   failure is an explicit error. Resume from a checkpoint skips this stage.
 - Q1 checkpoints store physical parameters and reproject into the PCA basis
   rebuilt at resume.
+- TuRBO trust region (`_tr_bounds`): `[centre ± L/2·range]` clamped to the PCA
+  box (upper-bound bug fixed 2026-10-05, also in production; DECISIONS).
+  Histories before that fix were searched with a TR extending above the box.
 - The J-factor post-processing does not yet parse `Q1d1_*` filenames.
 
 ## 3. Streaming orbit-library storage (single VM)

@@ -1675,7 +1675,7 @@ class TuRBO_PCA_Fixed:
         hi_norm = torch.clamp(x_center_norm + half, 0.0, 1.0)
         
         lo = lo_norm * self.pca_range + self.pca_bounds_lower
-        hi = hi_norm * self.pca_range + self.pca_bounds_upper
+        hi = hi_norm * self.pca_range + self.pca_bounds_lower
         
         return torch.stack([lo, hi])
     

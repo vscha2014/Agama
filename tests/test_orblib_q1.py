@@ -922,6 +922,31 @@ def test_orbit_integration_runs_inside_explicit_agama_thread_count():
     assert len(orbits) == 1
 
 
+@pytest.mark.parametrize('script', [SCRIPT] + [ROOT / f'py/Fornax_P21_symm_PCA_w3Sersic{s}.py'
+                                             for s in ['', '_yaVM', '_yaVM_timed']])
+def test_trust_region_bounds_stay_inside_pca_box(script):
+    tree = ast.parse(script.read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'TuRBO_PCA_Fixed')
+    fake_torch = SimpleNamespace(clamp=numpy.clip, stack=numpy.stack, device=lambda x: x,
+                                 double='double')
+    namespace = dict(torch=fake_torch)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(script), 'exec'), namespace)
+    lower, upper = numpy.array([-4.0, 10.0, 0.0]), numpy.array([6.0, 30.0, 1.0])
+    turbo = SimpleNamespace(length=0.2, pca_bounds_lower=lower, pca_bounds_upper=upper,
+                            pca_range=upper - lower)
+    tr_bounds = namespace['TuRBO_PCA_Fixed']._tr_bounds
+
+    centre = lower + 0.5 * (upper - lower)
+    lo, hi = tr_bounds(turbo, centre)
+    assert numpy.allclose(lo, centre - 0.1 * turbo.pca_range)
+    assert numpy.allclose(hi, centre + 0.1 * turbo.pca_range)
+
+    lo, hi = tr_bounds(turbo, lower + numpy.array([0.05, 0.95, 0.5]) * turbo.pca_range)
+    assert numpy.all(lo >= lower) and numpy.all(hi <= upper) and numpy.all(lo < hi)
+    assert numpy.allclose(lo, lower + numpy.array([0.0, 0.85, 0.4]) * turbo.pca_range)
+    assert numpy.allclose(hi, lower + numpy.array([0.15, 1.0, 0.6]) * turbo.pca_range)
+
+
 def test_launcher_help_is_side_effect_free():
     result = subprocess.run(['bash', str(LAUNCHER), '--help'],
                             text=True, capture_output=True, check=True)
