@@ -16,6 +16,12 @@ reuse/prod rows go to a side file that the pool globs do not match. A JSON +
 text report is written next to them. `--summarize` aggregates reports and
 needs only the standard library (runs on the host).
 
+IC-seed scan (`--ic-seeds 1-100`, diagnostic only, DECISIONS 2026-10-04):
+one module import, then for every seed K agama.setRandomSeed(K) and one `exp`
+evaluation of the same model. No orbit library is saved or reused. Rows go to
+a seed history file (`# ic_seed: K` before each block) that the pool globs do
+not match, plus a per-seed .tsv; seeds already complete there are skipped.
+
 Default parameters: the minimum-penalty row at --incl of the production
 free-Q history 4UpsBoTorch_PCA_Sersic_*.txt in the working directory, resolved
 at run time (no result numbers live in this public repository). See
@@ -46,10 +52,101 @@ PROTOCOLS = {
 }
 FAILED_PENALTY = 1e5
 EXPECTED_PEAK_MB = 2000.0
+SEED_TAG = '# ic_seed:'
+SEED_MAX = 2**31 - 1
+SEED_TABLE_COLUMNS = ('seed', 'status', 'penalty', 'upsilon', 'probes', 'sample_s', 'orbit_s',
+                      'solveopt_total_s', 'wall_s', 'peak_rss_mb', 'omp_threads', 'finished')
 
 
 class ProtocolError(RuntimeError):
     pass
+
+
+# --------------------------------------------------------------------------
+# IC seeds
+# --------------------------------------------------------------------------
+def parse_seed_list(spec):
+    """'1-100' or '1,5,9-12' -> list of ints. AGAMA's setRandomSeed(0) takes the
+    seed from the clock, so 0 (and negatives, repeats) are rejected."""
+    seeds = []
+    for part in str(spec).split(','):
+        part = part.strip()
+        if not part:
+            continue
+        low, dash, high = part.partition('-')
+        try:
+            low, high = int(low), int(high) if dash else int(low)
+        except ValueError:
+            raise ValueError(f'bad seed item {part!r} (integers >= 1, ranges A-B)')
+        if low < 1 or high < low or high > SEED_MAX:
+            raise ValueError(f'bad seed item {part!r} (integers in [1, {SEED_MAX}], ranges A-B with A <= B)')
+        seeds.extend(range(low, high + 1))
+    if not seeds:
+        raise ValueError('empty seed list')
+    if len(set(seeds)) != len(seeds):
+        raise ValueError('repeated seeds')
+    return seeds
+
+
+def split_seeds(seeds, workers):
+    """Round-robin: worker j gets seeds[j], seeds[j+W], ..."""
+    if not 1 <= workers <= len(seeds):
+        raise ValueError(f'{workers} workers for {len(seeds)} seeds')
+    return [seeds[j::workers] for j in range(workers)]
+
+
+def mark_seed(path, seed):
+    """`# ic_seed: K` on its own line right before the block the module writes."""
+    with open(path, 'a+b') as stream:
+        stream.seek(0, os.SEEK_END)
+        lead = b''
+        if stream.tell():
+            stream.seek(-1, os.SEEK_END)
+            lead = b'' if stream.read(1) == b'\n' else b'\n'
+        stream.write(lead + f'{SEED_TAG} {seed} (agama.setRandomSeed before the orbit-IC sampling)\n'.encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def read_seed_history(path):
+    """Seeds whose block is complete (data row + '# End of history') in `path`."""
+    done, seed, row = {}, None, None
+    try:
+        with open(path, errors='replace') as stream:
+            lines = stream.read().splitlines()
+    except FileNotFoundError:
+        return done
+    for line in lines:
+        if line.startswith(SEED_TAG):
+            try:
+                seed, row = int(line[len(SEED_TAG):].split()[0]), None
+            except (ValueError, IndexError):
+                seed, row = None, None
+        elif line.startswith('# End of history'):
+            if seed is not None and row is not None and 0 < row['penalty'] < FAILED_PENALTY:
+                done[seed] = row
+            seed, row = None, None
+        elif seed is not None and row is None and line.strip() and not line.startswith('#'):
+            try:
+                values = [float(t) for t in line.split()[:7]]
+            except ValueError:
+                continue
+            if len(values) == 7 and all(math.isfinite(v) for v in values):
+                row = dict(upsilon=values[5], penalty=values[6])
+    return done
+
+
+def seed_table_path(seed_file):
+    return os.path.splitext(seed_file)[0] + '.tsv'
+
+
+def append_seed_table(path, result):
+    new = not os.path.exists(path)
+    with open(path, 'a') as stream:
+        if new:
+            stream.write('\t'.join(SEED_TABLE_COLUMNS) + '\n')
+        stream.write('\t'.join('' if result.get(k) is None else str(result.get(k))
+                               for k in SEED_TABLE_COLUMNS) + '\n')
 
 
 # --------------------------------------------------------------------------
@@ -165,9 +262,11 @@ def parse_last_block(path, server):
 # Module preparation and protocol driver (work on any module-like object)
 # --------------------------------------------------------------------------
 def module_argv(args):
+    # Seed scan: neither save nor reuse — every seed is a new realisation of one
+    # library name, and nothing of it is kept.
+    storage = [] if args.ic_seeds else ['--save-orblib', '--reuse-orblib']
     argv = [EXP_SCRIPT, '--incl', repr(float(args.incl)), '--suffix', args.suffix,
-            '--save-orblib', '--reuse-orblib', '--orblib-dir', args.orblib_dir,
-            '--no-resume']
+            *storage, '--orblib-dir', args.orblib_dir, '--no-resume']
     if args.n_threads is not None:
         argv += ['--n_threads', str(args.n_threads)]
     return argv
@@ -210,7 +309,7 @@ def _peak_rss_mb():
     return None
 
 
-def run_protocol(mod, name, params, files, seed, rng_factory):
+def run_protocol(mod, name, params, files, seed, rng_factory, ic_seed=None):
     settings = PROTOCOLS[name]
     saved = {key: getattr(mod, key) for key in ('UPS_XATOL', 'UPS_SUBSAMPLE_FRAC', 'UpsFile')}
     target = files[settings['target']]
@@ -227,6 +326,11 @@ def run_protocol(mod, name, params, files, seed, rng_factory):
         pc = mod._params_to_dummy_pc(dict(params), None, mod.bounds_original)
         probes = mod.number_of_find_w_U
         _peak_rss_reset()
+        if ic_seed is not None:
+            # Resets every per-thread AGAMA stream; densityStars.sample() is the
+            # first consumer inside the evaluation ⇒ the realisation depends on
+            # the seed only (not on order or on earlier evaluations).
+            mod.agama.setRandomSeed(int(ic_seed))
         start = time.perf_counter()
         value = mod.halo_IC_lib_weights_pca_fixed(
             pc, None, mod.bounds_original, mod.densityStars, mod.datasets,
@@ -246,6 +350,7 @@ def run_protocol(mod, name, params, files, seed, rng_factory):
         settings=effective, reused='reused' in block, saved='saved' in block,
         archived_rebuild='archived_rebuild' in block,
         sample_s=orbitlib.get('sample_s'), orbit_s=orbitlib.get('orbit_s'),
+        omp_threads=orbitlib.get('omp_threads'), ic_seed=ic_seed,
         save_s=block.get('saved', {}).get('save_s'),
         size_mb=block.get('saved', {}).get('size_MB'),
         load_s=block.get('reused', {}).get('load_s'),
@@ -316,8 +421,22 @@ def format_report(report):
                      f"peak_rss={value['peak_rss_mb']} MB reused={value['reused']} saved={value['saved']}")
     for key, value in report.get('deltas', {}).items():
         lines.append(f"  {key} = {value:+.6f}")
+    scan = report.get('ic_seeds')
+    if scan:
+        results = scan.get('results', {})
+        ok = sum(1 for value in results.values() if value.get('status') == 'ok')
+        lines.append(f"  ic_seeds: {ok}/{len(scan.get('requested', []))} ok "
+                     f"(seed file {report.get('context', {}).get('seed_file')})")
+        for key in sorted(results, key=int):
+            value = results[key]
+            penalty = value.get('penalty')
+            lines.append(f"    seed {int(key):6d} {value.get('status'):6s} "
+                         + (f"penalty={penalty:.6f} Upsilon={value.get('upsilon'):.5f} "
+                            f"orbit_s={value.get('orbit_s')} wall_s={value.get('wall_s')}"
+                            if penalty is not None else str(value.get('error')))
+                         + (' (resumed)' if value.get('resumed') else ''))
     library = report.get('orblib', {})
-    if library:
+    if library and not scan:
         lines.append(f"  orblib {library.get('name')} exists={library.get('exists')} "
                      f"size={library.get('size')} md5={library.get('md5')} "
                      f"metadata_ok={library.get('metadata_ok')} store_consistent={library.get('store_consistent')}")
@@ -355,6 +474,51 @@ def execute(mod, args, report, store, rng_factory, storage):
         report['status'], code = 'failed', 1
         report['error'] = 'saved library failed the metadata/store check'
     report['deltas'] = compute_deltas(report)
+    write_report(report, args.report)
+    print(format_report(report), end='', flush=True)
+    return code
+
+
+def execute_seeds(mod, args, report, store, rng_factory, storage):
+    """IC-seed scan: the `exp` evaluation of one model for every seed, in one process."""
+    params, scan = report['params'], report['ic_seeds']
+    seed_file = args.seed_file or f'seeds_{mod.hostname_proc}.txt'
+    table = seed_table_path(seed_file)
+    files = dict(pool=seed_file, side=seed_file)
+    report['context'].update(seed_file=seed_file, seed_table=table)
+    results = scan['results']
+    for seed, row in read_seed_history(seed_file).items():
+        if seed in scan['requested']:
+            results[str(seed)] = dict(row, ic_seed=seed, status='ok', resumed=True)
+    code = 0
+    try:
+        for seed in scan['requested']:
+            if results.get(str(seed), {}).get('status') == 'ok':
+                print(f'[seeds] ic_seed={seed} already in {seed_file} — skipped', flush=True)
+                continue
+            store.check_stop()
+            print(f'[seeds] ic_seed={seed}', flush=True)
+            mark_seed(seed_file, seed)
+            try:
+                result = dict(run_protocol(mod, 'exp', params, files, args.subsample_seed,
+                                           rng_factory, ic_seed=seed), status='ok')
+            except Exception as error:
+                traceback.print_exc()
+                result = dict(ic_seed=seed, status='failed', error=repr(error))
+            result['finished'] = datetime.datetime.now().isoformat(timespec='seconds')
+            results[str(seed)] = result
+            append_seed_table(table, dict(result, seed=seed))
+            write_report(report, args.report)
+            store.check_stop()
+        failed = [s for s in scan['requested'] if results.get(str(s), {}).get('status') != 'ok']
+        report['status'] = 'failed' if failed else 'ok'
+        report['error'] = f'failed seeds: {failed}' if failed else None
+        code = 1 if failed else 0
+    except storage.StorageStop as error:
+        report['status'], report['error'], code = 'stopped', error.reason, 75
+    except Exception as error:
+        traceback.print_exc()
+        report['status'], report['error'], code = 'failed', repr(error), 1
     write_report(report, args.report)
     print(format_report(report), end='', flush=True)
     return code
@@ -406,6 +570,7 @@ def base_report(args, ref):
                 reference=dict(penalty=ref.get('penalty'), upsilon=ref.get('upsilon'),
                                source=ref.get('source'), line=ref.get('line')),
                 subsample_seed=args.subsample_seed, protocols={}, deltas={},
+                ic_seeds=dict(requested=list(args.ic_seeds), results={}) if args.ic_seeds else None,
                 context={}, grid=None, orblib={},
                 started=datetime.datetime.now().isoformat(timespec='seconds'))
 
@@ -424,6 +589,8 @@ def run(args):
     report['context'], report['grid'] = static_context(mod)
     name, path = mod.orblib_key(*(report['params'][k] for k in ('Q', 'gh', 'rh', 'rho0')))
     report['orblib'] = dict(name=name, path=path, exists=os.path.exists(path))
+    if args.ic_seeds:
+        report['orblib'].update(stored=False)
     if args.preflight:
         report['status'] = 'preflight'
         write_report(report, args.report)
@@ -433,7 +600,8 @@ def run(args):
                                  int(os.environ.get('ORBLIB_RESERVE_BYTES', '2000000000')),
                                  save_slots=int(os.environ.get('ORBLIB_SAVE_SLOTS', '2')))
     prepare_module(mod, store)
-    return execute(mod, args, report, store, numpy.random.default_rng, orblib_storage)
+    driver = execute_seeds if args.ic_seeds else execute
+    return driver(mod, args, report, store, numpy.random.default_rng, orblib_storage)
 
 
 # --------------------------------------------------------------------------
@@ -463,7 +631,10 @@ def summarize(paths):
     for key in ('reuse_minus_exp', 'prod_minus_exp', 'prod_minus_ref', 'exp_minus_ref'):
         summary[key] = _stats([r.get('deltas', {}).get(key) for r in reports])
     peaks = [v.get('peak_rss_mb') for r in reports for v in r.get('protocols', {}).values()]
+    peaks += [v.get('peak_rss_mb') for r in reports
+              for v in ((r.get('ic_seeds') or {}).get('results') or {}).values()]
     summary['peak_rss_mb'] = _stats(peaks)
+    summary['seed_scan'] = summarize_seeds(reports, ref)
     summary['save_s'] = _stats([r['protocols'].get('exp', {}).get('save_s') for r in reports])
     exp, prod = summary['exp'], summary['prod']
     scatter = (prod or {}).get('std') or (exp or {}).get('std')
@@ -474,6 +645,74 @@ def summarize(paths):
                                  'within expected' if worst <= EXPECTED_PEAK_MB else
                                  f'above expected {EXPECTED_PEAK_MB:.0f} MB (see per-protocol peaks)')
     return reports, summary
+
+
+def _parse_time(text):
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize_seeds(reports, ref):
+    scans = [r for r in reports if r.get('ic_seeds')]
+    if not scans:
+        return None
+    rows, owners = [], {}
+    for r in scans:
+        for key, value in r['ic_seeds'].get('results', {}).items():
+            row = dict(seed=int(key), suffix=r.get('suffix'),
+                       **{k: value.get(k) for k in ('status', 'penalty', 'upsilon', 'orbit_s', 'wall_s',
+                                                    'peak_rss_mb', 'omp_threads', 'resumed')})
+            rows.append(row)
+            if row['status'] == 'ok':
+                owners.setdefault(row['seed'], []).append(row['suffix'])
+    rows.sort(key=lambda row: (row['seed'], row['suffix'] or ''))
+    requested = sorted(s for r in scans for s in r['ic_seeds'].get('requested', []))
+    ok = [row for row in rows if row['status'] == 'ok' and row['penalty'] is not None]
+    penalties = [row['penalty'] for row in ok]
+    scan = dict(requested=len(requested), ok=len(ok),
+                missing=sorted(set(requested) - {row['seed'] for row in ok}),
+                seeds_in_several_reports=sorted(s for s, who in owners.items() if len(who) > 1),
+                penalty=_stats(penalties), upsilon=_stats([row['upsilon'] for row in ok]),
+                orbit_s=_stats([row['orbit_s'] for row in ok]), wall_s=_stats([row['wall_s'] for row in ok]),
+                omp_threads=sorted({row['omp_threads'] for row in ok} - {None}),
+                distinct_penalties=len({round(p, 12) for p in penalties}),
+                seed42_penalty=next((row['penalty'] for row in ok if row['seed'] == 42), None),
+                reference_penalty=ref, rows=rows)
+    scan['identical_realisations'] = scan['distinct_penalties'] < len(penalties)
+    stats = scan['penalty']
+    if stats and stats['std']:
+        scan['sem'] = stats['std'] / math.sqrt(stats['n'])
+        cuts = statistics.quantiles(penalties, n=100, method='inclusive')
+        scan['quantiles'] = dict(q16=cuts[15], median=statistics.median(penalties), q84=cuts[83])
+        if ref is not None:
+            scan['mean_minus_ref'] = stats['mean'] - ref
+            scan['mean_minus_ref_in_std'] = (stats['mean'] - ref) / stats['std']
+            scan['fraction_below_ref'] = sum(p <= ref for p in penalties) / len(penalties)
+    # Throughput of this layout: seeds evaluated in this run (resumed ones excluded).
+    fresh = [row for row in ok if not row['resumed']]
+    starts = [t for t in (_parse_time(r.get('started')) for r in scans) if t]
+    ends = [t for t in (_parse_time(r.get('updated')) for r in scans) if t]
+    if fresh and starts and ends and max(ends) > min(starts):
+        hours = (max(ends) - min(starts)).total_seconds() / 3600
+        scan['wall_h'] = hours
+        scan['models_per_hour'] = len(fresh) / hours
+    return scan
+
+
+def format_seed_scan(scan):
+    lines = [f"  seed scan: {scan['ok']}/{scan['requested']} ok, missing={scan['missing']}, "
+             f"distinct penalties={scan['distinct_penalties']}, identical_realisations={scan['identical_realisations']}"]
+    for key in ('penalty', 'sem', 'quantiles', 'reference_penalty', 'mean_minus_ref', 'mean_minus_ref_in_std',
+                'fraction_below_ref', 'seed42_penalty', 'upsilon', 'orbit_s', 'wall_s', 'omp_threads',
+                'wall_h', 'models_per_hour', 'seeds_in_several_reports'):
+        lines.append(f"    {key}: {scan.get(key)}")
+    lines.append('    seed\tstatus\tpenalty\tUpsilon\torbit_s\twall_s\tsuffix')
+    for row in scan['rows']:
+        lines.append('    ' + '\t'.join(str(row.get(k)) for k in
+                                         ('seed', 'status', 'penalty', 'upsilon', 'orbit_s', 'wall_s', 'suffix')))
+    return lines
 
 
 def format_summary(reports, summary):
@@ -488,6 +727,8 @@ def format_summary(reports, summary):
         lines.append(f"  {key}: {summary.get(key)}")
     for key in ('prod_minus_ref_in_scatter', 'grid_identical', 'orblib_names', 'memory_verdict'):
         lines.append(f"  {key}: {summary.get(key)}")
+    if summary.get('seed_scan'):
+        lines += format_seed_scan(summary['seed_scan'])
     return '\n'.join(lines) + '\n'
 
 
@@ -507,7 +748,18 @@ def parse_args(argv=None):
     parser.add_argument('--orblib-dir', default=None)
     parser.add_argument('--side-file', default=None)
     parser.add_argument('--report', default=None)
-    parser.add_argument('--protocols', default='exp,reuse,prod')
+    parser.add_argument('--protocols', default=None,
+                        help='Default exp,reuse,prod; only exp with --ic-seeds')
+    parser.add_argument('--ic-seeds', default=None, metavar='SPEC',
+                        help="IC-seed scan, e.g. '1-100' or '1,5,9-12' (integers >= 1): "
+                             'agama.setRandomSeed(K) + one exp evaluation per seed, no orbit library kept')
+    parser.add_argument('--seed-file', default=None,
+                        help='History file of the seed scan (default seeds_<hostname_proc>.txt); '
+                             'a .tsv with the same stem gets one line per seed')
+    parser.add_argument('--split-seeds', default=None, metavar='SPEC',
+                        help='Print the round-robin split of SPEC over --workers, one comma list '
+                             'per line (standard library only) and exit')
+    parser.add_argument('--workers', type=int, default=None)
     parser.add_argument('--subsample-seed', type=int, default=20261001)
     parser.add_argument('--n_threads', type=int, default=None)
     parser.add_argument('--preflight', action='store_true',
@@ -519,19 +771,37 @@ def parse_args(argv=None):
                         help='Print the rows of a models file tab-separated (incl Q gh rh rho0 '
                              'penalty Upsilon source; standard library only) and exit')
     args = parser.parse_args(argv)
-    if args.summarize is None and args.list_models is None:
+    if args.split_seeds is not None:
+        try:
+            args.split_seeds = split_seeds(parse_seed_list(args.split_seeds), args.workers or 1)
+        except ValueError as error:
+            parser.error(f'--split-seeds: {error}')
+    elif args.summarize is None and args.list_models is None:
         if not args.suffix or not args.orblib_dir:
             parser.error('--suffix and --orblib-dir are required')
+        if args.ic_seeds is not None:
+            try:
+                args.ic_seeds = parse_seed_list(args.ic_seeds)
+            except ValueError as error:
+                parser.error(f'--ic-seeds: {error}')
+        if args.protocols is None:
+            args.protocols = 'exp' if args.ic_seeds else 'exp,reuse,prod'
         args.protocols = [p for p in args.protocols.split(',') if p]
         unknown = set(args.protocols) - set(PROTOCOLS)
         if unknown or not args.protocols or args.protocols[0] != 'exp' or len(set(args.protocols)) != len(args.protocols):
             parser.error('--protocols: exp first, then any of reuse,prod (no repeats)')
+        if args.ic_seeds and args.protocols != ['exp']:
+            parser.error('--ic-seeds runs the exp protocol only (no library is kept for reuse/prod)')
         args.report = args.report or f'report_{args.suffix}.json'
     return args
 
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.split_seeds is not None:
+        for chunk in args.split_seeds:
+            print(','.join(map(str, chunk)))
+        return 0
     if args.list_models is not None:
         models = read_models(args.list_models)
         for row in models:

@@ -512,13 +512,13 @@ def launcher_workdir(tmp_path, avail_mb=8000, history=True):
     return launcher
 
 
-def run_launcher(tmp_path, *args, avail_mb=8000, history=True, **env):
+def run_launcher(tmp_path, *args, avail_mb=8000, history=True, prefix=PREFIX, **env):
     launcher = launcher_workdir(tmp_path, avail_mb, history)
     environment = dict(os.environ, HOME=str(tmp_path), ORBLIB_SWAPFILE='0',
                        ORBLIB_MEMINFO=str(tmp_path / 'meminfo'), ORBLIB_PSI_PATH=str(tmp_path / 'psi'),
                        ORBLIB_WATCH_INTERVAL='1', ORBLIB_STOP_GRACE='1', ORBLIB_MONITOR_INTERVAL='60',
                        SINGLE_BYTES_PER_REPEAT='0', ORBLIB_RESERVE_BYTES='0', **env)
-    result = subprocess.run(['bash', '-c', PREFIX, str(launcher), *args], cwd=tmp_path, text=True,
+    result = subprocess.run(['bash', '-c', prefix, str(launcher), *args], cwd=tmp_path, text=True,
                             capture_output=True, timeout=90, env=environment)
     events_file = tmp_path / 'events'
     events = events_file.read_text().splitlines() if events_file.exists() else []
@@ -772,3 +772,245 @@ def test_multi_launcher_rejects_bad_models_without_side_effects(tmp_path):
     help_run = subprocess.run(['bash', str(MULTI_LAUNCHER), '--help'], capture_output=True,
                               text=True, timeout=15, cwd=tmp_path)
     assert help_run.returncode == 0 and '--models=FILE' in help_run.stdout
+
+
+# --------------------------------------------------------------------------
+# IC-seed scan (--ic-seeds)
+# --------------------------------------------------------------------------
+def test_seed_list_parsing_and_round_robin_split():
+    assert runner.parse_seed_list('1-100') == list(range(1, 101))
+    assert runner.parse_seed_list(' 1,5, 9-12 ') == [1, 5, 9, 10, 11, 12]
+    for bad in ('0', '0-3', '-5', '5-3', '1,1', '1-3,2', '', ',', 'a', '1.5', str(2**31)):
+        with pytest.raises(ValueError):
+            runner.parse_seed_list(bad)
+    chunks = runner.split_seeds(list(range(1, 101)), 4)
+    assert [len(c) for c in chunks] == [25] * 4 and chunks[0][:3] == [1, 5, 9]
+    assert sorted(s for c in chunks for s in c) == list(range(1, 101))
+    assert any(42 in c for c in chunks)
+    with pytest.raises(ValueError):
+        runner.split_seeds([1, 2], 3)
+
+
+def test_seed_mode_keeps_no_library_and_writes_outside_the_pool(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('HOSTNAME_SUFFIX', 'testhost')
+    args = runner.parse_args(['--suffix', 'single20261004_101500r1', '--orblib-dir', 'orblib_single/x_r1',
+                              '--ic-seeds', '2,6,10'])
+    assert args.ic_seeds == [2, 6, 10] and args.protocols == ['exp']
+    argv = runner.module_argv(args)
+    assert '--save-orblib' not in argv and '--reuse-orblib' not in argv
+    config = script_configuration(monkeypatch, argv)
+    assert not config['SAVE_ORBLIB'] and not config['REUSE_ORBLIB'] and config['EXP_ID'] == 'd1_nb250_gh0_ser0'
+    import fnmatch
+    seed_file = f"seeds_{config['hostname_proc']}.txt"
+    patterns = config['storage_patterns'] + config['host_patterns']
+    assert not any(fnmatch.fnmatch(name, p) for name in (seed_file, runner.seed_table_path(seed_file))
+                   for p in patterns)
+    for bad in (['--ic-seeds', '0'], ['--ic-seeds', '1', '--protocols', 'exp,prod']):
+        with pytest.raises(SystemExit):
+            runner.parse_args(['--suffix', 's', '--orblib-dir', 'o', *bad])
+
+
+def test_the_script_never_reseeds_and_samples_the_ics_once():
+    calls = [ast.unparse(n.func) for n in ast.walk(TREE) if isinstance(n, ast.Call)]
+    assert not any(c.endswith('setRandomSeed') for c in calls)
+    assert calls.count('densityStars.sample') == 1
+    assert any(isinstance(n, ast.Import) and n.names[0].name == 'agama' for n in TREE.body)
+
+
+class SeedStore(FakeStore):
+    def check_stop(self):
+        if self.stop:
+            raise storage.StorageStop('stop requested')
+
+
+def seed_module(tmp_path, fail_seeds=(), stop_after=None, store=None):
+    calls = []
+    mod, seen = stub_module(tmp_path, None)
+    mod.agama = SimpleNamespace(setRandomSeed=lambda k: calls.append(('seed', k)))
+
+    def halo(pc, model, bounds, *rest, direct_params=None):
+        seed = calls[-1][1]
+        calls.append(('halo', seed, mod.UpsFile, list(mod._ups_recent)))
+        mod._ups_recent.append(0.6)
+        if stop_after is not None and seed == stop_after:
+            store.stop = True
+        if seed in fail_seeds:
+            return -1e6
+        penalty = 1.3 + seed * 1e-3
+        with open(mod.UpsFile, 'a') as stream:
+            stream.write(f'# storage-context ctx\n# Server: {mod.hostname_proc}\n'
+                         f'90.000 0.2 0 2 90 0.6{seed} {penalty} 2026-10-04 10:00:00\n'
+                         '# orbitlib times (s): sample_s=0.5 orbit_s=600.0 total_s=600.5 '
+                         '(numOrbits=10 trajsize_stored=0 intTime=100.0 omp_threads=8)\n'
+                         '# End of history\n\n')
+        mod.number_of_find_w_U += 4
+        return -penalty
+
+    mod.halo_IC_lib_weights_pca_fixed = halo
+    return mod, calls
+
+
+def seed_args(tmp_path, seeds):
+    return args_for(tmp_path, ic_seeds=seeds, seed_file=str(tmp_path / 'seeds_h_r0.txt'))
+
+
+def run_seed_scan(tmp_path, seeds, **behaviour):
+    store = SeedStore()
+    mod, calls = seed_module(tmp_path, store=store, **behaviour)
+    runner.prepare_module(mod, store)
+    args = seed_args(tmp_path, seeds)
+    report = runner.base_report(args, runner.resolve_reference(args))
+    code = runner.execute_seeds(mod, args, report, store, lambda seed: ('rng', seed), storage)
+    return code, json.loads(Path(args.report).read_text()), calls
+
+
+def test_seed_scan_seeds_each_evaluation_and_records_the_seed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    write_history(tmp_path)
+    code, report, calls = run_seed_scan(tmp_path, '3,7,42', fail_seeds=(7,))
+    assert code == 1 and report['status'] == 'failed' and '7' in report['error']
+    assert [c[:2] for c in calls] == [('seed', 3), ('halo', 3), ('seed', 7), ('halo', 7),
+                                      ('seed', 42), ('halo', 42)]
+    assert all(c[2].endswith('seeds_h_r0.txt') and c[3] == [] for c in calls if c[0] == 'halo')
+    results = report['ic_seeds']['results']
+    assert results['3']['status'] == 'ok' and results['7']['status'] == 'failed'
+    assert results['42']['penalty'] == pytest.approx(1.342) and results['42']['omp_threads'] == 8
+    assert results['42']['ic_seed'] == 42 and results['42']['orbit_s'] == 600.0
+    text = (tmp_path / 'seeds_h_r0.txt').read_text().splitlines()
+    marks = [i for i, line in enumerate(text) if line.startswith('# ic_seed:')]
+    assert [text[i].split()[2] for i in marks] == ['3', '7', '42']
+    assert text[marks[0] + 2] == '# Server: h_d1_nb250_gh0_ser0_s'      # seed line precedes the block
+    assert set(runner.read_seed_history(tmp_path / 'seeds_h_r0.txt')) == {3, 42}
+    table = (tmp_path / 'seeds_h_r0.tsv').read_text().splitlines()
+    assert table[0].split('\t') == list(runner.SEED_TABLE_COLUMNS)
+    assert [row.split('\t')[:2] for row in table[1:]] == [['3', 'ok'], ['7', 'failed'], ['42', 'ok']]
+    assert 'seed     42 ok' in runner.format_report(report)
+
+    # Resume: only the failed seed is evaluated again; the others come from the history.
+    code, report, calls = run_seed_scan(tmp_path, '3,7,42')
+    assert code == 0 and report['status'] == 'ok'
+    assert [c[:2] for c in calls] == [('seed', 7), ('halo', 7)]
+    assert report['ic_seeds']['results']['3']['resumed'] is True
+    assert set(runner.read_seed_history(tmp_path / 'seeds_h_r0.txt')) == {3, 7, 42}
+
+
+def test_seed_scan_stops_between_seeds(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    write_history(tmp_path)
+    code, report, calls = run_seed_scan(tmp_path, '1-4', stop_after=2)
+    assert code == 75 and report['status'] == 'stopped'
+    assert [c[1] for c in calls if c[0] == 'halo'] == [1, 2]
+    assert sorted(report['ic_seeds']['results']) == ['1', '2']
+
+
+def test_seed_history_parser_ignores_incomplete_and_failed_blocks(tmp_path):
+    path = tmp_path / 'seeds.txt'
+    path.write_text('# ic_seed: 1\n# Server: h\n90 1 0 2 9 0.5 1.31 d t\n# End of history\n\n'
+                    '# ic_seed: 2\n# Server: h\n90 1 0 2 9 0.5 1.32 d t\n'                # no end
+                    '#Error with parameters ... Error: x'                               # no newline
+                    )
+    runner.mark_seed(path, 3)
+    with open(path, 'a') as stream:
+        stream.write('# Server: h\n90 1 0 2 9 0.5 1000000.0 d t\n# End of history\n\n'
+                     '# Server: h\n90 1 0 2 9 0.5 1.20 d t\n# End of history\n')   # no seed line
+    runner.mark_seed(path, 4)
+    with open(path, 'a') as stream:
+        stream.write('# Server: h\n90 1 0 2 9 0.7 1.34 d t\n# End of history\n')
+    assert '\n# ic_seed: 3 ' in path.read_text()
+    assert runner.read_seed_history(path) == {1: dict(upsilon=0.5, penalty=1.31),
+                                              4: dict(upsilon=0.7, penalty=1.34)}
+    assert runner.read_seed_history(tmp_path / 'missing.txt') == {}
+
+
+def seed_report(path, suffix, results, requested, started, updated, status='ok'):
+    path.write_text(json.dumps(dict(
+        status=status, suffix=suffix, reference=dict(penalty=1.30), grid=dict(identical=True),
+        orblib=dict(name='orblib_x.npz', stored=False), protocols={}, deltas={},
+        started=started, updated=updated,
+        ic_seeds=dict(requested=requested, results={
+            str(s): dict(status='ok', penalty=p, upsilon=0.66, orbit_s=600.0, wall_s=630.0,
+                         peak_rss_mb=2400.0, omp_threads=8, resumed=s == 1) if p is not None
+            else dict(status='failed', error='x') for s, p in results.items()}))))
+    return path
+
+
+def test_seed_scan_summary(tmp_path):
+    paths = [seed_report(tmp_path / 'r0.json', 'r0', {1: 1.28, 3: 1.32, 42: 1.33}, [1, 3, 42],
+                         '2026-10-04T10:00:00', '2026-10-04T12:00:00'),
+             seed_report(tmp_path / 'r1.json', 'r1', {2: 1.34, 4: None}, [2, 4],
+                         '2026-10-04T10:00:00', '2026-10-04T11:00:00', status='failed')]
+    reports, summary = runner.summarize(paths)
+    scan = summary['seed_scan']
+    assert (scan['requested'], scan['ok'], scan['missing']) == (5, 4, [4])
+    assert scan['penalty']['mean'] == pytest.approx(1.3175) and scan['seed42_penalty'] == 1.33
+    assert scan['sem'] == pytest.approx(scan['penalty']['std'] / 2)
+    assert scan['quantiles']['median'] == pytest.approx(1.325)
+    assert scan['mean_minus_ref'] == pytest.approx(0.0175) and scan['fraction_below_ref'] == 0.25
+    assert scan['distinct_penalties'] == 4 and scan['identical_realisations'] is False
+    assert scan['omp_threads'] == [8] and scan['models_per_hour'] == pytest.approx(1.5)
+    assert [row['seed'] for row in scan['rows']] == [1, 2, 3, 4, 42]
+    assert summary['peak_rss_mb']['max'] == 2400.0
+    text = runner.format_summary(reports, summary)
+    assert 'seed scan: 4/5 ok, missing=[4]' in text and '\n    42\tok\t1.33\t' in text
+    assert runner.main(['--summarize', str(paths[0])]) == 0
+    assert runner.main(['--summarize', *map(str, paths)]) == 1
+    assert runner.summarize([fake_report(tmp_path / 'p.json', 'p', 1.26, 1.25, 1500)])[1]['seed_scan'] is None
+
+
+SEED_PREFIX = PREFIX.replace(
+    "local prev='' sfx='' dir='' report='' side=''",
+    "local prev='' sfx='' dir='' report='' side='' seedf='' seeds=''").replace(
+    '--report) report="${a#/workspace/}" ;; --side-file) side="$a" ;;',
+    '--report) report="${a#/workspace/}" ;; --side-file) side="$a" ;;\n'
+    '            --seed-file) seedf="$a" ;; --ic-seeds) seeds="$a" ;;').replace(
+    '    mkdir -p "$WORK_DIR/$dir"\n',
+    r'''    if [ -n "$seedf" ]; then
+        for s in ${seeds//,/ }; do
+            printf '# ic_seed: %s\n# Server: x\n90.000 0.267 0 2.41 90.4 0.66 1.3 d t\n# End of history\n\n' "$s" >> "$WORK_DIR/$seedf"
+        done
+        printf 'seed\tstatus\n' > "$WORK_DIR/${seedf%.txt}.tsv"
+        command python3 -c 'import json, sys
+seeds = [int(s) for s in sys.argv[2].split(",")]
+json.dump(dict(status="ok", suffix=sys.argv[1], reference=dict(penalty=1.24), protocols={}, deltas={},
+               ic_seeds=dict(requested=seeds, results={str(s): dict(status="ok", penalty=1.3 + s / 1000) for s in seeds})),
+          open(sys.argv[3], "w"))' "$sfx" "$seeds" "$WORK_DIR/$report"
+        return 0
+    fi
+    mkdir -p "$WORK_DIR/$dir"
+''')
+
+
+def test_launcher_seed_scan_splits_seeds_and_keeps_no_library(tmp_path):
+    assert SEED_PREFIX.count('seedf') > 3
+    result, events = run_launcher(tmp_path, '--ic-seeds=1-10', '--repeats=4', prefix=SEED_PREFIX)
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    runs = [e.split() for e in events if e.startswith('run ')]
+    assert len(runs) == 4
+    lists = [run[run.index('--ic-seeds') + 1] for run in runs]
+    seeds = [int(s) for chunk in lists for s in chunk.split(',')]
+    assert sorted(seeds) == list(range(1, 11)) and '1,5,9' in lists
+    files = {run[run.index('--seed-file') + 1] for run in runs}
+    assert len(files) == 4 and all(f.startswith('seeds_testhost_d1_nb250_gh0_ser0_single') for f in files)
+    assert not any('--protocols' in p for run in runs for p in run)
+    uploads = [e for e in events if e.startswith('rclone copyto')]
+    assert not any(' yandex:galAgama/out_' in e for e in uploads)
+    remote = 'yandex:galAgama/seed_scan/seeds_d1_nb250_gh0_ser0_i90.0_'
+    assert sum(remote in e and '/seeds_testhost_' in e for e in uploads) == 8     # .txt + .tsv per worker
+    assert any(remote in e and 'summary_single_' in e for e in uploads)
+    assert not any(e.startswith(('storage ', 'rclone lsf')) for e in events)
+    assert not list(tmp_path.glob('orblib_single/*/*.npz'))
+    shutdown = events.index('shutdown +1')
+    assert shutdown > max(i for i, e in enumerate(events) if e.startswith('rclone copyto'))
+    log = next(tmp_path.glob('launch_seeds_*.log')).read_text()
+    assert 'seed scan: 10/10 ok' in log and 'библиотеки не сохраняются' in log
+
+
+def test_launcher_seed_scan_rejects_bad_requests_without_side_effects(tmp_path):
+    for args in (('--ic-seeds=0-3',), ('--ic-seeds=1-2', '--repeats=4'),
+                 ('--ic-seeds=1-10', '--protocols=exp,prod')):
+        work = tmp_path / f'case{len(list(tmp_path.iterdir()))}'
+        work.mkdir()
+        result, events = run_launcher(work, *args, prefix=SEED_PREFIX)
+        assert result.returncode == 2, (args, result.stdout + result.stderr)
+        assert not events and not list(work.glob('launch_*.log'))

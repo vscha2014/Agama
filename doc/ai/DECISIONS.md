@@ -195,3 +195,24 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   IC sampling, torch/BoTorch and solveOpt unchanged. Results must be
   bit-identical (orbits are independent rows); only wall time changes.
 - **Production** untouched; porting is Q23.
+
+## 2026-10-04 — Q22: distinct AGAMA IC seeds in the diagnostic runner (user acting for the PI)
+
+- **Decision** | option A: `agama.setRandomSeed(K)` (K ≥ 1) is called **only**
+  by `run_single_model.py --ic-seeds`, right before each `exp` evaluation.
+  Search (`Fornax_P21_PCA_w3Sersic_orblib_exp.py`) and production still never
+  seed AGAMA; CONTRACT §Randomness unchanged. Per-process seeding of the
+  search would be a separate question (Q24, not asked yet).
+- **Run design** | 100 seeds (1…100, includes AGAMA's start seed 42 as a
+  check against the default-stream result) of the production free-Q best at
+  `incl = 90` (d1); no orbit library saved or reused; rows only in separate
+  `seeds_*` history files with `# ic_seed: K` per block plus a `.tsv`, nothing
+  in the d1 pool or the catalog; layout 4 × 8 CPU, each container runs its 25
+  seeds sequentially in one process; VM shutdown at the end as usual.
+- **Layout reasoning** | with the OpenMP fix one model is ≈145 s of 32-thread
+  integration + ≈20 s mostly serial Upsilon search (no save). ×20.5 on 32 vCPU
+  suggests hyper-threading, so parallel containers cannot speed up integration
+  itself; they only overlap the serial phases (~10 % by estimate). 4 × 8 keeps
+  the peak at ≈10 GB; 8 × 4 gains little with ~1 GB margin per container.
+  The run also measures the 4 × 8 throughput (`models_per_hour`).
+- Not run yet: the VM run needs an explicit go-ahead.

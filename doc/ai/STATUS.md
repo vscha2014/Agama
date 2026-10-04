@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-03 (multi-model launcher).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-04 (IC-seed scan mode).
 
 ## Where the science stands
 
@@ -29,32 +29,32 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
   launcher with 4 workers, host swap, swapless container limit, watchdogs,
   emergency upload. **Measured on the VM 2026-10-01**: integration+save ≈1 GB,
   peaks only in the solve phases (higher for float64 reuse), no host pressure.
-- Single-model check (uncommitted `py/run_single_model.py`,
-  `py/launch_single_model.sh`) **ran OK** 2026-10-01 (local
-  `results/single_d1_nb250_gh0_ser0_i90.0/NOTES.md`): storage round trip exact,
-  Upsilon speed-ups negligible, grid identical; penalty above the reference but
-  inside production's scatter there. AGAMA's RNG starts from one seed per process
-  ⇒ the 4 repeats were one realisation (Q22). Single-thread `agama.orbit` (torch shares libgomp) fixed in the harness 10-03
-  and verified (same MD5, ≈20× faster integration); production port = Q23.
-- New (uncommitted, not run): `py/launch_multi_model.sh --models=FILE` — N
-  different models in parallel, `exp` protocol only, all libraries delivered
-  (§3c). Local `results/multi_d1_nb250_gh0_ser0_top4/`: global best + 3 valley ends.
-- Branch ahead of origin (no push credentials). Production scripts untouched.
+- Single-model check (`run_single_model.py`, `launch_single_model.sh`) and
+  multi-model launcher (§3b–§3c) committed in `70375a3`; single check ran OK
+  2026-10-01 (local `results/single_d1_nb250_gh0_ser0_i90.0/NOTES.md`), but its
+  repeats were one AGAMA realisation (same start seed per process). OpenMP fix
+  for `agama.orbit` verified 10-03 (same MD5, ≈20× faster); production port = Q23.
+- **New, uncommitted, not run:** IC-seed scan (Q22 option A, DECISIONS
+  2026-10-04, §3d): `launch_single_model.sh --ic-seeds=1-100 --repeats=4` —
+  `agama.setRandomSeed(K)` per seed in the runner only, no libraries, rows in
+  separate `seeds_*` files (`# ic_seed: K`) + `.tsv`, resumable, `seed_scan`
+  summary (mean/std/SEM, seed-42 check, throughput). 170 mocked tests pass;
+  production scripts and the search untouched.
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
-0. On go-ahead: multi-model run of `models_top4.txt` (`--preflight` first).
-1. Distinct IC seeds for repeats (Q22) — needed to judge harness vs production.
-2. `--reuse-orblib` pass over the seven 09-29 libraries, 4 workers (no `prepare`/`prune` first).
-3. Only then a fresh 4-worker `--Q1` search on the widened bounds; or profile
-   runs at fixed `rh = 3.5 / 5 / 7 kpc`, re-optimising `gh, rho0, Upsilon`.
-4. Later: batch re-score/fetch mode for changed data (tar offsets then).
-5. Decide the J-factor weighting method (Q16) before finalising article numbers.
-6. Recompute the 77 lost orbit libraries targeted, not by rerunning the search.
+1. On go-ahead: copy `run_single_model.py` + `launch_single_model.sh` to the VM,
+   `bash launch_single_model.sh --ic-seeds=1-100 --repeats=4 --preflight`, then
+   without `--preflight` (≈4–4.5 h estimated, 4×8). Check seed 42 = default
+   stream, then std/SEM vs production neighbours (rule in `HANDOFF_Q22.md`).
+2. `--reuse-orblib` pass over the seven 09-29 libraries, 4 workers (no `prepare`/`prune` first);
+   then a 4-worker `--Q1` search on widened bounds or fixed-`rh` profile runs (3.5/5/7 kpc).
+3. Later: batch re-score/fetch mode (tar offsets then); Q16 J weighting before
+   final article numbers; targeted recompute of the 77 lost libraries.
 
 ## Open questions
 
 Q15 (Upsilon Brent speed-ups into production), Q16 (J weighting / sampling
 density), Q17–Q19 (shard consolidation, `ic`/`inttime` storage, shard naming),
-Q20 (`pipefail` bug in the production launcher), Q22 (IC seeds for diagnostic
-repeats) — see `questions_for_pi.md`. Q21 is answered (see `DECISIONS.md`).
+Q20 (`pipefail` bug in the production launcher), Q23 (OpenMP wrap in
+production) — see `questions_for_pi.md`. Q21, Q22 are answered (`DECISIONS.md`).

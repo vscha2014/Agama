@@ -21,6 +21,13 @@
 #     copy is removed after verification). Skipped if the name already has a
 #     receipt. r1..r(N-1) carry the same name and stay on the VM;
 #   * VM shutdown unless --no-shutdown.
+#
+# IC-seed scan (--ic-seeds=1-100, DECISIONS 2026-10-04): the seeds are split
+# round-robin over the --repeats containers; each container evaluates its seeds
+# one after another in ONE process (agama.setRandomSeed(K) + exp protocol).
+# No orbit library is saved, nothing goes to the d1 pool or the catalog:
+# seeds_<host>_d1_nb250_gh0_ser0_single<TS>r<i>.txt/.tsv, reports, summary and
+# logs → galAgama/seed_scan/<RUN_TAG>_<TS>/.
 set -euo pipefail
 
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,6 +41,7 @@ REPEATS=4
 DO_SHUTDOWN=1
 DO_UPLOAD=1
 PREFLIGHT=0
+SEED_SPEC=""
 declare -a RUNNER_ARGS=()
 
 for arg in "$@"; do
@@ -48,6 +56,9 @@ for arg in "$@"; do
                 '                   без выгрузки и без выключения.' \
                 '  --Q= --gh= --rh= --rho0= --ref-penalty= --ref-upsilon= --params-from=GLOB' \
                 '  --protocols=exp,reuse,prod   Передаются в run_single_model.py.' \
+                '  --ic-seeds=1-100 Скан seed AGAMA: seed делятся по кругу между --repeats контейнерами,' \
+                '                   каждый считает свои подряд в одном процессе; только exp,' \
+                '                   библиотеки не сохраняются, в пул d1 ничего не пишется.' \
                 'По умолчанию: строка с минимальным penalty при --incl из 4UpsBoTorch_PCA_Sersic_*.txt' \
                 '  (free-Q история прода) в каталоге запуска; конфигурация d1_nb250_gh0_ser0.' \
                 'Память: ORBLIB_SWAPFILE=16G, ORBLIB_MEM_LIMIT, ORBLIB_SAVE_SLOTS=2, ORBLIB_MIN_AVAIL_MB=2048,' \
@@ -60,6 +71,7 @@ for arg in "$@"; do
         --no-shutdown)   DO_SHUTDOWN=0      ;;
         --no-upload)     DO_UPLOAD=0        ;;
         --preflight)     PREFLIGHT=1        ;;
+        --ic-seeds=*)    SEED_SPEC="${arg#*=}" ;;
         --Q=*|--gh=*|--rh=*|--rho0=*|--ref-penalty=*|--ref-upsilon=*|--params-from=*|--protocols=*)
             RUNNER_ARGS+=("$arg") ;;
         *)
@@ -72,6 +84,20 @@ if [ "$PREFLIGHT" -eq 1 ]; then
     REPEATS=1
     DO_UPLOAD=0
     DO_SHUTDOWN=0
+fi
+SEED_MODE=0
+if [ -n "$SEED_SPEC" ]; then
+    SEED_MODE=1
+    DO_UPLOAD=0          # библиотеки в seed-режиме не сохраняются
+    for a in ${RUNNER_ARGS[@]+"${RUNNER_ARGS[@]}"}; do
+        case "$a" in
+            --protocols=exp) ;;
+            --protocols=*)
+                echo "ОШИБКА: --ic-seeds считает только протокол exp (получено '$a')" >&2
+                exit 2
+                ;;
+        esac
+    done
 fi
 
 NTFY_TOPIC="${NTFY_TOPIC:-GalaxySchwarzschildFornax}"
@@ -105,6 +131,10 @@ INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 RUN_TAG="single_${EXP_ID}_i${INCL_FMT}"
 SINGLE_ROOT="${WORK_DIR}/orblib_single"
 RESULTS_REMOTE="${REMOTE_DIR}/single_model/${RUN_TAG}_${TIMESTAMP}"
+if [ "$SEED_MODE" -eq 1 ]; then
+    RUN_TAG="seeds_${EXP_ID}_i${INCL_FMT}"
+    RESULTS_REMOTE="${REMOTE_DIR}/seed_scan/${RUN_TAG}_${TIMESTAMP}"
+fi
 LOGFILE="${WORK_DIR}/launch_${RUN_TAG}_${TIMESTAMP}.log"
 MONITOR_LOG="${WORK_DIR}/monitor_${RUN_TAG}_${TIMESTAMP}.log"
 SUMMARY="${WORK_DIR}/summary_single_${TIMESTAMP}.txt"
@@ -115,7 +145,17 @@ if ! [[ "$REPEATS" =~ ^[0-9]+$ ]] || [ "$REPEATS" -lt 1 ] || [ "$REPEATS" -gt "$
     exit 1
 fi
 
-declare -a SUFFIXES ORBLIB_DIRS REPORTS CPU_RANGES THREADS_ARR NAMES
+declare -a SEED_LISTS=()
+if [ "$SEED_MODE" -eq 1 ]; then
+    # Проверка и раскладка seed хостовым python3 (только стандартная библиотека).
+    _split="$(python3 "${WORK_DIR}/${RUNNER}" --split-seeds "$SEED_SPEC" --workers "$REPEATS")" || {
+        echo "ОШИБКА: --ic-seeds='${SEED_SPEC}' некорректен для ${REPEATS} контейнеров" >&2
+        exit 2
+    }
+    mapfile -t SEED_LISTS <<< "$_split"
+fi
+
+declare -a SUFFIXES ORBLIB_DIRS REPORTS CPU_RANGES THREADS_ARR NAMES SEED_FILES
 _base=$((N_VCPU / REPEATS))
 _rem=$((N_VCPU % REPEATS))
 _start=0
@@ -127,6 +167,7 @@ for ((i = 0; i < REPEATS; i++)); do
     ORBLIB_DIRS[i]="orblib_single/${TIMESTAMP}_r${i}"
     REPORTS[i]="report_single_${TIMESTAMP}_r${i}.json"
     NAMES[i]="agama_single_${HOSTNAME_ENV}_${TIMESTAMP}_r${i}"
+    SEED_FILES[i]="seeds_${HOSTNAME_ENV}_${EXP_ID}_${SUFFIXES[i]}.txt"
     CPU_RANGES[i]="${_start}-${_end}"
     THREADS_ARR[i]=$_size
     _start=$((_end + 1))
@@ -223,7 +264,8 @@ emergency_upload() {
              "${WORK_DIR}/dockerlog_${RUN_TAG}_r"*"_${TIMESTAMP}.log" \
              "${WORK_DIR}/report_single_${TIMESTAMP}_r"* \
              "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r"*.txt \
-             "${WORK_DIR}/single_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r"*.txt
+             "${WORK_DIR}/single_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r"*.txt \
+             "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r"*
     do
         upload_file "$f" "${dest}/$(basename "$f")" || true
     done
@@ -392,6 +434,10 @@ run_container() {
     local proc_log="${WORK_DIR}/dockerlog_${RUN_TAG}_r${i}_${TIMESTAMP}.log"
     local extra=()
     [ "$PREFLIGHT" -eq 1 ] && extra+=(--preflight)
+    if [ "$SEED_MODE" -eq 1 ]; then
+        extra+=(--ic-seeds "${SEED_LISTS[$i]}" --seed-file "${SEED_FILES[$i]}")
+        log "  Контейнер r${i}: seed ${SEED_LISTS[$i]} → ${SEED_FILES[$i]}"
+    fi
     log "  Контейнер r${i}: CPU=${CPU_RANGES[$i]} suffix=${sfx} orblib=${ORBLIB_DIRS[$i]}"
     set +e
     # --memory-swap == --memory: swap контейнеру запрещён, превышение → OOM-kill (137).
@@ -450,6 +496,7 @@ log "  hostname         = $HOSTNAME_ENV"
 log "  runner           = $RUNNER"
 log "  incl / EXP_ID    = $INCL / $EXP_ID"
 log "  реализаций       = $REPEATS (preflight=${PREFLIGHT})"
+[ "$SEED_MODE" -eq 1 ] && log "  скан seed        = ${SEED_SPEC} по кругу на ${REPEATS} контейнеров, без библиотек"
 log "  параметры        = ${RUNNER_ARGS[*]:-по умолчанию (min penalty при incl=${INCL} из 4UpsBoTorch_PCA_Sersic_*.txt)}"
 log "  orblib           = ${SINGLE_ROOT}/${TIMESTAMP}_r*"
 log "  выгрузка .npz r0 = $DO_UPLOAD → ${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}"
@@ -559,6 +606,7 @@ while :; do
                         -o -name "report_single_${TIMESTAMP}_r*" \
                         -o -name "out_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r*.txt" \
                         -o -name "single_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r*.txt" \
+                        -o -name "seeds_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r*" \
                         -o -path "*/${TIMESTAMP}_r*/*.npz*" \) \
                      -printf '%T@\n' 2>/dev/null \
                   | sort -n | tail -1 | cut -d. -f1)
@@ -610,7 +658,13 @@ FINAL_RC=0
 # ==============================================================
 log ""
 log "ШАГ 4: Выгрузка истории и отчётов"
-if [ "$PREFLIGHT" -eq 0 ]; then
+if [ "$SEED_MODE" -eq 1 ]; then
+    # Главный продукт скана — файлы seed: их невыгрузка считается ошибкой.
+    for f in "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_single${TIMESTAMP}r"*; do
+        [ -f "$f" ] || continue
+        upload_file "$f" "${RESULTS_REMOTE}/$(basename "$f")" || FINAL_RC=1
+    done
+elif [ "$PREFLIGHT" -eq 0 ]; then
     for ((i = 0; i < REPEATS; i++)); do
         pool="${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${SUFFIXES[$i]}.txt"
         # Уникальное имя в пуле d1: без слияния в файл хоста, ничего не перезаписывается.
@@ -634,7 +688,9 @@ log "ШАГ 5: Библиотека орбит"
 r0_status="$(report_field "${WORK_DIR}/${REPORTS[0]}" status)"
 r0_name="$(report_field "${WORK_DIR}/${REPORTS[0]}" orblib.name)"
 r0_root="${WORK_DIR}/${ORBLIB_DIRS[0]}"
-if [ "$DO_UPLOAD" -ne 1 ]; then
+if [ "$SEED_MODE" -eq 1 ]; then
+    log "  Скан seed: библиотеки не сохраняются, выгружать нечего"
+elif [ "$DO_UPLOAD" -ne 1 ]; then
     log "  Выгрузка отключена (--no-upload/--preflight)"
 elif [ "$r0_status" != "ok" ] || [ -z "$r0_name" ] || [ ! -f "${r0_root}/${r0_name}" ]; then
     log "  r0 не дал проверенной библиотеки (status='${r0_status}', name='${r0_name}') — выгрузка пропущена"

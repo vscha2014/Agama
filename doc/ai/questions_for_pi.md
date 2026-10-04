@@ -87,22 +87,6 @@ log uploaded right after step 3, `curl -f` checked). The identical construct is
 still in `py/launch_docker_parallel.sh`. **Question:** approve a separate task
 to fix production?
 
-## Q22. Distinct AGAMA IC seeds for diagnostic repeats  [affects: CONTRACT §Randomness, `run_single_model.py`]
-
-AGAMA's RNG starts from the same seed in every fresh process, so the 4 parallel
-repeats of the single-model check produced bit-identical libraries (same MD5)
-and the IC-realisation scatter needed to judge `prod − ref` was not measured.
-In the search the stream differs only because each process advances it.
-The 2026-10-03 multi-model run shows the consequence: four different models,
-re-evaluated in fresh processes, all came out above their production penalties
-by a similar amount — same seed and halo-independent Sersic positions ⇒ shared
-noise, so a harness-vs-production offset cannot be told from one realisation.
-Options: (A) `agama.setRandomSeed(base + k)` per repeat in the diagnostic runner
-only (search/production untouched); (B) no seeding — use production's
-near-duplicate rows as the scatter estimate (cheap, but neighbours are not
-exactly the same point). Recommendation: A, plus logging the seed. Blocked: a
-quantitative "within scatter" verdict of the memory-fix check.
-
 ## Q23. Orbit integration runs on one thread (torch shares AGAMA's libgomp)  [affects: production speed, `_yaVM.py`]
 
 Live check 2026-10-03: during `agama.orbit` one thread at ~100 %, no OpenMP team,

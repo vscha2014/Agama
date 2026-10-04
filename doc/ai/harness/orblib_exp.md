@@ -332,6 +332,48 @@ split evenly), without protocol comparison: `run_single_model.py --protocols exp
   upload, no shutdown. Lock `orblib_single/.launcher.lock` is shared with
   `launch_single_model.sh`; memory protections/watchdogs/shutdown as §3b.
 
+## 3d. IC-seed scan (`--ic-seeds`, Q22 option A, DECISIONS 2026-10-04)
+
+Measures the orbit-IC realisation scatter of **one** model. Diagnostic only:
+the search and production never call `agama.setRandomSeed` (CONTRACT §Randomness).
+Tests: `tests/test_single_model.py` (`*seed*`).
+
+- `bash launch_single_model.sh --ic-seeds=1-100 --repeats=4 [--preflight]`
+  (point as in §3b, default = min-penalty row at `--incl`). Seeds (integers
+  ≥ 1, ranges/lists; `0` = clock in AGAMA ⇒ rejected) are split round-robin by
+  `run_single_model.py --split-seeds SPEC --workers N` (stdlib): container j
+  gets seeds j+1, j+1+N, … Bad spec, more containers than seeds or
+  `--protocols` ≠ `exp` ⇒ exit 2 before any side effect.
+- Each container imports the module **once** (saves ~18 s/seed) and for every
+  seed calls `agama.setRandomSeed(K)` right before `halo_IC_lib_weights_pca_fixed`
+  (`exp` protocol, empty `_ups_recent`, same `--subsample-seed`). The reset
+  covers all per-thread AGAMA streams and `densityStars.sample()` is the only
+  RNG consumer of the script, run single-threaded ⇒ the realisation depends on
+  the seed only (not on order, layout or earlier seeds). AGAMA's start seed is
+  42 (`src/math_random.cpp`) ⇒ seed 42 should reproduce the default-stream
+  result of a fresh process — a built-in check of the mechanism.
+- No library: the module gets neither `--save-orblib` nor `--reuse-orblib`
+  (every seed is a new realisation under the same library name). The local
+  `Store` is kept for STOP/claim handling only.
+- History: `seeds_<host>_d1_nb250_gh0_ser0_single<TS>r<i>.txt` (no pool glob
+  matches `seeds_*`), the standard block preceded by `# ic_seed: K`; one line
+  per seed in the `.tsv` with the same stem (seed, status, penalty, Upsilon,
+  probes, sample/orbit/solveOpt/wall s, peak RSS, `omp_threads`, time).
+  A rerun with the same `--seed-file` skips seeds whose block is complete;
+  a failed seed is recorded and the scan continues (container exit 1);
+  STOP/SIGTERM ⇒ exit 75 between or inside evaluations.
+- Report `report_single_<TS>_r<i>.json` → `ic_seeds.requested/results`;
+  `--summarize` adds `seed_scan`: n ok / missing, mean/std/SEM, q16/median/q84,
+  `mean_minus_ref` (+ in std, fraction of seeds ≤ ref), `seed42_penalty`,
+  `distinct_penalties`/`identical_realisations`, orbit/wall time,
+  `omp_threads`, `models_per_hour` (layout throughput) and the per-seed table.
+- Upload: seed files (failure ⇒ exit code 1), reports, summary, logs →
+  `galAgama/seed_scan/seeds_d1_nb250_gh0_ser0_i<incl>_<TS>/`; nothing to `galAgama/`
+  (pool) or to the catalog. Memory protections, watchdogs, shutdown as §3b.
+- Layout: 4×8 recommended (overlaps the single-threaded Upsilon search of one
+  container with the integration of others; peak ≈ 4 × 2.6 GB). 1×32 is ~10 %
+  slower by estimate; 8×4 gains little and leaves ~1 GB margin per container.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -345,7 +387,8 @@ cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
     test_orblib_storage.py test_single_model.py --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
     py/orblib_storage.py py/run_single_model.py tests/test_orblib_q1.py
-bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh && git diff --check
+bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
+    && bash -n py/launch_multi_model.sh && git diff --check
 ```
 
 Do not run `python -m pytest` from the repo root: local `py/` shadows pytest's
