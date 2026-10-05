@@ -185,6 +185,38 @@ def test_pca_has_three_directions_and_roundtrips(tmp_path, penalty):
 
 
 @pytest.mark.parametrize('q1', [False, True])
+def test_pca_box_stays_finite_when_best_rows_share_a_bound_value(tmp_path, q1):
+    ns = functions('WeightedScaler', 'build_initial_pca_from_bootstrap', '_update_pca_model',
+                   'adaptive_penalty_cutoff', 'pca_to_params_fixed', 'params_to_pca_fixed',
+                   q1=q1, PCA=NumpyPCA, torch=SimpleNamespace(tensor=ArrayTensor))
+    rng = numpy.random.default_rng(5)
+    results = [dict(params=dict(Q=1.0 if q1 else rng.uniform(0.2, 2.0), gh=rng.uniform(0, 0.2),
+                                rh=3.5, rho0=rng.uniform(34, 45)), penalty=3.54 + 0.01 * i)
+               for i in range(3)]
+    results += [dict(params=dict(Q=1.0 if q1 else rng.uniform(0.2, 2.0), gh=rng.uniform(0, 1.6),
+                                 rh=rng.uniform(0.5, 3.5), rho0=rng.uniform(34, 120)),
+                     penalty=rng.uniform(6.5, 10.0)) for _ in range(12)]
+    floor = ns['WeightedScaler'].std_floor(BOUNDS, True)
+    numpy.testing.assert_allclose(floor, 0.05 * numpy.array(
+        [2.45, 1.6, numpy.log10(7.0 / 0.5), numpy.log10(120.0 / 10.0)]))
+    model = ns['build_initial_pca_from_bootstrap'](
+        results, BOUNDS, n_components=3, output_file=str(tmp_path / 'pca.log'))
+    assert numpy.all(model['scaler'].scale_ >= floor)
+    assert numpy.all(model['pca_bounds_upper'] - model['pca_bounds_lower'] < 100)
+    model_new, *_ = ns['_update_pca_model'](
+        model, model['data_good'], [r['params'] for r in results[:3]], [3.5] * 3,
+        BOUNDS, True, 2.5, ArrayTensor(numpy.zeros((1, 3))), ArrayTensor([[-3.5]]),
+        SimpleNamespace(), str(tmp_path / 'update.log'), None, None,
+        read_parallel=False, incl_filter=90.0)
+    assert numpy.all(model_new['scaler'].scale_ >= floor)
+    assert numpy.all(model_new['pca_bounds_upper'] - model_new['pca_bounds_lower'] < 100)
+    for result in results if q1 else []:   # free Q: 3 of 4 PCs, no exact round trip
+        pc = ns['params_to_pca_fixed'](result['params'], model_new)
+        numpy.testing.assert_allclose(list(ns['pca_to_params_fixed'](pc, model_new, BOUNDS).values()),
+                                      list(result['params'].values()))
+
+
+@pytest.mark.parametrize('q1', [False, True])
 def test_history_reads_both_modes_without_dedup(tmp_path, monkeypatch, q1):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('HOSTNAME_SUFFIX', 'testhost')

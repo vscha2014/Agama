@@ -627,9 +627,20 @@ for i in range(1,len(bound_circR)) :
 #  КЛАСС WeightedScaler
 # ==============================================================
 class WeightedScaler:
+    STD_FLOOR_FRAC = 0.05
+
     def __init__(self, mean, std):
         self.mean_ = mean
         self.scale_ = std
+
+    @classmethod
+    def std_floor(cls, bounds_original, use_log_scale):
+        names = ['Q', 'gh', 'rh', 'rho0']
+        lo = numpy.array([bounds_original[n][0] for n in names], dtype=float)
+        hi = numpy.array([bounds_original[n][1] for n in names], dtype=float)
+        if use_log_scale:
+            lo[2:], hi[2:] = numpy.log10(lo[2:]), numpy.log10(hi[2:])
+        return cls.STD_FLOOR_FRAC * (hi - lo)
     
     def transform(self, X):
         return (X - self.mean_) / self.scale_
@@ -2530,6 +2541,7 @@ def build_initial_pca_from_bootstrap(bootstrap_results,
                        weights=weights, axis=0)
     )
     weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
+    weighted_std  = numpy.maximum(weighted_std, WeightedScaler.std_floor(bounds_original, use_log_scale))
     X_scaled      = (X_tr - weighted_mean) / weighted_std
 
     # Если точек мало — уменьшаем n_components
@@ -3010,6 +3022,7 @@ def _update_pca_model(model_data, data_good, new_params, new_penalties,
                        weights=weights, axis=0)
     )
     weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
+    weighted_std  = numpy.maximum(weighted_std, WeightedScaler.std_floor(bounds_original, use_log_scale))
     X_scaled_all  = (X_tr_all - weighted_mean) / weighted_std
 
     n_components  = model_data['pca'].n_components_
@@ -3624,6 +3637,7 @@ def run_pca_optimization(
                        weights=weights, axis=0)
     )
     weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
+    weighted_std  = numpy.maximum(weighted_std, WeightedScaler.std_floor(bounds_original, use_log_scale))
     X_scaled      = (X_transformed - weighted_mean) / weighted_std
 
     # Если точек мало (bootstrap) — уменьшаем n_components

@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-05 (TuRBO TR bound fix).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-05 (TuRBO TR bound fix, PCA std floor).
 
 ## Where the science stands
 
@@ -45,8 +45,8 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
 1. Optional: one 8×4 throughput measurement (memory allows it).
-2. Q=1 on widened bounds: TuRBO TR upper-bound bug **fixed 2026-10-05** (harness + 3
-   production copies, committed). Next: PI questions (PCA std floor, GP noise, per-process
+2. Q=1 on widened bounds: TuRBO TR bound fixed (harness + production, `79698a8`); PCA
+   std floor in the harness (uncommitted). Next: PI questions (GP noise, per-process
    seed), `rh` probes via `launch_multi_model.sh`, then decide on the full `--Q1` search.
    Hand-off: `results/Q1d1_nb250_gh0_ser0_i90.0_widened/HANDOFF.md` (local-only).
 3. Later: batch re-score/fetch mode (tar offsets then); Q16 J weighting before
@@ -57,4 +57,4 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 Q15 (Upsilon Brent speed-ups into production), Q16 (J weighting / sampling
 density), Q17–Q19 (shard consolidation, `ic`/`inttime` storage, shard naming),
 Q20 (`pipefail` bug in the production launcher), Q23 (OpenMP wrap in production)
-— see `questions_for_pi.md`. Q21, Q22, TR-bound fix: answered (`DECISIONS.md`).
+— see `questions_for_pi.md`. Q21, Q22, TR bound, PCA std floor: decided (`DECISIONS.md`).

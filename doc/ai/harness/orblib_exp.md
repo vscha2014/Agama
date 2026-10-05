@@ -32,7 +32,10 @@ must not be touched (see `../CONTRACT.md`, `production.md`).
 - External prior points are projected to `Q=1` and their penalty **recomputed**;
   old penalties are not training observations.
 - PCA weights everywhere: `exp(-(penalty − penalty.min()) / 0.1)` — prevents
-  all-zero underflow on cold-start penalties above 100.
+  all-zero underflow on cold-start penalties above 100. The weighted std is
+  floored at `WeightedScaler.STD_FLOOR_FRAC` (0.05) × the bound width in the
+  transformed space (log10 `rh`, `rho0`), so best rows sharing a bound value no
+  longer blow up the PCA box (2026-10-05, harness only).
 - Q1 seeding before the first PCA: per source (compatible `out`, canonical
   `4Ups`, opt-in PA46.8) at most 24 nearest-`Q` candidates, ranked by old penalty
   within their own source, ordered with rank-biased per-process RNG; at most 10

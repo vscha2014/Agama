@@ -232,3 +232,17 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   before this commit (incl. the free-Q baseline and the 09-19 Q=1 run) were
   searched with the wide upper TR; their rows stay valid evaluations.
 - Test: `test_trust_region_bounds_stay_inside_pca_box` (all four scripts).
+
+## 2026-10-05 — Floor on the weighted std of the PCA scaler (harness only; user acting for the PI)
+
+- **Problem** | with weights `exp(-(p − pmin)/0.1)` the best rows dominate; when they
+  share a value (e.g. `rh` on a bound) the weighted std of that column is ≈0 but
+  above the old `1e-10` guard, so the column was scaled by ~1e-7 and the PCA box
+  blew up (09-19 log: PC1 `[-406, 773]`), making TR lengths meaningless.
+- **Decision** | in all three PCA builders (`build_initial_pca_from_bootstrap`,
+  `_update_pca_model`, `run_pca_optimization`) `weighted_std` is floored at
+  `WeightedScaler.STD_FLOOR_FRAC = 0.05` × the width of `bounds_original` in the
+  transformed space (log10 for `rh`, `rho0`). Weight temperature 0.1 unchanged.
+  Penalty, bounds and the evaluation are unchanged; only the search geometry.
+- **Production** (`_yaVM.py` etc.) unchanged — has the same scaler; porting would
+  be a separate question. Test: `test_pca_box_stays_finite_when_best_rows_share_a_bound_value`.
