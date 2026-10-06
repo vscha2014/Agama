@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'py/Fornax_P21_PCA_w3Sersic_orblib_exp.py'
 LAUNCHER = ROOT / 'py/launch_orblib_exp.sh'
 TREE = ast.parse(SCRIPT.read_text())
-BOUNDS = dict(Q=(0.05, 2.5), gh=(0.0, 1.6), rh=(0.5, 7.0), rho0=(10.0, 120.0))
+BOUNDS = dict(Q=(0.05, 2.5), gh=(0.0, 1.6), rh=(0.5, 30.0), rho0=(10.0, 120.0))
 
 
 @pytest.mark.parametrize('q1', [False, True])
@@ -35,7 +35,7 @@ def test_expanded_search_bounds(q1):
     for node in assignments:
         bounds = ast.literal_eval(node.value)
         assert {name: bounds[name] for name in BOUNDS} == BOUNDS
-        for rh, rho0 in [(0.5, 120.0), (5.0, 20.0), (7.0, 10.0)]:
+        for rh, rho0 in [(0.5, 120.0), (5.0, 20.0), (30.0, 10.0)]:
             params = convert([0.8, 0.4, rh, rho0], model, bounds)
             assert params == dict(Q=1.0 if q1 else 0.8, gh=0.4, rh=rh, rho0=rho0)
 
@@ -198,7 +198,7 @@ def test_pca_box_stays_finite_when_best_rows_share_a_bound_value(tmp_path, q1):
                      penalty=rng.uniform(6.5, 10.0)) for _ in range(12)]
     floor = ns['WeightedScaler'].std_floor(BOUNDS, True)
     numpy.testing.assert_allclose(floor, 0.05 * numpy.array(
-        [2.45, 1.6, numpy.log10(7.0 / 0.5), numpy.log10(120.0 / 10.0)]))
+        [2.45, 1.6, numpy.log10(30.0 / 0.5), numpy.log10(120.0 / 10.0)]))
     model = ns['build_initial_pca_from_bootstrap'](
         results, BOUNDS, n_components=3, output_file=str(tmp_path / 'pca.log'))
     assert numpy.all(model['scaler'].scale_ >= floor)

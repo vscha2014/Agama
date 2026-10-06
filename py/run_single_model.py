@@ -193,9 +193,31 @@ def best_reference(paths, incl):
     return best
 
 
-def read_models(path):
+def script_bounds(path=None):
+    """Global bounds_original of the experimental script, read with ast
+    (standard library only: --list-models runs on the host)."""
+    import ast
+    path = path or EXP_SCRIPT
+    with open(path) as stream:
+        tree = ast.parse(stream.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == 'bounds_original' for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise SystemExit(f'{path}: no global bounds_original')
+
+
+def bounds_violations(params, bounds):
+    """The evaluation clips parameters to bounds_original silently, so a point
+    outside them would run (and be recorded) as a different model."""
+    return [f'{key}={params[key]!r} outside [{bounds[key][0]!r}, {bounds[key][1]!r}]'
+            for key in PARAM_KEYS if not bounds[key][0] <= params[key] <= bounds[key][1]]
+
+
+def read_models(path, bounds=None):
     """Models file for launch_multi_model.sh: one history row per container
-    (any layout above), optional trailing '# label' used as the source."""
+    (any layout above), optional trailing '# label' used as the source.
+    Rows outside bounds_original are refused."""
     models = []
     with open(path, errors='replace') as stream:
         for number, line in enumerate(stream, 1):
@@ -207,6 +229,12 @@ def read_models(path):
     keys = [tuple(row[k] for k in ('incl',) + PARAM_KEYS) for row in models]
     if len(set(keys)) != len(keys):
         raise SystemExit(f'{path}: duplicate parameter sets (one library name, one AGAMA realisation)')
+    bounds = script_bounds() if bounds is None else bounds
+    outside = [f"{row['source']}: {', '.join(bounds_violations(row, bounds))}"
+               for row in models if bounds_violations(row, bounds)]
+    if outside:
+        raise SystemExit(f'{path}: rows outside bounds_original of {os.path.basename(EXP_SCRIPT)} '
+                         '(they would be clipped): ' + '; '.join(outside))
     return models
 
 
@@ -585,6 +613,13 @@ def run(args):
     mod = importlib.util.module_from_spec(spec)
     sys.modules['orblib_exp'] = mod
     spec.loader.exec_module(mod)
+    outside = bounds_violations(report['params'], mod.bounds_original)
+    if outside:
+        report['status'] = 'failed'
+        report['error'] = 'outside bounds_original (would be clipped): ' + '; '.join(outside)
+        write_report(report, args.report)
+        print(format_report(report), end='', flush=True)
+        return 2
     import orblib_storage
     report['context'], report['grid'] = static_context(mod)
     name, path = mod.orblib_key(*(report['params'][k] for k in ('Q', 'gh', 'rh', 'rho0')))

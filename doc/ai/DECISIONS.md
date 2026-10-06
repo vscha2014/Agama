@@ -246,3 +246,25 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   Penalty, bounds and the evaluation are unchanged; only the search geometry.
 - **Production** (`_yaVM.py` etc.) unchanged — has the same scaler; porting would
   be a separate question. Test: `test_pca_box_stays_finite_when_best_rows_share_a_bound_value`.
+
+## 2026-10-06 — Q28: `rh` upper bound raised to 30 kpc (user acting for the PI)
+
+- **Answer** | `rh` may be widened. Both copies of `bounds_original` in the harness
+  now use `rh ∈ [0.5, 30]` kpc, for **both** modes (free Q and `--Q1`); the other
+  bounds are unchanged; CONTRACT updated. Production untouched. 30 kpc covers the
+  near-uniform-core limit of the Zhao `alpha=2, beta=3, gh=0` halo inside the data.
+- **Why** | `Q=1` probes (local `results/Q1d1_rh_bounds/NOTES.md`): penalty falls
+  monotonically up to the old bound 7 kpc, so the minimum was bound-limited.
+- **Side effects** | cold-start LHS samples `rh` linearly ⇒ most fresh LHS points
+  land at rh > 7 (only without history); the reservation distance is normalised
+  by the bound width ⇒ the same `reserve_eps` is ≈4.5× wider in kpc along `rh`;
+  the PCA std floor of `rh` grows accordingly (log10 width). `EVALUATION_CONTEXT`
+  does not include bounds ⇒ history stays compatible.
+- **Protection** | `run_single_model.py` refuses parameters outside the script's
+  `bounds_original` (`--list-models` and `run()`), because the objective clips them
+  silently and would record another model under the requested label.
+- **Delivery** | `launch_single_model.sh`/`launch_multi_model.sh`: `prepare`
+  failing with `Conflicting library metadata: <that name>` = the name is in a
+  legacy tar index ⇒ archive-first-wins (file kept on the VM, no failure code).
+  `compatible_metadata` keeps comparing `trajsize`: the conflict is genuine (another
+  realisation under one name) and must not be published.

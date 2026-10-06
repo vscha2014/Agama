@@ -47,7 +47,7 @@ keep them in sync):
 |---|---|---|
 | `Q` (`axRZ`) | 0.05 – 2.5 | fixed to 1 in `--Q1` mode |
 | `gh` (`gammah`) | 0.0 – 1.6 | negative values are not admissible |
-| `rh` (`rhalo`) | 0.5 – 7.0 kpc | widened 2026-09 from 3.5 (diagnostic, see DECISIONS) |
+| `rh` (`rhalo`) | 0.5 – 30.0 kpc | widened 2026-09 from 3.5 to 7, 2026-10-06 to 30 (Q28, DECISIONS) |
 | `rho0` | 10 – 120 | widened 2026-09 from 34 |
 | `Upsilon` | 0.1 – 1.6 | |
 

@@ -250,7 +250,7 @@ def real_halo_module(tmp_path, store):
               UPS_XATOL=5e-3, UPS_BRACKET_DELTA=0.1, UPS_BRACKET_NMED=8, UPS_SUBSAMPLE_FRAC=0.25,
               _ups_recent=[0.3], proc_rng=numpy.random.default_rng(1),
               completed_point=lambda params: pytest.fail('completed_point must be neutralised'),
-              bounds_original=dict(Q=(0.05, 2.5), gh=(0.0, 1.6), rh=(0.5, 7.0), rho0=(10.0, 120.0)),
+              bounds_original=dict(Q=(0.05, 2.5), gh=(0.0, 1.6), rh=(0.5, 30.0), rho0=(10.0, 120.0)),
               densityStars=SimpleNamespace(sample=lambda n, potential: [numpy.zeros((n, 6))]),
               datasets=[Dataset(), Dataset()], alphah=2.0, betah=3,
               agama=SimpleNamespace(
@@ -461,7 +461,12 @@ rclone() {
 }
 python3() {
     case "$1" in
-        */orblib_storage.py) printf 'storage %s\n' "$*" >> "$HOME/events"; return 0 ;;
+        */orblib_storage.py)
+            printf 'storage %s\n' "$*" >> "$HOME/events"
+            if [ -n "${STORAGE_CONFLICT:-}" ] && [ "$2" = prepare ]; then
+                printf 'Conflicting library metadata: %s\n' "$STORAGE_CONFLICT"; return 75
+            fi
+            return 0 ;;
     esac
     command python3 "$@"
 }
@@ -499,8 +504,9 @@ def launcher_workdir(tmp_path, avail_mb=8000, history=True):
     launcher = tmp_path / LAUNCHER.name
     launcher.write_text(LAUNCHER.read_text())
     (tmp_path / 'run_single_model.py').write_text(RUNNER_PATH.read_text())
-    for name in (SCRIPT.name, 'table3.dat', 'orblib_storage.py'):
+    for name in ('table3.dat', 'orblib_storage.py'):
         (tmp_path / name).touch()
+    (tmp_path / SCRIPT.name).write_text(f'bounds_original = {runner.script_bounds(str(SCRIPT))!r}\n')
     if history:
         write_history(tmp_path)
     config = tmp_path / '.config/rclone'
@@ -567,6 +573,19 @@ def test_launcher_keeps_library_when_name_is_already_archived(tmp_path):
     assert not any(e.startswith('storage ') for e in events)
     assert list(tmp_path.glob('orblib_single/*_r0/*.npz'))
     assert 'уже в каталоге' in next(tmp_path.glob('launch_single_*.log')).read_text()
+
+
+@pytest.mark.parametrize('conflict, code, message', [
+    ('orblib_i90.0_d1_nb250_ser0_geomabcdef12_0123456789.npz', 0, 'индекс tar-архива'),
+    ('orblib_other.npz', 1, 'не завершена')])
+def test_launcher_treats_a_tar_indexed_name_as_archived(tmp_path, conflict, code, message):
+    result, events = run_launcher(tmp_path, '--repeats=1', STORAGE_CONFLICT=conflict)
+    assert result.returncode == code, result.stdout[-4000:] + result.stderr[-4000:]
+    storage_calls = [e for e in events if e.startswith('storage ')]
+    assert len(storage_calls) == 1 and ' prepare --resume ' in storage_calls[0]
+    assert list(tmp_path.glob('orblib_single/*_r0/*.npz'))
+    log = next(tmp_path.glob('launch_single_*.log')).read_text()
+    assert message in log and f'Conflicting library metadata: {conflict}' in log
 
 
 def test_launcher_no_upload_no_shutdown_and_failure_code(tmp_path):
@@ -674,6 +693,37 @@ def test_models_file_rows_labels_and_duplicates(tmp_path):
                            str(tmp_path / 'empty.txt')], capture_output=True).returncode == 1
 
 
+def test_models_outside_script_bounds_are_refused(tmp_path):
+    bounds = runner.script_bounds()
+    assert bounds['rh'] == (0.5, 30.0) and bounds == runner.script_bounds(str(SCRIPT))
+    inside = '90.000 1.0 0.0 25.0 33.57 0.6 2.3 2026-10-06 00:00:00  # rh25\n'
+    models = tmp_path / 'models.txt'
+    models.write_text(inside)
+    assert runner.read_models(str(models))[0]['rh'] == 25.0
+    models.write_text(inside + '90.000 1.0 0.0 40.0 33.5 0.6 2.3 2026-10-06 00:00:00  # rh40\n')
+    with pytest.raises(SystemExit, match=r'rh40: rh=40\.0 outside \[0\.5, 30\.0\]'):
+        runner.read_models(str(models))
+    printed = subprocess.run([sys.executable, str(RUNNER_PATH), '--list-models', str(models)],
+                             capture_output=True, text=True, timeout=30)
+    assert printed.returncode != 0 and not printed.stdout and 'rh=40.0 outside' in printed.stderr
+    assert runner.bounds_violations(dict(Q=1.0, gh=-0.1, rh=0.5, rho0=120.0), bounds) == [
+        'gh=-0.1 outside [0.0, 1.6]']
+
+
+def test_runner_refuses_a_point_outside_bounds_before_any_work(tmp_path, monkeypatch):
+    script = tmp_path / 'script.py'
+    script.write_text("bounds_original = dict(Q=(0.05, 2.5), gh=(0.0, 1.6), rh=(0.5, 30.0), "
+                      "rho0=(10.0, 120.0))\n")
+    monkeypatch.setattr(runner, 'EXP_SCRIPT', str(script))
+    monkeypatch.setattr(sys, 'argv', list(sys.argv))
+    monkeypatch.chdir(tmp_path)
+    args = args_for(tmp_path, Q=1.0, gh=0.0, rh=40.0, rho0=33.5, ref_penalty=2.3)
+    assert runner.run(args) == 2
+    report = json.loads((tmp_path / 'report.json').read_text())
+    assert report['status'] == 'failed' and 'rh=40.0 outside [0.5, 30.0]' in report['error']
+    assert not (tmp_path / 'orblib_single').exists()
+
+
 def test_reference_source_label_overrides_command_line(tmp_path):
     ref = runner.resolve_reference(args_for(tmp_path, Q=1.0, gh=0.1, rh=2.0, rho0=50.0,
                                             ref_penalty=1.5, ref_source='J.txt:12'))
@@ -760,10 +810,22 @@ def test_multi_launcher_skips_archived_and_reports_failures(tmp_path):
     assert not any(e.startswith('storage ') for e in events)
 
 
+def test_multi_launcher_treats_a_tar_indexed_name_as_archived(tmp_path):
+    name = 'orblib_i90.0_d1_nb250_ser0_geomabcdef12_0123456789.npz'
+    result, events = run_multi(tmp_path, '--models=models.txt', '--no-shutdown', STORAGE_CONFLICT=name)
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    storage_calls = [e for e in events if e.startswith('storage ')]
+    assert len(storage_calls) == 4 and all(' prepare --resume ' in e for e in storage_calls)
+    log = next(tmp_path.glob('launch_multi_*.log')).read_text()
+    assert log.count('индекс tar-архива, archive-first-wins') == 4
+    assert len(list(tmp_path.glob('orblib_single/*_m*/*.npz'))) == 4
+
+
 def test_multi_launcher_rejects_bad_models_without_side_effects(tmp_path):
     for args, models in (((), MODELS_TEXT), (('--models=missing.txt',), None),
                          (('--models=models.txt',), '# only a comment\n'),
                          (('--models=models.txt',), MODELS_TEXT + MODELS_TEXT.splitlines()[1] + '\n'),
+                         (('--models=models.txt',), MODELS_TEXT + '90.0 1.0 0.0 40.0 33.5 0.6 2.3 d t\n'),
                          (('--models=models.txt', '--repeats=2'), MODELS_TEXT)):
         work = tmp_path / f'case{len(list(tmp_path.iterdir()))}'
         result, events = run_multi(work, *args, models=models)

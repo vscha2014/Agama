@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-05 (TuRBO TR bound fix, PCA std floor).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-06 (Q=1 probe round 2 analysed).
 
 ## Where the science stands
 
@@ -8,10 +8,11 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
   `log10 J(0.5°) ≈ 18.58` — production free-Q history (`4UpsBoTorch_PCA_Sersic_*`,
   always doubled ⇒ **d1**). Earlier notes wrongly attributed it to
   `legacy_d0_nb250_gh0_ser0`; that d0 run reached only ≈1.60 (fixed in the registry).
-- Fixed spherical halo (`Q=1`) best: `penalty = 3.5395`, but `rh` sat on the old
-  upper bound 3.5 kpc (run `Q1d1_nb250_gh0_ser0_i90.0_20260919_011920`).
-  The 2.30 penalty gap does **not** yet exclude a spherical halo.
-- Bounds were widened afterwards to `rh ∈ [0.5, 7]`, `rho0 ∈ [10, 120]`. The
+- Fixed spherical halo (`Q=1`): two probe rounds 2026-10-05/06 (local
+  `results/Q1d1_rh_bounds/NOTES.md`): penalty falls with `rh` and flattens towards the
+  uniform-core limit (rh 25 of bound 30); a lower stellar M/L helps further. The gap to
+  free-Q shrank to a fraction of its 09-19 size but remains clearly positive.
+- Bounds were widened 2026-09 to `rh ∈ [0.5, 7]`, `rho0 ∈ [10, 120]`. The
   first launch that used them (2026-09-29) produced **no** new evaluations
   (memory-reclaim livelock, `swap 0`, no OOM-kill). Seven `.npz` survive, verified
   reusable; see `results/Q1d1_nb250_gh0_ser0_i90.0_20260929/postmortem.md`.
@@ -45,16 +46,15 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
 1. Optional: one 8×4 throughput measurement (memory allows it).
-2. Q=1 on widened bounds: TuRBO TR bound fixed (harness + production, `79698a8`); PCA
-   std floor in the harness (uncommitted). Next: PI questions (GP noise, per-process
-   seed), `rh` probes via `launch_multi_model.sh`, then decide on the full `--Q1` search.
-   Hand-off: `results/Q1d1_nb250_gh0_ser0_i90.0_widened/HANDOFF.md` (local-only).
-3. Later: batch re-score/fetch mode (tar offsets then); Q16 J weighting before
-   final article numbers; targeted recompute of the 77 lost libraries.
+2. Q=1 (rh ≤ 30, bounds guard, tar-index delivery committed): either a third probe round
+   (rh 25/30 × rho0 sweep, gh 0.1/0.2) or the `--Q1` search (expected to drift to the
+   rh bound; `1/rh` parametrisation = PI question).
+   Hand-off: `results/Q1d1_rh_bounds/HANDOFF.md` (local-only).
+3. Later: batch re-score/fetch (tar offsets); Q16 J weighting; recompute 77 lost libraries.
 
 ## Open questions
 
-Q15 (Upsilon Brent speed-ups into production), Q16 (J weighting / sampling
-density), Q17–Q19 (shard consolidation, `ic`/`inttime` storage, shard naming),
-Q20 (`pipefail` bug in the production launcher), Q23 (OpenMP wrap in production)
-— see `questions_for_pi.md`. Q21, Q22, TR bound, PCA std floor: decided (`DECISIONS.md`).
+Q15 (Upsilon Brent into production), Q16 (J weighting / sampling density), Q17–Q19
+(shard consolidation, `ic`/`inttime`, shard naming), Q20 (production `pipefail`), Q23
+(OpenMP wrap in production) — see `questions_for_pi.md`.
+Decided (`DECISIONS.md`): Q21, Q22, Q28, TR bound, PCA std floor.

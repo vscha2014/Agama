@@ -302,7 +302,14 @@ re-evaluating one known model, not by searching. Tests: `tests/test_single_model
   r0's** library goes to the shared catalog via `orblib_storage.py prepare
   --resume --root orblib_single/<TS>_r0` (size + MD5, receipt; the managed local
   copy is deleted after verification). If `catalog/<name>.json` already exists
-  the upload is skipped and the file kept. r1… stay on the VM.
+  the upload is skipped and the file kept. A name known only from a **tar
+  index** (legacy shards) makes `prepare` fail with `Conflicting library
+  metadata: <name>` (same name, another realisation); the launcher treats
+  exactly that message as archive-first-wins too (file kept, isolated root left
+  stopped, exit code unaffected). r1… stay on the VM.
+- Parameters outside the script's `bounds_original` are refused (the objective
+  would clip them silently and record another model): `run()` stops after the
+  module import with `status=failed`, exit 2, before any integration.
 - Memory protections, watchdogs, emergency upload and verified shutdown are
   copies of §3a (`ORBLIB_*` variables keep their meaning); SIGTERM from
   `docker stop` makes the runner write a partial report and exit 75.
@@ -322,7 +329,8 @@ split evenly), without protocol comparison: `run_single_model.py --protocols exp
   FILE: one history row per container in any layout the runner parses
   (`out_*`/`4Ups*`, `J_factor_*`, `Jcomputed_*`), optional trailing `# label`;
   comments/garbage lines are skipped; duplicate parameter sets are refused
-  (same library name and, with AGAMA's fixed start seed, the same realisation).
+  (same library name and, with AGAMA's fixed start seed, the same realisation),
+  so are rows outside `bounds_original` (read from the script with `ast`).
   `run_single_model.py --list-models FILE` (stdlib) shows what will run.
   `incl` and `Q gh rh rho0` come from the row, its penalty/Upsilon are the
   reference (`--ref-penalty/--ref-upsilon`, label → `--ref-source`). The file is
@@ -333,7 +341,8 @@ split evenly), without protocol comparison: `run_single_model.py --protocols exp
   results/logs/models file → `galAgama/single_model/multi_d1_nb250_gh0_ser0_n<N>_<TS>/`,
   summary `summary_multi_<TS>.txt` = the per-model text reports concatenated.
 - **Every** model's library goes to the shared catalog (`prepare --resume` +
-  `check` per directory, skipped when `catalog/<name>.json` exists).
+  `check` per directory, skipped when `catalog/<name>.json` exists or the name
+  is in a tar index — see §3b).
 - `--preflight` runs all N containers without integration, no history/`.npz`
   upload, no shutdown. Lock `orblib_single/.launcher.lock` is shared with
   `launch_single_model.sh`; memory protections/watchdogs/shutdown as §3b.

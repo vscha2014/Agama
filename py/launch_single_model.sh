@@ -419,6 +419,21 @@ storage_cli() {
         --reserve-bytes 0
 }
 
+# prepare --resume + check изолированного корня. 0 = доставлена; 3 = имя уже есть в
+# каталоге как запись индекса tar-архива (другая реализация того же имени: storage
+# отвечает 'Conflicting library metadata: NAME'), файл остаётся на VM; иначе 1.
+prepare_and_check() {
+    local root="$1" name="$2" out rc=0
+    out="$(storage_cli "$root" prepare --resume 2>&1)" || rc=$?
+    printf '%s\n' "$out" >>"$LOGFILE"
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "$out" | grep -qxF "Conflicting library metadata: ${name}" && return 3
+        return 1
+    fi
+    storage_cli "$root" check >>"$LOGFILE" 2>&1 || return 1
+    return 0
+}
+
 report_field() {
     python3 -c 'import json, sys
 r = json.load(open(sys.argv[1]))
@@ -708,13 +723,20 @@ else
         FINAL_RC=1
     elif [ -n "$existing" ]; then
         log "  ~ ${r0_name} уже в каталоге (archive-first-wins) — новая реализация оставлена на VM"
-    elif storage_cli "$r0_root" prepare --resume >>"$LOGFILE" 2>&1 \
-            && storage_cli "$r0_root" check >>"$LOGFILE" 2>&1; then
-        log "  ✓ ${r0_name} доставлена в ${ORBLIB_REMOTE_DIR} (size+MD5, receipt); локальная копия удалена"
     else
-        log "  ✗ Доставка ${r0_name} не завершена; файл и очередь остаются в ${r0_root}"
-        notify "single_model: доставка ${r0_name} не завершена на ${HOSTNAME_ENV}" "urgent"
-        FINAL_RC=1
+        set +e
+        prepare_and_check "$r0_root" "$r0_name"
+        deliver_rc=$?
+        set -e
+        if [ "$deliver_rc" -eq 0 ]; then
+            log "  ✓ ${r0_name} доставлена в ${ORBLIB_REMOTE_DIR} (size+MD5, receipt); локальная копия удалена"
+        elif [ "$deliver_rc" -eq 3 ]; then
+            log "  ~ ${r0_name} уже в каталоге (индекс tar-архива, archive-first-wins) — новая реализация оставлена на VM"
+        else
+            log "  ✗ Доставка ${r0_name} не завершена; файл и очередь остаются в ${r0_root}"
+            notify "single_model: доставка ${r0_name} не завершена на ${HOSTNAME_ENV}" "urgent"
+            FINAL_RC=1
+        fi
     fi
 fi
 for ((i = 1; i < REPEATS; i++)); do

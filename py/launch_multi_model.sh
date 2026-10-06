@@ -72,7 +72,7 @@ if [ -z "$MODELS_FILE" ] || [ ! -f "$MODELS_FILE" ]; then
 fi
 MODELS_FILE="$(cd "$(dirname "$MODELS_FILE")" && pwd)/$(basename "$MODELS_FILE")"
 if ! _rows="$(python3 "${WORK_DIR}/${RUNNER}" --list-models "$MODELS_FILE")"; then
-    echo "ОШИБКА: в ${MODELS_FILE} нет корректных строк моделей (или повторы параметров)" >&2
+    echo "ОШИБКА: в ${MODELS_FILE} нет корректных строк моделей, есть повторы параметров или значения вне bounds_original (см. сообщение выше)" >&2
     exit 2
 fi
 mapfile -t MODEL_ROWS <<< "$_rows"
@@ -384,6 +384,21 @@ storage_cli() {
         --reserve-bytes 0
 }
 
+# prepare --resume + check изолированного корня. 0 = доставлена; 3 = имя уже есть в
+# каталоге как запись индекса tar-архива (другая реализация того же имени: storage
+# отвечает 'Conflicting library metadata: NAME'), файл остаётся на VM; иначе 1.
+prepare_and_check() {
+    local root="$1" name="$2" out rc=0
+    out="$(storage_cli "$root" prepare --resume 2>&1)" || rc=$?
+    printf '%s\n' "$out" >>"$LOGFILE"
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "$out" | grep -qxF "Conflicting library metadata: ${name}" && return 3
+        return 1
+    fi
+    storage_cli "$root" check >>"$LOGFILE" 2>&1 || return 1
+    return 0
+}
+
 report_field() {
     [ -f "$1" ] || return 0
     python3 -c 'import json, sys
@@ -454,7 +469,7 @@ run_container() {
 # Библиотека модели i → общий каталог (как r0 в launch_single_model.sh). 0 = доставлена или уже в каталоге.
 deliver_library() {
     local i="$1"
-    local status name root existing lsf_rc
+    local status name root existing lsf_rc deliver_rc
     status="$(report_field "${WORK_DIR}/${REPORTS[$i]}" status)"
     name="$(report_field "${WORK_DIR}/${REPORTS[$i]}" orblib.name)"
     root="${WORK_DIR}/${ORBLIB_DIRS[$i]}"
@@ -474,13 +489,20 @@ deliver_library() {
         return 1
     elif [ -n "$existing" ]; then
         log "  ~ m${i}: ${name} уже в каталоге (archive-first-wins) — новая реализация оставлена на VM"
-    elif storage_cli "$root" prepare --resume >>"$LOGFILE" 2>&1 \
-            && storage_cli "$root" check >>"$LOGFILE" 2>&1; then
-        log "  ✓ m${i}: ${name} доставлена в ${ORBLIB_REMOTE_DIR} (size+MD5, receipt); локальная копия удалена"
     else
-        log "  ✗ m${i}: доставка ${name} не завершена; файл и очередь остаются в ${root}"
-        notify "multi_model: доставка ${name} не завершена на ${HOSTNAME_ENV}" "urgent"
-        return 1
+        set +e
+        prepare_and_check "$root" "$name"
+        deliver_rc=$?
+        set -e
+        if [ "$deliver_rc" -eq 0 ]; then
+            log "  ✓ m${i}: ${name} доставлена в ${ORBLIB_REMOTE_DIR} (size+MD5, receipt); локальная копия удалена"
+        elif [ "$deliver_rc" -eq 3 ]; then
+            log "  ~ m${i}: ${name} уже в каталоге (индекс tar-архива, archive-first-wins) — новая реализация оставлена на VM"
+        else
+            log "  ✗ m${i}: доставка ${name} не завершена; файл и очередь остаются в ${root}"
+            notify "multi_model: доставка ${name} не завершена на ${HOSTNAME_ENV}" "urgent"
+            return 1
+        fi
     fi
     return 0
 }

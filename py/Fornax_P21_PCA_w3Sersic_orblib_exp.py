@@ -1059,7 +1059,7 @@ EVALUATION_CONTEXT = hashlib.sha256(
 bounds_original = {
     'Q': (0.05, 2.5),
     'gh': (0.0, 1.6),
-    'rh': (0.5, 7.0),
+    'rh': (0.5, 30.0),
     'rho0': (10.0, 120.0),
     'Upsilon': (0.1, 1.6)
 }
@@ -3320,7 +3320,7 @@ def run_pca_optimization(
     bounds_original = {
         'Q':   (0.05, 2.5),
         'gh':  (0.0,  1.6),
-        'rh':  (0.5,  7.0),
+        'rh':  (0.5,  30.0),
         'rho0':(10.0, 120.0),
     }
 
