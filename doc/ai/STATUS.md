@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-08 (preflight comparison fixed; local free-Q live-field reproduction passed).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-08 (Q29 seed-42 pilot prepared for ya VM; no execution).
 
 ## Where the science stands
 
@@ -23,8 +23,8 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 ## Code state
 
 - Harness: `--Q1`, widened bounds, aperture-vertex grid, streaming orbit-library delivery.
-- `py/check_potential_convergence/`: Step 1A dense checks reviewed; Step 1B validation/preflight CLI ready.
-  298 tests pass; local free-Q preflight passes live reproduction; export/reload is lossy; no orbits/solve.
+- `py/check_potential_convergence/`: seed-42 pilot CLI/offline VM wrapper prepared after `e650f76`.
+  324 mocked/numeric tests pass; local model preflights complete; no real pilot/VM run.
 - Memory fix (`92f009e`, §3a) and archived-not-local warning (`13f1659`)
   committed: no trajectories, block `.npz` writer, 2 save slots, SIGTERM → STOP → checkpoint, RSS logging;
   launcher with 4 workers, host swap, swapless container limit, watchdogs,
@@ -46,15 +46,15 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
 1. Optional: one 8×4 throughput measurement (memory allows it).
-2. Next: agree Q1 no-orbit preflights, then Q29 pilot/tolerance; do not repeat the successful free-Q check.
-   Handoff: `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.12 (local-only).
-   Reports: `results/potential_checks/`; analysis: `results/Q1d1_rh_bounds/NOTES.md`.
-   Use live potentials, not assumed-lossless .ini; no orbit CLI, automatic runs or production adoption.
+2. Q29: authorise VM evidence/preflight, then free-Q pilot; review before the two Q1 controls.
+   Handoff: `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.14; commands: diagnostic README §7.
+   Keep exact local inputs/evidence; a different VM binary needs field validation, not a bypass.
+   Use live potentials, not .ini; no automatic seed expansion, cloud delivery or production adoption.
 3. Later: batch re-score/fetch (tar offsets); Q16 J weighting; recompute 77 lost libraries.
 
 ## Open questions
 
 Q15 (Upsilon Brent into production), Q16 (J weighting / sampling density), Q17–Q19
 (shard consolidation, `ic`/`inttime`, shard naming), Q20 (production `pipefail`), Q23
-(OpenMP wrap in production), Q29 (Step 1B design) — see `questions_for_pi.md`.
+(OpenMP wrap in production), Q29 (pilot execution gates) — see `questions_for_pi.md`.
 Decided (`DECISIONS.md`): Q21, Q22, Q28, TR bound, PCA std floor.

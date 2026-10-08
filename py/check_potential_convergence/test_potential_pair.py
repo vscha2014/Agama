@@ -589,3 +589,330 @@ def test_force_comparison_rejects_invalid_force(pair, failure):
         reference[:] = 0
     with pytest.raises(ValueError):
         pair.force_comparison(measured, reference, points)
+
+
+def test_pilot_plan_has_exactly_eleven_integrations(pair):
+    assert pair.pilot_variants({'Q': 0.3}) == ['A', 'B', 'A_repeat', 'C', 'B_native']
+    assert pair.pilot_variants({'Q': 1.0}) == ['A', 'B', 'B_native']
+    assert sum(len(pair.pilot_variants({'Q': q})) for q in (0.3, 1.0, 1.0)) == 11
+
+
+def test_pilot_cli_is_explicit_and_seed42_only(pair):
+    base = ['--models', 'models', '--field-report', 'report', '--output', 'new']
+    assert pair.parse_args(base + ['--pilot']).pilot
+    assert pair.parse_args(base + ['--pilot-preflight']).pilot_preflight
+    with pytest.raises(SystemExit):
+        pair.parse_args(base + ['--pilot', '--seeds', '1'])
+    with pytest.raises(SystemExit):
+        pair.parse_args(base + ['--pilot', '--preflight'])
+
+
+def test_freeq_evidence_includes_exact_C(pair, evidence):
+    path, model, recipe = evidence
+    data = json.loads(path.read_text())
+    grid = np.geomspace(5e-5, 2200., 399)
+    write_ini(path.parent / 'common_fine.ini', grid)
+    data['coefficients'].append(dict(tag='common_fine', coefficient_file='common_fine.ini',
+        actual_grid=pair.fields.read_grid(path.parent / 'common_fine.ini').tolist(),
+        requested=dict(type='Multipole', gridSizeR=399, lmax=40, mmax=0, rmin=5e-5, rmax=2200.)))
+    data['comparisons']['common_fine'] = data['comparisons']['angular_l24']
+    path.write_text(json.dumps(data))
+    proof = pair.read_evidence(path, model, recipe, include_control=True)
+    assert proof['coefficients']['C']['requested']['lmax'] == 40
+    data['comparisons']['common_fine'] = dict(scores={})
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match='control'):
+        pair.read_evidence(path, model, recipe, include_control=True)
+
+
+def test_pilot_checks_preserve_primary_fit_and_all_controls(pair, solver, tmp_path):
+    agama = FakeAgama()
+    a = Potential()
+    pots = dict(A=a, B=Potential(1.01), A_repeat=a, C=Potential(1.02))
+    events = []
+    report = pair.evaluate_pair(agama, pots, Stars(), [Dataset(), Dataset()], solver,
+        tmp_path / 'pilot', {}, 42, 0.6, num_orbits=12, native=True,
+        pilot_checks=True, progress=events.append)
+    assert report['status'] == 'ok'
+    assert report['orbit_calls'] == 5
+    assert len(agama.calls) == 5
+    assert report['technical_checks']['passed']
+    assert report['technical_checks']['budget'] == 0.001
+    assert report['control_deltas']['A_repeat_minus_A'] == 0
+    assert set(report['variants']) == set(pots) | {'B_native'}
+    assert all(v['settings']['xatol'] == 1e-3 for v in report['variants'].values())
+    assert all(v['strict_search']['settings']['xatol'] == 1e-4 for v in report['variants'].values())
+    assert any(e['stage'] == 'integrate' for e in events)
+    assert all(e['resources']['peak_rss_bytes'] > 0 for e in events)
+    assert report['ic_radius']['count_outside_field_probes'] == 0
+
+
+def test_pilot_disk_gate_precedes_seed_or_orbits(pair, solver, tmp_path, monkeypatch):
+    monkeypatch.setattr(pair.shutil, 'disk_usage', lambda path: SimpleNamespace(free=0))
+    agama = FakeAgama()
+    report = pair.evaluate_pair(agama, dict(A=Potential(), B=Potential()), Stars(),
+        [Dataset(), Dataset()], solver, tmp_path / 'pilot', {}, 42, 0.6,
+        num_orbits=4, pilot_checks=True)
+    assert report['status'] == 'failed' and 'disk' in report['error'].lower()
+    assert not agama.seeds and not agama.calls
+
+
+def test_full_search_checks_stop_between_solver_calls(pair, solver):
+    def stop():
+        raise InterruptedError('requested stop')
+    with pytest.raises(InterruptedError):
+        pair.fit_library(solver, [Dataset(), Dataset()], [np.ones((4, 2))] * 2, 0.6,
+                         check_stop=stop)
+
+
+@pytest.mark.parametrize('failure', [None, 'binary', 'control_force', 'solver', 'stop'])
+def test_pilot_cli_uses_checked_live_objects_and_persists_failures(pair, evidence, solver, tmp_path, monkeypatch, failure):
+    path, model, recipe = evidence
+    model.update(Q=0.5, rh=2.0)
+    data = json.loads(path.read_text())
+    data['model'] = model
+    write_ini(path.parent / 'common_fine.ini', np.geomspace(5e-5, 2200., 399))
+    data['coefficients'].append(dict(tag='common_fine', coefficient_file='common_fine.ini',
+        actual_grid=pair.fields.read_grid(path.parent / 'common_fine.ini').tolist(),
+        requested=dict(type='Multipole', gridSizeR=399, lmax=40, mmax=0, rmin=5e-5, rmax=2200.)))
+    data['comparisons']['common_fine'] = data['comparisons']['angular_l24']
+    path.write_text(json.dumps(data))
+    binary = dict(files=[dict(path='/fake/agama.so', sha256='test')])
+    top_path = path.parent.parent / 'report.json'
+    top = json.loads(top_path.read_text())
+    top['agama'] = binary
+    top_path.write_text(json.dumps(top))
+    models = tmp_path / 'models.txt'
+    models.write_text('90 1 0 3 50 0.6\n90 1 0 25 50 0.6\n90 0.5 0 2 50 0.6\n')
+    built = []
+
+    class FieldPotential(Potential):
+        def __init__(self, name, loaded=False):
+            super().__init__({'A': 1, 'B': 1.01, 'C': 1.02}[name])
+            self.name, self.loaded = name, loaded
+            self.source = path.parent / {'A': 'baseline.ini', 'B': 'angular_l24.ini', 'C': 'common_fine.ini'}[name]
+
+        def export(self, filename):
+            Path(filename).write_bytes(self.source.read_bytes())
+
+        def force(self, points):
+            changed = (failure == 'control_force' and self.name == 'C' and
+                       self is next(p for p in built if p.name == 'C'))
+            return -points * self.scale * (1.1 if changed else 1)
+
+    def potential(*args, **kw):
+        if args:
+            name = 'C' if Path(args[0]).name in ('C.ini', 'common_fine.ini') else (
+                'B' if Path(args[0]).name in ('B.ini', 'angular_l24.ini') else 'A')
+            return FieldPotential(name, loaded=True)
+        name = {23: 'A', 184: 'B', 399: 'C'}[kw['gridSizeR']]
+        value = FieldPotential(name)
+        built.append(value)
+        return value
+
+    agama = FakeAgama()
+    agama.Density = lambda *a, **kw: object()
+    agama.Potential = potential
+    original_orbit = agama.orbit
+    def live_orbit(**kw):
+        assert not kw['potential'].loaded
+        return original_orbit(**kw)
+    agama.orbit = live_orbit
+    def selected_solver(*args, **kw):
+        if failure == 'solver':
+            raise RuntimeError('pilot solver failed')
+        if failure == 'stop':
+            raise InterruptedError('pilot STOP')
+        return solver(*args, **kw)
+    mod = SimpleNamespace(agama=agama, SAVE_ORBLIB=False, REUSE_ORBLIB=False, orblib_store=None,
+        gridx=np.ones(3), gridy=np.ones(3), gridv=np.ones(4), sectAPP=[np.ones((3, 2))],
+        densityStars=Stars(), datasets=[Dataset(), Dataset()], bounds_original=recipe['bounds'], alphah=2, betah=3)
+    def capture(*args, diagnostic, direct_params):
+        return diagnostic(baseline=FieldPotential('A'), density_stars=mod.densityStars,
+            density_halo=object(), datasets=mod.datasets, num_orbits=100000, int_time=100., regul=1.,
+            upsilon_bounds=(0.1, 1.6), solve_library=selected_solver)
+    mod.halo_IC_lib_weights_pca_fixed = capture
+    monkeypatch.setattr(pair, 'load_harness', lambda *args: mod)
+    monkeypatch.setattr(pair.single, 'static_context', lambda mod: ({'geom_hash': 'test'}, {}))
+    monkeypatch.setattr(pair.fields, 'module_identity', lambda agama:
+        dict(files=[dict(path='/fake/agama.so', sha256='changed')]) if failure == 'binary' else binary)
+    evaluate = pair.evaluate_pair
+    monkeypatch.setattr(pair, 'evaluate_pair', lambda *a, **kw: evaluate(*a, **dict(kw, num_orbits=12)))
+    output = tmp_path / 'pilot'
+    args = pair.parse_args(['--models', str(models), '--model-index', '2', '--field-report', str(path),
+        '--harness', str(HARNESS), '--output', str(output), '--pilot'])
+    code = pair.main(args)
+    report = json.loads((output / 'report.json').read_text())
+    if failure in ('binary', 'control_force'):
+        assert code == 1 and not agama.calls and not agama.seeds
+        assert report['status'] == 'failed'
+    elif failure in ('solver', 'stop'):
+        assert code == 1 and len(agama.calls) == 1
+        assert report['status'] == ('stopped' if failure == 'stop' else 'failed')
+        assert (output / 'seed_42/A/library.json').exists()
+    else:
+        assert code == 0 and report['status'] == 'pilot_pass'
+        assert report['orbit_calls'] == 5 and report['penalty_checked'] is True
+        assert report['plan']['num_orbits'] == 100000
+        assert report['evaluation']['context']['construction_mode'] == 'live_density'
+        assert set(report['potentials']) == {'A', 'B', 'C'}
+        assert (output / 'pilot.tsv').exists()
+        reviewed = pair.reviewed_freeq(output / 'report.json', report['plan'])
+        assert reviewed['environment_signature'] == report['environment_signature']
+        bad = dict(report['plan'], models_sha256='different')
+        with pytest.raises(ValueError, match='incompatible'):
+            pair.reviewed_freeq(output / 'report.json', bad)
+        report['evaluation']['technical_checks']['passed'] = False
+        (output / 'report.json').write_text(json.dumps(report))
+        with pytest.raises(ValueError, match='technical'):
+            pair.reviewed_freeq(output / 'report.json', report['plan'])
+    assert pair.main(args) == 2
+
+
+def test_q1_pilot_requires_explicit_review_before_import(pair, evidence, tmp_path, monkeypatch):
+    path, model, recipe = evidence
+    models = tmp_path / 'models.txt'
+    models.write_text('90 1 0 3 50 0.6\n90 1 0 25 50 0.6\n90 0.5 0 2 50 0.6\n')
+    monkeypatch.setattr(pair, 'load_harness', lambda *a: pytest.fail('No runtime before review'))
+    output = tmp_path / 'pilot'
+    args = pair.parse_args(['--models', str(models), '--field-report', str(path), '--pilot',
+                           '--harness', str(HARNESS), '--output', str(output)])
+    assert pair.main(args) == 2
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'order', 'incl'])
+def test_pilot_refuses_changed_model_plan(pair, mutation):
+    models = [dict(Q=1., rh=3., incl=90), dict(Q=1., rh=25., incl=90), dict(Q=0.3, rh=2., incl=90)]
+    if mutation == 'missing':
+        models.pop()
+    elif mutation == 'order':
+        models.reverse()
+    else:
+        models[2]['incl'] = 85
+    with pytest.raises(ValueError, match='three fixed rows'):
+        pair.validate_pilot_models(models, 0)
+
+
+@pytest.mark.parametrize('mode,index', [('validate', 2), ('preflight', 2), ('pilot', 2), ('pilot', 0), ('fields', 2)])
+def test_vm_launcher_is_offline_readonly_and_propagates_exit(tmp_path, mode, index):
+    import os
+    bins = tmp_path / 'bin'
+    bins.mkdir()
+    log = tmp_path / 'docker.jsonl'
+    docker = bins / 'docker'
+    docker.write_text('#!' + sys.executable + '\n' + '''import json, os, sys, time
+with open(os.environ['MOCK_DOCKER_LOG'], 'a') as out:
+    out.write(json.dumps(sys.argv[1:]) + '\\n')
+command = sys.argv[1]
+if command == 'info': print('true')
+elif command == 'image': print('sha256:existing-image')
+elif command == 'create': print('mock-container')
+elif command == 'start': time.sleep(0.1); sys.exit(3)
+elif command == 'inspect': print('{"ExitCode":3,"OOMKilled":false}')
+elif command == 'stats': print('{}')
+else: sys.exit(9)
+''')
+    docker.chmod(0o755)
+    df = bins / 'df'
+    df.write_text('#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nmock 90000000 1 89999999 1%% /mock\\n"\n')
+    df.chmod(0o755)
+    inputs = tmp_path / 'input with spaces'
+    inputs.mkdir()
+    (inputs / 'models.txt').write_text('synthetic')
+    (inputs / 'report.json').write_text('{}')
+    output = tmp_path / 'new output'
+    args = ['bash', str(HERE / 'launch_potential_pair.sh'), f'--mode={mode}',
+        f'--input-root={inputs}', '--models=models.txt', '--field-report=report.json',
+        f'--model-index={index}', f'--output={output}', '--memory-gb=1']
+    if mode == 'pilot' and index == 0:
+        args.append(f'--reviewed-freeq={inputs / "report.json"}')
+    env = dict(os.environ, PATH=str(bins) + ':' + os.environ['PATH'],
+               MOCK_DOCKER_LOG=str(log), PAIR_MONITOR_INTERVAL='0.01')
+    result = subprocess.run(args, env=env, capture_output=True, text=True)
+    assert result.returncode == 3, result.stdout + result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    create = next(call for call in calls if call[0] == 'create')
+    for option in ('--network=none', '--read-only', '--memory=1g', '--memory-swap=1g'):
+        assert option in create
+    assert '--entrypoint' in create and 'python3' in create
+    assert 'sha256:existing-image' in create and '--rm' not in create
+    assert any('dst=/code,readonly' in arg for arg in create)
+    assert any('dst=/input,readonly' in arg for arg in create)
+    assert not any(call[0] in ('pull', 'rm', 'kill') for call in calls)
+    assert (output / 'container_state.json').exists()
+    before = log.read_text()
+    repeat = subprocess.run(args, env=env, capture_output=True, text=True)
+    assert repeat.returncode == 2 and log.read_text() == before
+
+
+def test_manifest_roundtrip_preserves_tuple_recipe_identity(pair, tmp_path):
+    manifest = dict(schema=pair.SCHEMA, context=dict(bounds={'rh': (0.5, 30.0)}))
+    directory = tmp_path / 'library'
+    pair.save_library(directory, [np.ones((4, 2))] * 2, manifest)
+    assert len(pair.load_library(directory, manifest)) == 2
+    changed = dict(manifest, context=dict(bounds={'rh': (0.5, 31.0)}))
+    with pytest.raises(ValueError, match='manifest'):
+        pair.load_library(directory, changed)
+
+
+def test_large_field_penalty_shift_is_not_a_technical_failure(pair, solver, tmp_path):
+    a = Potential()
+    report = pair.evaluate_pair(FakeAgama(), dict(A=a, B=Potential(2), A_repeat=a, C=Potential(2.1)),
+        Stars(), [Dataset(), Dataset()], solver, tmp_path / 'pilot', {}, 42, 0.6,
+        num_orbits=12, native=True, pilot_checks=True)
+    assert report['delta_penalty'] > 0.01
+    assert report['technical_checks']['passed']
+    assert 'C_minus_B' in report['sensitivity_flags']
+
+
+def test_strict_search_diagnostic_does_not_replace_primary_penalty(pair, solver, tmp_path, monkeypatch):
+    original = pair.fit_library
+    def fit(*args, **kw):
+        result = original(*args, **kw)
+        if kw.get('xatol') == 1e-4:
+            result['penalty'] += 0.01
+        return result
+    monkeypatch.setattr(pair, 'fit_library', fit)
+    report = pair.evaluate_pair(FakeAgama(), dict(A=Potential(), B=Potential()), Stars(),
+        [Dataset(), Dataset()], solver, tmp_path / 'pilot', {}, 42, 0.6,
+        num_orbits=4, pilot_checks=True)
+    assert report['status'] == 'ok' and not report['technical_checks']['passed']
+    assert report['variants']['A']['penalty'] == pytest.approx(1)
+
+
+def test_pilot_environment_identity_excludes_model_but_includes_threads_and_construction_code(pair):
+    plan = dict(implementation_sha256='a', fields_implementation_sha256='b', single_implementation_sha256='c',
+                recipe=dict(sha256='h', source='s', halo='fixed'), threads=8)
+    context = dict(python_version='p', numpy='n', scipy='s', agama={'binary': 'g'},
+                   container_image_id='image', catalogue_sha256='table', geometry_arrays=[],
+                   observations=[], model={'Q': 1})
+    base = pair.pilot_environment(plan, context)
+    assert pair.pilot_environment(plan, dict(context, model={'Q': 0.3})) == base
+    assert pair.pilot_environment(dict(plan, threads=4), context) != base
+    assert pair.pilot_environment(plan, dict(context, container_image_id='another-image')) != base
+    assert pair.pilot_environment(dict(plan, implementation_sha256='changed'), context) != base
+
+
+@pytest.mark.parametrize('fail_import', [False, True])
+def test_harness_import_cannot_install_its_checkpoint_signal_handler(pair, tmp_path, monkeypatch, fail_import):
+    import signal
+    numbers = (signal.SIGTERM, signal.SIGINT)
+    before = {n: signal.getsignal(n) for n in numbers}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    def fake_import(*args):
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        assert all(n in blocked for n in numbers)
+        for n in numbers:
+            signal.signal(n, lambda *args: pytest.fail('Harness checkpoint handler escaped import'))
+        if fail_import:
+            raise RuntimeError('import failed')
+        return 'loaded'
+    monkeypatch.setattr(pair, 'load_module', fake_import)
+    if fail_import:
+        with pytest.raises(RuntimeError, match='import failed'):
+            pair.load_harness(HARNESS, {'incl': 90}, 1, tmp_path)
+    else:
+        assert pair.load_harness(HARNESS, {'incl': 90}, 1, tmp_path) == 'loaded'
+    assert {n: signal.getsignal(n) for n in numbers} == before
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == mask

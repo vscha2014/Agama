@@ -400,12 +400,13 @@ local `gala` Python with AGAMA; no Docker. Fresh output directories only.
 Q=1 halo forces use independent quadrature; stars/free-Q references must demonstrate
 numerical convergence. `pass` concerns sampled fields, not penalty. Scientific Step 1B runs are deferred.
 
-## 3f. Step 1B non-orbital preparation
+## 3f. Step 1B preflight and isolated pilot
 
-`py/check_potential_convergence/run_potential_pair.py` has only `--validate-inputs`
+`py/check_potential_convergence/run_potential_pair.py` retains `--validate-inputs`
 (AST/JSON/export validation, no AGAMA import) and `--preflight` (local full harness
-runtime, observations and A/B fields, no IC/orbits/solve). Instructions: its directory
-README §6. The public CLI intentionally has no pilot execution mode.
+runtime, observations and A/B fields, no IC/orbits/solve). README §6 describes these;
+§7 adds explicit `--validate-pilot`, `--pilot-preflight` (including free-Q C) and
+`--pilot` for the prepared seed-42 diagnostic, with separate execution approval.
 
 The objective accepts an optional programmatic `diagnostic` callback after baseline
 construction, before sampling/library access/fitting/history. It requires explicit
@@ -427,8 +428,21 @@ exports are also compared. Runtime context and per-variant stages/metrics persis
 before failures; a normal failure of A does not suppress B's diagnostics.
 A preflight pass certifies reproduction of live construction, not accuracy of a
 reloaded .ini as an orbit potential. Neither preflight nor mock tests establish
-IC admissibility, solver readiness or pilot memory/runtime. Q29 execution/tolerance
-approval remains open; no VM, network, shared pool/catalog or shutdown is implied.
+IC admissibility, solver readiness or pilot memory/runtime. Q29 now approves preparing
+the recommended pilot, not executing it on the VM. Free-Q runs A/B/A-repeat/C/native;
+each Q1 runs A/B/native after an explicit reviewed free-Q report and environment check.
+Working potentials are the checked live objects, with construction provenance in the
+manifest. Full Upsilon searches use xatol=1e-3, with fixed/cross solves; xatol=1e-4
+is a separate diagnostic. delta_P=0.01 and technical budget=0.001 are engineering
+criteria, not significance. No automatic seed expansion or production adoption.
+
+The dedicated `launch_potential_pair.sh` uses one offline, memory/swap-limited
+container with read-only inputs/code, separate output, resource/time/stall guards
+and retained container state. It never invokes the ordinary launchers, cloud
+storage, notifications, swap setup, shutdown or deletion. A different VM binary
+requires reviewed Step 1A evidence there; no fingerprint bypass. Pilot STOP/signal
+handling is isolated from the harness checkpoint handler. No real VM/orbit run was
+performed while preparing this interface.
 
 ## 4. Editing rules
 

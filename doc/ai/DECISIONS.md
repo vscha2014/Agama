@@ -324,3 +324,48 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   harness, upstream and CONTRACT unchanged by this correction.
 - **Outcome location** | local results/registry/handoff hold the actual run details;
   Q29 pilot/tolerance remains open. No scientific penalty evaluation was authorised.
+
+## 2026-10-08 — Two Q1 preflights only (explicit user approval)
+
+- **Scope** | execute the two remaining local Q1 no-orbit preflights sequentially,
+  using the existing exact inputs/dense evidence and fresh isolated output paths.
+  No IC sampling, orbit integration, solveOpt, shared history/library writes or cloud.
+- **Verification** | static input validation, live and serialized reproduction,
+  exact grid/export checks, independent export-roundtrip reporting and no-orbit flags.
+  Run details remain in the local registry, Q1 notes and potential-check handoff.
+- **Boundary** | Q29 common/native seeded protocol, practical penalty tolerance,
+  scientific pilot entry point/execution and later seed expansion are recommendations,
+  not approved by this preflight-only answer. Production and CONTRACT stay unchanged.
+
+## 2026-10-08 — Q29: prepare the seed-42 pilot for ya VM (user request)
+
+- **Approval** | prepare the pilot according to the recommended design, not execute
+  AGAMA/VM/Docker/cloud operations. This supersedes the previous implementation-only
+  prohibition on a scientific entry point; real execution remains a separate gate.
+- **Protocol** | option B: saved common float64 baseline IC/time for A/B, with native
+  B controls. Three fixed input rows; seed 42 only. Free-Q has A/B/A-repeat/C/native
+  (five integrations), then each Q1 has A/B/native (three each), eleven in total.
+  A is the ordinary baseline; live B is N184/l24 with each baseline's radial limits;
+  C is the exact N399/l40 common_fine from dense free-Q evidence. Never integrate a
+  loaded coefficient export. No change to production RNG or global scientific recipe.
+- **Solve/tolerance** | full-library bounded Upsilon [0.1,1.6], xatol=1e-3, maxiter=50,
+  fixed-input and cross-Upsilon solves. An additional xatol=1e-4 check on the same
+  matrices does not replace the primary fit. Practical delta_P=0.01; technical
+  budget=0.001. These are engineering thresholds, not observational significance.
+- **Gates** | validate the exact models/evidence; field-preflight the actual live
+  A/B/C objects before sampling. Preserve the AGAMA binary guard on VM; a different
+  image needs separately reviewed field evidence, not a bypass. Review the five
+  free-Q integrations and resources before explicitly passing its report to Q1.
+  Large A→B alone does not fail the pilot; C/B and native/common sensitivity remains
+  a separate interpretation issue. Other seeds require another decision.
+- **VM isolation** | dedicated single-container launcher, read-only code/input,
+  no network/upload/notifications/shutdown/deletion. Equal RAM and total RAM+swap
+  limits, host/disk headroom, timeout/no-progress stops, resource logs and retained
+  container state. No changes to ordinary launchers, storage, production or CONTRACT.
+- **Implementation** | pilot modes extend the diagnostic runner only; common kernel
+  reports partial stages, timings, current/process-peak RSS, exact IC/time and matrix
+  manifests. JSON-normalised manifest comparison handles tuple bounds without
+  weakening checksums. Harness signal handlers cannot escape its isolated import.
+- **Verification/scope** | mock/numeric tests and static validation of local input
+  rows, syntax and frozen-file diffs; no new real field/orbit/solver/VM run. Commands
+  and artifacts are documented in the existing diagnostic README §7 and local handoff.

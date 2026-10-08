@@ -108,37 +108,21 @@ integration. The harness fix was applied on 2026-10-03 (user request, see
 penalty equal to round-off, orbit integration ≈20× faster on 32 vCPU.
 **Question:** port the same wrap to `_yaVM.py`?
 
-## Q29. Approve the isolated Step 1B potential-sensitivity design?  [affects: diagnostics only]
+## Q29. Execution gates after preparing the Step 1B pilot  [affects: diagnostics only]
 
-Step 1A checks fields, not penalty. The current harness uses the potential for
-both IC sampling and `Tcirc(IC)*intTime`, so equal seeds alone do not hold the
-orbit inputs fixed. Q22 approved seeding only in the existing exp seed runner;
-it does not automatically approve this new diagnostic protocol.
+The user approved preparation for ya VM according to the recommended option B,
+seed-42 eleven-integration design and engineering tolerances; that answer and
+its scope are in DECISIONS (2026-10-08). The diagnostic pilot CLI and separate
+offline Docker wrapper are prepared. Approval was to prepare, not run on the VM.
 
-Options:
-- A: paired seeds with each potential's native IC/time. Simplest end-to-end test,
-  but combines field, IC and duration changes.
-- B: identical saved baseline IC/time for baseline/refined integrations, plus
-  native-IC/time controls in the pilot. Better attribution, needs explicit hooks,
-  IC admissibility checks and an isolated diagnostic runner.
+**Remaining question:** authorise VM validation/preflight (and field-only evidence
+if its AGAMA binary differs), then the five-integration free-Q pilot? After its
+report/resources are reviewed, separately authorise the six Q1 integrations.
+The wrapper requires explicit review of the free-Q report for Q1 execution.
 
-Recommend B, comparing baseline against one Step-1A-validated refined setting
-at the same physical points, with full-library Upsilon search (existing bounded
-range, xatol=1e-3, no subsampling). Propose a gated pilot, then eight predeclared
-paired seeds per point. No production/search reseeding, scientific-input changes,
-shared history/catalog writes, network operations or automated deletion.
-
-Also approve or replace the proposed practical tolerance delta_P=0.01 in raw
-penalty units before execution; this is an engineering decision threshold, not
-chi-square or observational significance. Common-IC integration deliberately
-keeps the same time array rather than equal period counts in the two potentials.
-Detailed proposed sequence, controls, verification and resource gates are in
-local `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.
-
-**Partial answer, 2026-10-08:** the user requested implementation and checks
-without orbits. This scoped approval is recorded in DECISIONS; local mock-tested
-preparation and a no-orbit validation/preflight CLI are implemented.
-
-**Still blocked:** scientific pilot entry point/runs and adoption of the proposed
-tolerance. Real common/native seeded evaluations, extension of the series and any
-production adoption need explicit approval. No scientific run has been authorised.
+Recommended order: input/field/binary checks → free-Q pilot → review correctness,
+A/A, strict-search budget, C/B, native/common and resources → Q1 controls. No
+automatic retries, seed expansion, pool/catalog writes, cloud operations or deletion.
+The additional seven seeds per model and any production adoption remain separate
+future decisions, not implied by this pilot. Commands: diagnostic README §7;
+local handoff §8.14. No scientific pilot has been executed during preparation.

@@ -237,8 +237,8 @@ AST-рецепт, форматы входа, независимость сери
 
 ## 6. Step 1B: подготовка и preflight без орбит
 
-`run_potential_pair.py` — отдельный инструмент. Его CLI допускает **только**
-`--validate-inputs` или `--preflight`; режима запуска пилота/орбит нет.
+`run_potential_pair.py` — отдельный инструмент. `--validate-inputs` и `--preflight`
+остаются безорбитальными; явные режимы подготовки/запуска пилота описаны в §7.
 Проверка Step 1A выше не менялась. Расширения экспериментального harness не меняют
 его обычные параметры потенциала, выборку IC, поиск Upsilon или storage keys.
 Production, исходные результаты и научный контракт остаются неизменными.
@@ -249,7 +249,7 @@ Production, исходные результаты и научный контра
 |---|---|---|
 | Mock/numeric-тесты и `--validate-inputs` | локальная `.venv-ai`, NumPy/SciPy/pytest | импорт AGAMA/harness, орбиты, solveOpt |
 | `--preflight` | локальный Python с полным набором зависимостей harness | выборка IC, seeding AGAMA, орбиты, solveOpt, сеть |
-| Будущий научный пилот | отдельно согласованное окружение и ресурсы | этот CLI пока не умеет его запускать |
+| `--pilot` (§7) | полное окружение; отдельное разрешение на запуск | нет общего history/catalog, сети или автоматического расширения серии |
 
 Для preflight нужны не только AGAMA/NumPy/SciPy, но и зависимости импортируемого
 harness: torch, BoTorch/GPyTorch, sklearn, requests и пакетные модули AGAMA.
@@ -343,7 +343,7 @@ running, pass, failed/interrupted. Обычная ошибка A не мешае
 
 ### Что уже проверяет mock-драйвер и что отложено
 
-Тестируемое ядро `evaluate_pair` не вызывается CLI. На fake AGAMA оно проверяет:
+Ядро `evaluate_pair` вызывается только явным `--pilot`. На fake AGAMA проверяются:
 общие точные IC/time для A/B, отдельные native IC/time, проверку boundness без
 clipping/resampling, одинаковые dtype/полный solve, фиксированную и найденную
 Upsilon, перекрёстные solve, исключения и частичные результаты при STOP.
@@ -361,11 +361,170 @@ checksum проверяется перед чтением. Веса, предс�
 seed, не удаляя записи. Приближённый t-интервал описывает только средний MC-сдвиг,
 не неопределённость параметров Fornax; практический допуск автоматически не применяется.
 
-Пока не предоставлены: CLI научного пилота/пакетный scheduler, resume серии,
-облачная доставка и автоматическое решение по Q29. Будущий pilot entry point
-должен передавать проверенный runtime manifest, сохранять ресурсы/время и связывать
-контроли A/A, native и более точный C с утверждённым планом. Construction mode
-(live density или loaded export) должен быть явным в контексте: hash текста
-коэффициентов сам по себе не доказывает идентичность внутренних полей.
-Реальные IC, solver, орбитальное покрытие и ресурсы ещё надо проверить после
-отдельного разрешения.
+Нет resume, многосидового scheduler, облачной доставки или автоматического решения
+о принятии новых настроек production. Реальные IC, solver, орбитальное покрытие и
+ресурсы проверяются только отдельно разрешённым пилотом. Construction mode явно
+включён в manifest; hash экспортного текста не заменяет проверку live-поля.
+
+## 7. Подготовленный пилот seed=42 на ya VM
+
+Реализация согласована как подготовка к запуску. Само выполнение на VM требует
+отдельного разрешения; команды ниже не запускались при разработке.
+
+Вход — ровно три неизменные строки в порядке Q1-small, Q1-large, free-Q, при одном
+inclination. Все шесть параметров должны точно совпадать с dense field evidence.
+Нельзя автоматически брать новый минимум из истории или округлять строки.
+
+| index | интеграции | число |
+|---|---|---|
+| 2, free-Q | A, B, A_repeat, C, B_native | 5 |
+| 0, Q1-small | A, B, B_native | 3 |
+| 1, Q1-large | A, B, B_native | 3 |
+
+A=N23/l4, B=N184/l24 с пределами baseline своей модели. C — точный common_fine
+free-Q отчёта N399/l40 с его расширенными пределами. Все рабочие объекты строятся
+**live из плотностей**, проходят field-preflight и именно эти объекты передаются
+интегратору. `.ini` загружаются только для отдельной диагностики serialization.
+
+Для каждой модели seed=42 устанавливается перед единственной выборкой IC_A.
+Сохраняются float64 IC_A и T_A=100*Tcirc_A; A/B/A_repeat/C получают их точные копии.
+B_native отдельно сбрасывает seed=42 и выбирает свои IC_B/T_B. У всех 100000 орбит,
+одинаковые targets, Omega=0, regul=1 и число потоков; trajectories не запрашиваются.
+Недопустимые IC или изменение dtype/входов прекращают пару, без clipping/resampling.
+
+Основной solve: все орбиты, bounded Upsilon [0.1,1.6], xatol=1e-3, maxiter=50,
+фиксированная входная Upsilon и перекрёстные A/B solve. Дополнительный xatol=1e-4
+на тех же матрицах — диагностика, не замена основного результата. Budget=0.001 для
+A/A, повторного solve и изменения penalty при строгом поиске. delta_P=0.01 —
+практический ориентир; большой A→B не означает технический отказ. Native−common
+и C−B отдельно помечаются при превышении delta_P. Один seed не даёт MC-интервала.
+
+### Интерфейсы и изоляция
+
+- `--validate-pilot`: план/входы/сходимость evidence и C, без AGAMA и записи файлов.
+- `--pilot-preflight`: поле A/B, у free-Q также C, без seeding/IC/orbit/solve.
+- `--pilot`: только выбранная строка, seed=42; другие seeds запрещены.
+- Q1 `--pilot` требует `--reviewed-freeq REPORT`: явное подтверждение просмотра
+  успешного free-Q пилота. Проверяются исходный models hash, пять завершённых ветвей,
+  budget и одинаковые image/code/harness/AGAMA/NumPy/SciPy/observations/threads fingerprints.
+- Перед орбитами выполняется field-preflight в том же процессе. Это не лишний
+  standalone run: он защищает именно live-объекты будущей интеграции.
+- `SIGTERM`/`SIGINT` и `OUTPUT/STOP` останавливают работу между вычислительными
+  вызовами, включая пробы Upsilon. Во время импорта harness его checkpoint-handler
+  изолирован и не используется. Прерывание C-вызова не гарантируется мгновенно.
+
+`launch_potential_pair.sh` — отдельный wrapper, не штатный launcher. Он запускает
+**один** контейнер без сети, с read-only code/input/rootfs и отдельным writable
+output/tmpfs; не монтирует rclone config. Image разрешается в локальный ID, без pull.
+Никаких notify/upload/shutdown, создания swap, удаления библиотек или контейнеров.
+
+Defaults: 8 потоков, memory=memory-swap=8 GiB (контейнеру swap запрещён), host reserve
+2 GiB, timeout=21600 s, no-progress=3600 s, stop grace=120 s. Swap accounting должно
+быть подтверждено; перед pilot требуется 20 GiB свободно. Это консервативные лимиты,
+не измеренные потребности refined-потенциалов. Runner дополнительно проверяет запас
+под оставшиеся матрицы перед IC/каждой интеграцией. Подбирать workers позже по RSS;
+сейчас не запускать несколько wrappers одновременно. Менять thread count между
+free-Q и Q1 нельзя. Timeout/stall можно задать явно до запуска.
+
+### Файлы для VM и предварительная проверка
+
+Обновить на VM диагностическую папку вместе с актуальными соседними
+`run_single_model.py`, experimental harness, `orblib_storage.py`, `table3.dat` и
+используемыми upstream Python-модулями. Самый простой вариант — актуальное дерево
+`py/` из этого репозитория; не полагаться на старую копию внутри Docker image.
+Численные входы не коммитить: отдельно перенести models-файл и полные dense-каталоги
+с верхними/model report.json и соседними коэффициентами. В примере они названы
+`models.local.txt`, `q1_dense/`, `freeq_dense/`. Старые результаты не перезаписывать.
+
+В уже подготовленном пользовательском окружении VM, после разрешения:
+
+```bash
+LAUNCH=/path/to/Agama/py/check_potential_convergence/launch_potential_pair.sh
+INPUT="$HOME/potential_pair_inputs"
+OUTPUT="$HOME/potential_pair_runs"
+mkdir -p "$OUTPUT"
+STAMP=$(date +%Y%m%d_%H%M%S)
+REPORTS=(q1_dense/model_000/report.json q1_dense/model_001/report.json freeq_dense/model_000/report.json)
+
+for i in 2 0 1; do
+    bash "$LAUNCH" --mode=validate --input-root="$INPUT" --models=models.local.txt \
+        --model-index="$i" --field-report="${REPORTS[$i]}" \
+        --output="$OUTPUT/validate_${i}_${STAMP}" || break
+done
+```
+
+Просмотреть планы в `container.log`; затем отдельно проверить поля всех трёх строк
+тем же вызовом с `--mode=preflight` и **новыми** output `preflight_${i}_${STAMP}`.
+Переходить дальше только если все три report имеют `preflight_pass` и нулевые
+IC/orbit/solver flags. Free-Q preflight включает C. Это проверка нового VM-окружения,
+а не повтор локальных результатов без причины.
+
+**Если бинарник VM отличается:** не отключать guard и не подменять fingerprint.
+Сначала отдельно согласовать field-only Step 1A в том же image:
+
+```bash
+FIELDS="fields_vm_$(date +%Y%m%d_%H%M%S)"
+bash "$LAUNCH" --mode=fields --input-root="$INPUT" --models=models.local.txt \
+    --output="$INPUT/$FIELDS"
+```
+
+Этот режим сохраняет новую проверку 192×17, radial 23/46/92/184, angular до 32 для
+всех трёх точек. Код 3 может означать плохой baseline, а не сбой reference. Проверить
+сходимость эталонов и прохождение B/C; при отказе не запускать орбиты. После анализа:
+
+```bash
+REPORTS=("$FIELDS/run/model_000/report.json" "$FIELDS/run/model_001/report.json" "$FIELDS/run/model_002/report.json")
+```
+
+Затем повторить validate/preflight с новыми output; не менять scientific thresholds.
+Если C не соответствует N399/l40, остановиться и пересмотреть evidence, не обходить
+проверку вручную. Код и image должны оставаться неизменными между этапами.
+
+### Сначала free-Q, затем ручное решение о Q1
+
+После успешной подготовки и отдельного разрешения на орбиты:
+
+```bash
+FREE="$OUTPUT/freeq_${STAMP}"
+bash "$LAUNCH" --mode=pilot --input-root="$INPUT" --models=models.local.txt \
+    --model-index=2 --field-report="${REPORTS[2]}" --output="$FREE"
+```
+
+**Остановиться для просмотра** `$FREE/run/report.json`, `pilot.tsv`, `pilot.log`,
+`container_state.json`, `resources.jsonl`. Должны быть пять завершённых интеграций,
+`pilot_pass`, technical_checks.passed=true. Проверить времена/RSS/место, A/A,
+strict-search, B/C и native/common, IC admissibility и радиусы начальных точек.
+`ic_radius` не доказывает покрытия всей орбиты. Большой B/C/native сигнал требует
+обсуждения дальнейшей интерпретации, а не автоматического расширения series.
+
+Только после просмотра и разрешения продолжить:
+
+```bash
+for i in 0 1; do
+    bash "$LAUNCH" --mode=pilot --input-root="$INPUT" --models=models.local.txt \
+        --model-index="$i" --field-report="${REPORTS[$i]}" \
+        --reviewed-freeq="$FREE/run/report.json" --output="$OUTPUT/q1_${i}_${STAMP}" || break
+done
+```
+
+При успехе это 5+3+3=11 интеграций. Другие seeds, profile/search, J и production
+adoption не входят в этот запуск.
+
+### Артефакты и остановка
+
+На host: launcher.log, container_id.txt, container.log, container_state.json,
+resources.jsonl. Контейнеры остаются для диагностики; при hard kill/OOM JSON runner
+может остаться running, поэтому всегда проверять host exit и OOMKilled.
+
+В `run/`: report.json, pilot.log, pilot.tsv, A/B/(C).ini. В `run/seed_42/` — точные
+IC/time, B_period_counts.npy, report.json и variant-каталоги с matrix_0/1.npy,
+library.json, weights, residuals, penalties, superpositions, fit.json. Никаких
+out_*/4Ups* или общего library catalog. Полные `.npy` могут быть больше старых
+сжатых `.npz`; не удалять их автоматически после просмотра.
+
+`resources.peak_rss_bytes` — максимум процесса, не отдельной фазы. Текущий RSS и
+фазовые секунды сохраняются отдельно; container stats дают дополнительный мониторинг.
+`pilot_pass` означает техническую корректность, не малость A→B и не сходимость penalty.
+Runner codes: 0 — pass/validated; 1 — failed/stopped; 2 — input/overwrite/review;
+3 — законченный pilot с превышением технического бюджета, нужен разбор. Wrapper
+возвращает container code, либо 124 при timeout/stall/host-memory/signal stop.
