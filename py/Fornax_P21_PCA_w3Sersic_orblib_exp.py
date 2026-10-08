@@ -1358,6 +1358,21 @@ def finalize(best_params, best_Upsilon, best_penalty):
 # ==============================================================
 #  ЦЕЛЕВАЯ ФУНКЦИЯ
 # ==============================================================
+def solve_orbit_library(Upsilon, mats, datasets, rhs, pen_cons, pen_reg, mult, details=False):
+    matrix = [d.getOrbitMatrix(m, Upsilon).T for d, m in zip(datasets, mats)]
+    started = time.perf_counter()
+    weights = agama.solveOpt(matrix=matrix, rhs=rhs, rpenq=pen_cons, xpenq=pen_reg) * mult
+    seconds = time.perf_counter() - started
+    superpositions = [weights.dot(m) for m in mats]
+    penalties = [d.getPenalty(s, Upsilon) for d, s in zip(datasets, superpositions)]
+    penalty = numpy.sum(penalties[1])
+    if not details:
+        return penalty, seconds
+    return dict(penalty=penalty, seconds=seconds, weights=weights,
+                penalties=penalties, superpositions=superpositions,
+                residuals=[m.dot(weights) - d.cons_val for m, d in zip(matrix, datasets)])
+
+
 def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     densityStars, datasets, alphah, betah,
                                     Upsilon_lower=0.1, Upsilon_upper=1.6,
@@ -1365,8 +1380,18 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                     regul=1.,
                                     # НОВЫЙ параметр: прямые параметры без PCA
                                     direct_params=None,
-                                    allow_orblib_reuse=True):
+                                    allow_orblib_reuse=True, diagnostic=None):
     global best_overall_Upsilon, best_overall_target, number_of_h_IC_lw, number_of_find_w_U, hostname_proc, UpsFile, _ups_recent, orblib_counter, orblib_archived_rebuilds
+    if diagnostic is not None:
+        if not callable(diagnostic) or SAVE_ORBLIB or REUSE_ORBLIB or globals().get('orblib_store') is not None:
+            raise ValueError('Diagnostic evaluation requires a callback and disabled shared library storage/reuse')
+        if direct_params is None or any(
+                name not in direct_params or not numpy.isfinite(direct_params[name]) or
+                not lo <= direct_params[name] <= hi
+                for name, (lo, hi) in bounds_original.items() if name != 'Upsilon'):
+            raise ValueError('Diagnostic parameters must be explicit, finite and within bounds')
+        if Q1 and direct_params['Q'] != 1.0:
+            raise ValueError('Diagnostic parameters conflict with Q1')
     
    # --- РЕЖИМ БЕЗ PCA: direct_params передан напрямую ---
     if direct_params is not None:
@@ -1432,6 +1457,12 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             density=agama.Density(densityStars, densityHalo),
             lmax=4, mmax=0, gridSizeR=23
         )
+        if diagnostic is not None:
+            return diagnostic(baseline=pot_gal, density_stars=densityStars,
+                              density_halo=densityHalo, datasets=datasets, params=dict(params),
+                              num_orbits=numOrbits, int_time=intTime, regul=regul,
+                              upsilon_bounds=(Upsilon_lower, Upsilon_upper),
+                              solve_library=solve_orbit_library)
         
         # --- Lookup сохранённой библиотеки орбит (--reuse-orblib) ---
         # ТОЛЬКО локальные файлы в ORBLIB_DIR (никакой сети в горячем цикле);
@@ -1615,6 +1646,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
     except OrblibBusyError:
         raise
     except Exception as e:
+        if diagnostic is not None:
+            raise
         print(f"  Ошибка при создании модели: {e}")
         return -1e6
     finally:
@@ -1638,14 +1671,10 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         global number_of_find_w_U
         _ups_val = float(numpy.ravel(numpy.asarray(Upsilon))[0])
         try:
-            matrix = [d.getOrbitMatrix(m, Upsilon).T for d, m in zip(datasets, mats)]
-            _t_solve = time.perf_counter()
-            weights = agama.solveOpt(matrix=matrix, rhs=rhs, rpenq=pen_cons, xpenq=pen_reg_loc) * mult
+            pen, solve_seconds = solve_orbit_library(
+                Upsilon, mats, datasets, rhs, pen_cons, pen_reg_loc, mult)
             if record:
-                solveopt_times.append((_ups_val, time.perf_counter() - _t_solve))
-            superpositions = [weights.dot(m) for m in mats]
-            penalties = [d.getPenalty(s, Upsilon) for d, s in zip(datasets, superpositions)]
-            pen = numpy.sum(penalties[1])
+                solveopt_times.append((_ups_val, solve_seconds))
             number_of_find_w_U += 1
             return pen
         except Exception as e:

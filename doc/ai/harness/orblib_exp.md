@@ -389,6 +389,47 @@ Tests: `tests/test_single_model.py` (`*seed*`).
   container with the integration of others; peak ≈ 4 × 2.6 GB). 1×32 is ~10 %
   slower by estimate; 8×4 gains little and leaves ~1 GB margin per container.
 
+## 3e. Field-only potential check (Step 1A)
+
+Separate tool, tests and full local-run instructions:
+[`py/check_potential_convergence/README.md`](../../../py/check_potential_convergence/README.md).
+It reads the harness recipe via AST, compares gravitational fields and real radial
+meshes, and never integrates orbits, fits weights, seeds RNG, accesses cloud storage
+or writes history rows. The user runs `--self-test` and then `--models FILE` under
+local `gala` Python with AGAMA; no Docker. Fresh output directories only.
+Q=1 halo forces use independent quadrature; stars/free-Q references must demonstrate
+numerical convergence. `pass` concerns sampled fields, not penalty. Scientific Step 1B runs are deferred.
+
+## 3f. Step 1B non-orbital preparation
+
+`py/check_potential_convergence/run_potential_pair.py` has only `--validate-inputs`
+(AST/JSON/export validation, no AGAMA import) and `--preflight` (local full harness
+runtime, observations and A/B fields, no IC/orbits/solve). Instructions: its directory
+README §6. The public CLI intentionally has no pilot execution mode.
+
+The objective accepts an optional programmatic `diagnostic` callback after baseline
+construction, before sampling/library access/fitting/history. It requires explicit
+in-bounds parameters and disabled save/reuse/store. Callback failures propagate;
+normal evaluation still follows its original path. `solve_orbit_library` shares
+the existing solve/penalty equations and optionally returns weights, predictions
+and unscaled linear-constraint residuals. No new search or production flags.
+
+The diagnostic kernel is covered with fake AGAMA: common IC/time, separate native
+controls, full-library Upsilon protocol, exact context/checksum matching, mmap
+matrix reload and preserved partial reports. Ordinary orblib keys/storage are
+unchanged; diagnostic matrices live in independent directories with manifests.
+Source Step 1A recipe is checked independently of the changed harness source hash;
+preflight requires the same AGAMA binary, matching export bytes/grids, and live
+field agreement with an independently reconstructed archived recipe (max 1e-9).
+Live-to-export/reload differences are separate non-gating serialization diagnostics;
+AGAMA export recomputes/prunes harmonics and is not lossless. Reloaded current/archived
+exports are also compared. Runtime context and per-variant stages/metrics persist
+before failures; a normal failure of A does not suppress B's diagnostics.
+A preflight pass certifies reproduction of live construction, not accuracy of a
+reloaded .ini as an orbit potential. Neither preflight nor mock tests establish
+IC admissibility, solver readiness or pilot memory/runtime. Q29 execution/tolerance
+approval remains open; no VM, network, shared pool/catalog or shutdown is implied.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.

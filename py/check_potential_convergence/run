@@ -1,0 +1,76 @@
+CHECK=/home/gala/Agama/py/check_potential_convergence/check_potential_convergence.py
+CHECKRES=/home/gala/Agama/py/potential_checks
+
+python3 "$CHECK" --self-test --threads 1 \
+  --output "$CHECKRES/smoke_$(date +%Y%m%d_%H%M%S)"
+
+# #############
+MODELS="$CHECKRES/models_potential_check.txt"
+
+python3 "$CHECK" --models "$MODELS" --validate-inputs
+
+python3 "$CHECK" --models "$MODELS" --threads 1 \
+  --output "$CHECKRES/fields_$(date +%Y%m%d_%H%M%S)"
+
+# ##############
+
+MODELS="$CHECKRES/models_potential_check.txt"
+
+python3 "$CHECK" --models "$MODELS" --validate-inputs
+
+python3 "$CHECK" --models "$MODELS" --threads 1 \
+  --output "$CHECKRES/fields_$(date +%Y%m%d_%H%M%S)"
+
+# #################
+MODELS="$CHECKRES/models_potential_check_freeq.txt"
+ 
+python3 "$CHECK" --models "$MODELS" --threads 1 \
+  --radial-nodes 23,46,92,184 \
+  --angular-orders 4,8,12,16,24,32 \
+  --radii 96 --angles 9 \
+  --rms-tol 1e-4 --max-tol 1e-3 \
+  --output "$CHECKRES/fields_freeq_l32_$(date +%Y%m%d_%H%M%S)"
+
+python3 "$CHECK" --models "$MODELS" --threads 1 \
+  --radial-nodes 23,46,92,184 \
+  --angular-orders 4,8,12,16,24,32 \
+  --radii 192 --angles 17 \
+  --rms-tol 1e-4 --max-tol 1e-3 \
+  --output "$CHECKRES/fields_freeq_l32_$(date +%Y%m%d_%H%M%S)"
+
+# ##################
+PYTHON=/home/gala/miniconda3/envs/agamaBoTorch/bin/python3
+CHECK=/home/gala/Agama/py/check_potential_convergence/check_potential_convergence.py
+HARNESS=/home/gala/Agama/py/Fornax_P21_PCA_w3Sersic_orblib_exp.py
+CHECKRES=/home/gala/Agama/py/potential_checks
+
+STAMP=$(date +%Y%m%d_%H%M%S)
+MODELS="$CHECKRES/models_potential_check_q1_${STAMP}.txt"
+OUT="$CHECKRES/fields_q1_dense_${STAMP}"
+
+(
+  set -o noclobber
+  head -n 2 "$CHECKRES/models_potential_check.txt" > "$MODELS"
+) &&
+"$PYTHON" "$CHECK" \
+  --models "$MODELS" --harness "$HARNESS" --validate-inputs &&
+"$PYTHON" "$CHECK" \
+  --models "$MODELS" --harness "$HARNESS" \
+  --threads 1 \
+  --radial-nodes 23,46,92,184 \
+  --angular-orders 4,8,12,16,24 \
+  --radii 192 --angles 17 \
+  --rms-tol 1e-4 --max-tol 1e-3 \
+  --output "$OUT"
+# ##############
+
+PYTHON=/home/gala/miniconda3/envs/agamaBoTorch/bin/python3
+ROOT=/home/gala/Agama/py/
+
+python3 "$ROOT/check_potential_convergence/run_potential_pair.py" \
+  --models "$ROOT/potential_checks/models_potential_check.txt" \
+  --model-index 2 \
+  --field-report "$ROOT/potential_checks/fields_freeq_l32_20261008_102821/model_000/report.json" \
+  --harness "$ROOT/Fornax_P21_PCA_w3Sersic_orblib_exp.py" \
+  --preflight --threads 1 \
+  --output "$ROOT/potential_checks/pair_preflight_$(date +%Y%m%d_%H%M%S)"

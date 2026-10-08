@@ -1,0 +1,4 @@
+runs/
+models.local*.txt
+potential_checks/
+models_potential_check.txt

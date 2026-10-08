@@ -210,7 +210,7 @@ N_ORBITS = 8000   # sub-sample = max(1000, 25 %) = exactly a quarter
 
 
 def real_halo_module(tmp_path, store):
-    names = ['halo_IC_lib_weights_pca_fixed', 'orblib_key', 'write_orblib_npz', 'log_mem',
+    names = ['halo_IC_lib_weights_pca_fixed', 'solve_orbit_library', 'orblib_key', 'write_orblib_npz', 'log_mem',
              'note_archived_rebuild', '_params_to_dummy_pc', 'FunctionLogger', 'OrblibBusyError',
              'save_initial_checkpoint']
     nodes = [n for n in TREE.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
@@ -1076,3 +1076,101 @@ def test_launcher_seed_scan_rejects_bad_requests_without_side_effects(tmp_path):
         result, events = run_launcher(work, *args, prefix=SEED_PREFIX)
         assert result.returncode == 2, (args, result.stdout + result.stderr)
         assert not events and not list(work.glob('launch_*.log'))
+
+
+def test_diagnostic_hook_bypasses_orbit_storage_solve_and_history(tmp_path):
+    mod, calls = real_halo_module(tmp_path, None)
+    mod.SAVE_ORBLIB = mod.REUSE_ORBLIB = False
+    runner.prepare_module(mod, None)
+    received = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Non-orbital diagnostic attempted sampling or fitting')
+
+    mod.densityStars.sample = forbidden
+    mod.agama.solveOpt = forbidden
+
+    def capture(**values):
+        received.append(values)
+        return {'status': 'preflight'}
+
+    result = mod.halo_IC_lib_weights_pca_fixed(
+        numpy.zeros(4), None, mod.bounds_original, mod.densityStars, mod.datasets, 2, 3,
+        direct_params=dict(Q=1.0, gh=0.0, rh=3.0, rho0=50.0), diagnostic=capture)
+    assert result == {'status': 'preflight'} and calls.orbit == 0
+    assert received[0]['num_orbits'] == N_ORBITS
+    assert received[0]['int_time'] == 100 and received[0]['regul'] == 1
+    assert received[0]['upsilon_bounds'] == (0.1, 1.6)
+    assert received[0]['solve_library'] is mod.solve_orbit_library
+    assert not list(tmp_path.rglob('*.npz')) and not list(tmp_path.rglob('out_*'))
+
+
+@pytest.mark.parametrize('case', ['save', 'reuse', 'store', 'bounds', 'nonfinite', 'q1'])
+def test_diagnostic_hook_fails_closed_before_any_work(tmp_path, case):
+    mod, calls = real_halo_module(tmp_path, None)
+    mod.SAVE_ORBLIB = mod.REUSE_ORBLIB = False
+    runner.prepare_module(mod, None)
+    params = dict(Q=0.5, gh=0.0, rh=3.0, rho0=50.0)
+    if case == 'save':
+        mod.SAVE_ORBLIB = True
+    elif case == 'reuse':
+        mod.REUSE_ORBLIB = True
+    elif case == 'store':
+        mod.orblib_store = object()
+    elif case == 'bounds':
+        params['rh'] = 31
+    elif case == 'nonfinite':
+        params['rh'] = float('inf')
+    else:
+        mod.Q1 = True
+    before = params.copy()
+    with pytest.raises(ValueError):
+        mod.halo_IC_lib_weights_pca_fixed(
+            numpy.zeros(4), None, mod.bounds_original, mod.densityStars, mod.datasets, 2, 3,
+            direct_params=params, diagnostic=lambda **kw: pytest.fail('callback unexpectedly called'))
+    assert params == before and calls.orbit == 0
+
+
+def test_diagnostic_callback_exception_is_not_converted_to_sentinel(tmp_path):
+    mod, calls = real_halo_module(tmp_path, None)
+    mod.SAVE_ORBLIB = mod.REUSE_ORBLIB = False
+    runner.prepare_module(mod, None)
+
+    def fail(**kw):
+        raise ValueError('field mismatch')
+
+    with pytest.raises(ValueError, match='field mismatch'):
+        mod.halo_IC_lib_weights_pca_fixed(
+            numpy.zeros(4), None, mod.bounds_original, mod.densityStars, mod.datasets, 2, 3,
+            direct_params=dict(Q=1.0, gh=0.0, rh=3.0, rho0=50.0), diagnostic=fail)
+    assert calls.orbit == 0
+
+
+@pytest.mark.parametrize('dtype', [numpy.float32, numpy.float64])
+def test_shared_solver_preserves_original_penalty_formula(tmp_path, dtype):
+    mod, calls = real_halo_module(tmp_path, None)
+
+    class Dataset:
+        cons_val = numpy.array([1.0, 2.0])
+
+        def getOrbitMatrix(self, matrix, upsilon):
+            return matrix * upsilon
+
+        def getPenalty(self, prediction, upsilon):
+            return prediction**2 / upsilon
+
+    datasets = [Dataset(), Dataset()]
+    mats = [numpy.arange(16, dtype=dtype).reshape(8, 2) + k for k in (1, 2)]
+    upsilon, mult = 0.7, 20.0
+    rhs, pen_cons, pen_reg = [d.cons_val / mult for d in datasets], [numpy.ones(2)] * 2, numpy.ones(8)
+    matrix = [d.getOrbitMatrix(m, upsilon).T for d, m in zip(datasets, mats)]
+    weights = mod.agama.solveOpt(matrix=matrix, rhs=rhs, rpenq=pen_cons, xpenq=pen_reg) * mult
+    superpositions = [weights.dot(m) for m in mats]
+    penalties = [d.getPenalty(s, upsilon) for d, s in zip(datasets, superpositions)]
+    expected = numpy.sum(penalties[1])
+    actual, _ = mod.solve_orbit_library(upsilon, mats, datasets, rhs, pen_cons, pen_reg, mult)
+    details = mod.solve_orbit_library(upsilon, mats, datasets, rhs, pen_cons, pen_reg, mult, details=True)
+    assert actual == expected == details['penalty']
+    numpy.testing.assert_array_equal(details['weights'], weights)
+    for i in range(2):
+        numpy.testing.assert_array_equal(details['residuals'][i], matrix[i].dot(weights)-datasets[i].cons_val)

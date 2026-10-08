@@ -268,3 +268,59 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   legacy tar index ⇒ archive-first-wins (file kept on the VM, no failure code).
   `compatible_metadata` keeps comparing `trajsize`: the conflict is genuine (another
   realisation under one name) and must not be published.
+
+## 2026-10-06 — Field-only potential convergence diagnostic (user request)
+
+- **Scope** | Step 1A only, isolated under `py/check_potential_convergence/` with
+  tests and usage documentation. No changes to the harness, production, scientific
+  definitions, launchers or storage; no orbit integration, IC sampling or fitting.
+- **Execution** | user will run the installed AGAMA locally as `gala`, without
+  Docker. A standalone `--self-test` checks Plummer forces and Multipole export;
+  the agent ran only numeric/mocked tests. Real AGAMA validation remains pending.
+- **Inputs/units** | read the harness recipe and bounds through restricted AST,
+  never execute it; models are explicit local rows. Compare the unscaled G=1
+  integration potential, not densities multiplied by Upsilon twice.
+- **Reference** | independent spherical quadrature for Q=1 halo; separately tested
+  radial/angular/domain convergence for stars and non-spherical halos. An
+  unconverged reference cannot produce a pass. Changing grid extent does not
+  change the physical halo cutoff.
+- **Isolation** | fresh output directory only; actual grids, fingerprints and
+  reports retained locally, nothing enters the shared history or library catalog.
+  Step 1B (penalty sensitivity) and adoption of new production settings require
+  separate approval. Behaviour/commands: `py/check_potential_convergence/README.md`.
+
+## 2026-10-08 — Step 1B implementation and checks without orbits (user request)
+
+- **Approved scope** | prepare the implementation and local mocked/numeric checks,
+  not the scientific pilot. Q29 practical tolerance, real seeded/common-IC runs,
+  seed-series expansion and production adoption are still pending.
+- **Isolation** | a separate diagnostic module with only validation/preflight CLI;
+  the paired computational kernel is tested with fake AGAMA, not exposed as a
+  real-orbit CLI. No cloud operations, shared pool/catalog writes or data deletion.
+- **Harness interface** | a guarded optional callback after baseline construction,
+  and extraction of the existing solve equations into a shared helper. Ordinary
+  defaults, physical recipe, RNG behaviour and library keys are unchanged.
+  No production/upstream, launcher, storage or CONTRACT changes.
+- **Verification boundary** | local development dependencies suffice for mock tests
+  and static input/evidence validation. A real no-orbit preflight needs the full
+  AGAMA/harness environment, available locally or on a separately approved VM;
+  it does not verify the real solver, orbit coverage or pilot resource requirements.
+  Commands and remaining work: diagnostic README §6 and harness §3f.
+
+## 2026-10-08 — Separate live reproduction from potential serialization (user request)
+
+- **Scope** | fix the non-orbital preflight, verify it, repeat the free-Q preflight
+  locally and prepare the continuation handoff. No orbit pilot or production adoption.
+- **Reason** | Multipole export reconstructs/prunes coefficients; comparing a live
+  object directly to its text export reloaded conflates recipe reproduction with
+  serialization error. A spherical smoke test does not establish lossless export.
+- **Checks** | keep max 1e-9 for live-to-live reconstruction from the archived recipe
+  and for comparison of two reloaded exports; require exact export/grid identity.
+  Measure live-to-reloaded differences separately, with explicit warnings rather
+  than treating them as recipe drift. This does not certify exported orbit potentials.
+- **Reporting** | persist context and per-variant stages/metrics before failures,
+  including all/main scores and worst coordinates. Test lossy export, actual field
+  drift, nonfinite forces and partial results. Keep the scientific Step 1A thresholds,
+  harness, upstream and CONTRACT unchanged by this correction.
+- **Outcome location** | local results/registry/handoff hold the actual run details;
+  Q29 pilot/tolerance remains open. No scientific penalty evaluation was authorised.

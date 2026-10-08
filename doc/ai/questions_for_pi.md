@@ -107,3 +107,38 @@ integration. The harness fix was applied on 2026-10-03 (user request, see
 `DECISIONS.md`) and verified on the VM: bit-identical library (same MD5),
 penalty equal to round-off, orbit integration ≈20× faster on 32 vCPU.
 **Question:** port the same wrap to `_yaVM.py`?
+
+## Q29. Approve the isolated Step 1B potential-sensitivity design?  [affects: diagnostics only]
+
+Step 1A checks fields, not penalty. The current harness uses the potential for
+both IC sampling and `Tcirc(IC)*intTime`, so equal seeds alone do not hold the
+orbit inputs fixed. Q22 approved seeding only in the existing exp seed runner;
+it does not automatically approve this new diagnostic protocol.
+
+Options:
+- A: paired seeds with each potential's native IC/time. Simplest end-to-end test,
+  but combines field, IC and duration changes.
+- B: identical saved baseline IC/time for baseline/refined integrations, plus
+  native-IC/time controls in the pilot. Better attribution, needs explicit hooks,
+  IC admissibility checks and an isolated diagnostic runner.
+
+Recommend B, comparing baseline against one Step-1A-validated refined setting
+at the same physical points, with full-library Upsilon search (existing bounded
+range, xatol=1e-3, no subsampling). Propose a gated pilot, then eight predeclared
+paired seeds per point. No production/search reseeding, scientific-input changes,
+shared history/catalog writes, network operations or automated deletion.
+
+Also approve or replace the proposed practical tolerance delta_P=0.01 in raw
+penalty units before execution; this is an engineering decision threshold, not
+chi-square or observational significance. Common-IC integration deliberately
+keeps the same time array rather than equal period counts in the two potentials.
+Detailed proposed sequence, controls, verification and resource gates are in
+local `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.
+
+**Partial answer, 2026-10-08:** the user requested implementation and checks
+without orbits. This scoped approval is recorded in DECISIONS; local mock-tested
+preparation and a no-orbit validation/preflight CLI are implemented.
+
+**Still blocked:** scientific pilot entry point/runs and adoption of the proposed
+tolerance. Real common/native seeded evaluations, extension of the series and any
+production adoption need explicit approval. No scientific run has been authorised.
