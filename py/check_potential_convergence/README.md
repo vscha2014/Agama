@@ -416,7 +416,24 @@ A/A, повторного solve и изменения penalty при строг�
 `launch_potential_pair.sh` — отдельный wrapper, не штатный launcher. Он запускает
 **один** контейнер без сети, с read-only code/input/rootfs и отдельным writable
 output/tmpfs; не монтирует rclone config. Image разрешается в локальный ID, без pull.
-Никаких notify/upload/shutdown, создания swap, удаления библиотек или контейнеров.
+Никаких notify/upload, создания swap, удаления библиотек или контейнеров.
+
+Выключение VM и уведомления по умолчанию отключены. `--shutdown` планирует
+`sudo -n shutdown -h +N` **после** завершения контейнера, записи логов/состояния и
+`sync`, независимо от кода выхода. `--shutdown-delay` (по умолчанию 2 минуты) — это
+только окно для отмены по SSH, оно не связано с длительностью счёта орбит; допустимо
+`0` для немедленного выключения. Отмена: `sudo shutdown -c`.
+
+`--notify` отправляет одно ntfy-сообщение с хоста перед планированием выключения
+(`NTFY_TOPIC`, `NTFY_SERVER`, как в штатных launchers). В тексте только режим, индекс
+модели, код выхода, `status`, причина остановки и имя каталога — **без penalty, дельт
+и других результатов**, поскольку тема ntfy не приватная. Контейнер остаётся
+`--network=none`: сеть использует только хост. Неудачная отправка пишет
+`notify=failed`, предупреждает и **не отменяет** выключение; неудачный `shutdown`
+даёт `shutdown_scheduled=failed`, предупреждение и отдельное urgent-уведомление.
+
+Результаты **не выгружаются**: они остаются на диске VM, и для анализа её придётся
+включить снова. Код выхода wrapper от результата уведомления/выключения не зависит.
 
 Defaults: 8 потоков, memory=memory-swap=8 GiB (контейнеру swap запрещён), host reserve
 2 GiB, timeout=21600 s, no-progress=3600 s, stop grace=120 s. Swap accounting должно
@@ -490,6 +507,11 @@ bash "$LAUNCH" --mode=pilot --input-root="$INPUT" --models=models.local.txt \
     --model-index=2 --field-report="${REPORTS[2]}" --output="$FREE"
 ```
 
+Для unattended запуска добавить `--shutdown --notify`: после счёта и записи придёт
+ntfy-уведомление, затем VM выключится (по умолчанию через 2 минуты). Результаты
+останутся на её диске; для просмотра VM нужно включить снова. Не использовать
+`--shutdown`, если Q1 планируется запускать сразу в той же сессии.
+
 **Остановиться для просмотра** `$FREE/run/report.json`, `pilot.tsv`, `pilot.log`,
 `container_state.json`, `resources.jsonl`. Должны быть пять завершённых интеграций,
 `pilot_pass`, technical_checks.passed=true. Проверить времена/RSS/место, A/A,
@@ -528,3 +550,5 @@ out_*/4Ups* или общего library catalog. Полные `.npy` могут 
 Runner codes: 0 — pass/validated; 1 — failed/stopped; 2 — input/overwrite/review;
 3 — законченный pilot с превышением технического бюджета, нужен разбор. Wrapper
 возвращает container code, либо 124 при timeout/stall/host-memory/signal stop.
+При `--shutdown`/`--notify` в `launcher.log` добавляются `shutdown_scheduled=+N|failed`
+и `notify=sent|failed`; код выхода wrapper от них не меняется — проверять строки в логе.

@@ -15,16 +15,27 @@ MEMORY_GB=8
 TIMEOUT=21600
 STALL=3600
 GRACE=120
+SHUTDOWN=0
+SHUTDOWN_DELAY=2
+NOTIFY=0
+NTFY_TOPIC="${NTFY_TOPIC:-GalaxySchwarzschildFornax}"
+NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
 
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
             printf '%s\n' \
-                'Isolated VM diagnostic: no network, upload, shutdown or automatic deletion.' \
+                'Isolated VM diagnostic: no network, upload or automatic deletion.' \
                 'bash launch_potential_pair.sh --mode=validate|preflight|pilot|fields' \
                 '  --input-root=DIR --models=RELATIVE_FILE --field-report=RELATIVE_REPORT' \
                 '  --model-index=0|1|2 --output=NEW_DIRECTORY [--reviewed-freeq=REPORT]' \
                 '  --image=agama:latest --threads=8 --memory-gb=8 --timeout=21600 --stall=3600' \
+                '  [--shutdown] [--shutdown-delay=2] [--notify]' \
+                'Shutdown and ntfy are OFF by default and happen only after the container exits,' \
+                'once logs/results are written and synced; the delay is just a cancellation window.' \
+                'Results are NOT uploaded: they stay on this VM disk, so restart it to read them.' \
+                '--notify sends status/exit code only (NTFY_TOPIC, NTFY_SERVER), never result values.' \
+                'Cancel a scheduled shutdown with: sudo shutdown -c' \
                 'validate: no AGAMA import. preflight: A/B and free-Q C, no IC/orbits/solve.' \
                 'pilot: five free-Q integrations or three Q1 integrations, seed 42 only.' \
                 'Q1 pilot requires explicit review of the free-Q output/run/report.json.' \
@@ -45,6 +56,9 @@ for arg in "$@"; do
         --memory-gb=*) MEMORY_GB="${arg#*=}" ;;
         --timeout=*) TIMEOUT="${arg#*=}" ;;
         --stall=*) STALL="${arg#*=}" ;;
+        --shutdown) SHUTDOWN=1 ;;
+        --shutdown-delay=*) SHUTDOWN_DELAY="${arg#*=}" ;;
+        --notify) NOTIFY=1 ;;
         *) printf 'Unknown argument: %s\n' "$arg" >&2; exit 2 ;;
     esac
 done
@@ -53,6 +67,7 @@ case "$MODE" in validate|preflight|pilot|fields) ;; *) fail 'Select an explicit 
 for value in "$THREADS" "$MEMORY_GB" "$TIMEOUT" "$STALL"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail 'Resource limits must be positive integers'
 done
+[[ "$SHUTDOWN_DELAY" =~ ^[0-9]+$ ]] || fail 'shutdown-delay must be a non-negative integer'
 [[ "$INDEX" =~ ^[012]$ ]] || fail 'model-index must be 0, 1 or 2'
 [[ -d "$INPUT_ROOT" && -n "$OUTPUT" ]] || fail 'Require existing input-root and new output'
 INPUT_ROOT="$(realpath "$INPUT_ROOT")"
@@ -115,8 +130,8 @@ if [ "$MODE" = pilot ]; then
 fi
 mkdir "$OUTPUT"
 NAME="agama_pair_$(date +%Y%m%d_%H%M%S)_${INDEX}_$$"
-printf 'mode=%s\nmodel_index=%s\nimage=%s\nimage_id=%s\ncontainer=%s\nthreads=%s\nmemory_gb=%s\n' \
-    "$MODE" "$INDEX" "$IMAGE" "$IMAGE_ID" "$NAME" "$THREADS" "$MEMORY_GB" > "$OUTPUT/launcher.log"
+printf 'mode=%s\nmodel_index=%s\nimage=%s\nimage_id=%s\ncontainer=%s\nthreads=%s\nmemory_gb=%s\nshutdown=%s\n' \
+    "$MODE" "$INDEX" "$IMAGE" "$IMAGE_ID" "$NAME" "$THREADS" "$MEMORY_GB" "$SHUTDOWN" > "$OUTPUT/launcher.log"
 CONTAINER_ARGS=(--name "$NAME" --network=none --read-only --cap-drop=ALL
     --security-opt=no-new-privileges --init --pids-limit=512 --cpus="$THREADS"
     --memory="${MEMORY_GB}g" --memory-swap="${MEMORY_GB}g" --stop-timeout="$GRACE"
@@ -157,4 +172,37 @@ docker inspect --format '{{json .State}}' "$NAME" > "$OUTPUT/container_state.jso
 [ -z "$STOP_REASON" ] || CODE=124
 printf 'exit_code=%s\n' "$CODE" >> "$OUTPUT/launcher.log"
 printf 'Exit %s; results: %s; retained container: %s\n' "$CODE" "$OUTPUT" "$NAME"
+sync
+notify() {
+    [ "$NOTIFY" -eq 1 ] || return 0
+    if curl -s -f --max-time 15 -H "Title: PotentialPair $(hostname)" \
+            -H "Priority: $2" -d "$1" "${NTFY_SERVER}/${NTFY_TOPIC}" \
+            >> "$OUTPUT/launcher.log" 2>&1; then
+        printf 'notify=sent\n' >> "$OUTPUT/launcher.log"
+    else
+        printf 'notify=failed\n' >> "$OUTPUT/launcher.log"
+        printf 'WARNING: ntfy notification failed; continuing\n' >&2
+    fi
+}
+STATUS=no_report
+[ ! -f "$OUTPUT/run/report.json" ] || STATUS="$(sed -n 's/.*"status": *"\([a-z_]*\)".*/\1/p' \
+    "$OUTPUT/run/report.json" | head -1)"
+SUMMARY="mode=${MODE} index=${INDEX} exit=${CODE} status=${STATUS:-unparsed}"
+[ -z "$STOP_REASON" ] || SUMMARY="${SUMMARY} stopped=${STOP_REASON}"
+SUMMARY="${SUMMARY} dir=$(basename "$OUTPUT") (results kept on the VM disk)"
+if [ "$SHUTDOWN" -eq 1 ]; then
+    notify "${SUMMARY}; shutdown in ${SHUTDOWN_DELAY} min" \
+        "$([ "$CODE" -eq 0 ] && echo default || echo high)"
+    printf 'Results stay on this VM disk (no upload). Shutdown in %s min; cancel: sudo shutdown -c\n' \
+        "$SHUTDOWN_DELAY"
+    if sudo -n shutdown -h "+${SHUTDOWN_DELAY}" >> "$OUTPUT/launcher.log" 2>&1; then
+        printf 'shutdown_scheduled=+%s\n' "$SHUTDOWN_DELAY" >> "$OUTPUT/launcher.log"
+    else
+        printf 'shutdown_scheduled=failed\n' >> "$OUTPUT/launcher.log"
+        printf 'WARNING: shutdown could not be scheduled; the VM is still running and billing\n' >&2
+        notify "${SUMMARY}; SHUTDOWN FAILED, VM still running" urgent
+    fi
+else
+    notify "$SUMMARY" "$([ "$CODE" -eq 0 ] && echo default || echo high)"
+fi
 exit "$CODE"

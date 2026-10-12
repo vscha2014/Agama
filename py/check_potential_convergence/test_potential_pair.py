@@ -841,9 +841,106 @@ else: sys.exit(9)
     assert any('dst=/input,readonly' in arg for arg in create)
     assert not any(call[0] in ('pull', 'rm', 'kill') for call in calls)
     assert (output / 'container_state.json').exists()
+    assert 'shutdown' not in (bins / 'sudo.log').read_text() if (bins / 'sudo.log').exists() else True
+    assert 'shutdown_scheduled' not in (output / 'launcher.log').read_text()
     before = log.read_text()
     repeat = subprocess.run(args, env=env, capture_output=True, text=True)
     assert repeat.returncode == 2 and log.read_text() == before
+
+
+@pytest.mark.parametrize('sudo_works', [True, False])
+def test_optional_shutdown_runs_only_after_the_container_and_reports_failure(tmp_path, sudo_works):
+    import os
+    bins = tmp_path / 'bin'
+    bins.mkdir()
+    order = tmp_path / 'order.log'
+    docker = bins / 'docker'
+    docker.write_text('#!' + sys.executable + '\n' + '''import os, sys, time
+command = sys.argv[1]
+with open(os.environ['ORDER_LOG'], 'a') as out:
+    out.write('docker ' + command + '\\n')
+if command == 'info': print('true')
+elif command == 'image': print('sha256:image')
+elif command == 'create': print('container')
+elif command == 'start': time.sleep(0.1)
+elif command == 'inspect': print('{"ExitCode":0}')
+elif command == 'stats': print('{}')
+''')
+    docker.chmod(0o755)
+    sudo = bins / 'sudo'
+    sudo.write_text('#!/bin/sh\necho "sudo $*" >> "$ORDER_LOG"\n'
+                    + ('exit 0\n' if sudo_works else 'echo "no sudo password" >&2\nexit 1\n'))
+    sudo.chmod(0o755)
+    curl = bins / 'curl'
+    curl.write_text('#!/bin/sh\necho "curl $*" >> "$ORDER_LOG"\nexit 0\n')
+    curl.chmod(0o755)
+    df = bins / 'df'
+    df.write_text('#!/bin/sh\nprintf "F 1024-blocks Used Available Capacity M\\nm 9 1 89999999 1%% /m\\n"\n')
+    df.chmod(0o755)
+    inputs = tmp_path / 'input'
+    inputs.mkdir()
+    (inputs / 'models.txt').write_text('synthetic')
+    (inputs / 'report.json').write_text('{}')
+    output = tmp_path / 'out'
+    env = dict(os.environ, PATH=str(bins) + ':' + os.environ['PATH'],
+               ORDER_LOG=str(order), MOCK_DOCKER_LOG=str(tmp_path / 'docker.jsonl'),
+               PAIR_MONITOR_INTERVAL='0.01')
+    result = subprocess.run(['bash', str(HERE / 'launch_potential_pair.sh'), '--mode=pilot',
+        f'--input-root={inputs}', '--models=models.txt', '--field-report=report.json',
+        '--model-index=2', f'--output={output}', '--memory-gb=1',
+        '--shutdown', '--shutdown-delay=7', '--notify'], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    steps = order.read_text().splitlines()
+    notices = [s for s in steps if s.startswith('curl ')]
+    assert steps.index('docker inspect') < steps.index(notices[0]) < steps.index('sudo -n shutdown -h +7')
+    assert 'shutdown in 7 min' in notices[0] and 'mode=pilot index=2 exit=0' in notices[0]
+    assert 'penalty' not in notices[0] and 'delta' not in notices[0]
+    launcher = (output / 'launcher.log').read_text()
+    assert 'exit_code=0' in launcher and 'notify=sent' in launcher
+    if sudo_works:
+        assert 'shutdown_scheduled=+7' in launcher and 'WARNING' not in result.stderr
+        assert steps[-1] == 'sudo -n shutdown -h +7' and len(notices) == 1
+    else:
+        assert 'shutdown_scheduled=failed' in launcher
+        assert 'still running' in result.stderr
+        assert len(notices) == 2 and 'SHUTDOWN FAILED' in notices[1]
+    bad = subprocess.run(['bash', str(HERE / 'launch_potential_pair.sh'), '--mode=pilot',
+        f'--input-root={inputs}', '--models=models.txt', '--field-report=report.json',
+        '--model-index=2', f'--output={tmp_path}/out2', '--shutdown-delay=-1'],
+        env=env, capture_output=True, text=True)
+    assert bad.returncode == 2 and 'shutdown-delay' in bad.stderr
+    assert 'sudo' not in order.read_text().rsplit('sudo -n shutdown -h +7', 1)[-1]
+
+
+def test_failed_notification_does_not_block_shutdown(tmp_path):
+    import os
+    bins = tmp_path / 'bin'
+    bins.mkdir()
+    order = tmp_path / 'order.log'
+    (bins / 'docker').write_text('#!/bin/sh\necho "docker $1" >> "$ORDER_LOG"\n'
+        'case "$1" in info) echo true ;; image) echo sha256:i ;; create) echo c ;;'
+        ' inspect) echo "{}" ;; esac\n')
+    (bins / 'curl').write_text('#!/bin/sh\necho "curl attempted" >> "$ORDER_LOG"\nexit 7\n')
+    (bins / 'sudo').write_text('#!/bin/sh\necho "sudo $*" >> "$ORDER_LOG"\nexit 0\n')
+    (bins / 'df').write_text('#!/bin/sh\nprintf "F b U A C M\\nm 9 1 89999999 1%% /m\\n"\n')
+    for name in ('docker', 'curl', 'sudo', 'df'):
+        (bins / name).chmod(0o755)
+    inputs = tmp_path / 'input'
+    inputs.mkdir()
+    (inputs / 'models.txt').write_text('x')
+    (inputs / 'report.json').write_text('{}')
+    output = tmp_path / 'out'
+    env = dict(os.environ, PATH=str(bins) + ':' + os.environ['PATH'],
+               ORDER_LOG=str(order), PAIR_MONITOR_INTERVAL='0.01')
+    result = subprocess.run(['bash', str(HERE / 'launch_potential_pair.sh'), '--mode=preflight',
+        f'--input-root={inputs}', '--models=models.txt', '--field-report=report.json',
+        '--model-index=2', f'--output={output}', '--memory-gb=1', '--shutdown',
+        '--shutdown-delay=0', '--notify'], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'notify=failed' in (output / 'launcher.log').read_text()
+    assert 'shutdown_scheduled=+0' in (output / 'launcher.log').read_text()
+    assert 'ntfy notification failed' in result.stderr
+    assert order.read_text().splitlines()[-1] == 'sudo -n shutdown -h +0'
 
 
 def test_manifest_roundtrip_preserves_tuple_recipe_identity(pair, tmp_path):

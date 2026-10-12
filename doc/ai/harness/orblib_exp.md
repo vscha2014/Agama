@@ -439,7 +439,10 @@ criteria, not significance. No automatic seed expansion or production adoption.
 The dedicated `launch_potential_pair.sh` uses one offline, memory/swap-limited
 container with read-only inputs/code, separate output, resource/time/stall guards
 and retained container state. It never invokes the ordinary launchers, cloud
-storage, notifications, swap setup, shutdown or deletion. A different VM binary
+storage, swap setup or deletion. Shutdown and ntfy are opt-in (`--shutdown`,
+`--notify`), run after the container and synced logs, and record explicit
+success/failure. Notifications are host-side and status-only, never result values;
+results are never uploaded and remain on the VM disk. A different VM binary
 requires reviewed Step 1A evidence there; no fingerprint bypass. Pilot STOP/signal
 handling is isolated from the harness checkpoint handler. No real VM/orbit run was
 performed while preparing this interface.

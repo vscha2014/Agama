@@ -359,7 +359,12 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   Large A→B alone does not fail the pilot; C/B and native/common sensitivity remains
   a separate interpretation issue. Other seeds require another decision.
 - **VM isolation** | dedicated single-container launcher, read-only code/input,
-  no network/upload/notifications/shutdown/deletion. Equal RAM and total RAM+swap
+  no network/upload/deletion. Optional `--shutdown` and `--notify` (both off by
+  default, user request) act only after the container exits and logs/state are
+  synced; the delay is a cancellation window, not a compute estimate. Notifications
+  come from the host, carry status/exit code only — never penalties or deltas — and
+  a failed one never blocks shutdown; failures are logged and warned, never silenced.
+  Results are not uploaded, so they stay on the VM disk. Equal RAM and total RAM+swap
   limits, host/disk headroom, timeout/no-progress stops, resource logs and retained
   container state. No changes to ordinary launchers, storage, production or CONTRACT.
 - **Implementation** | pilot modes extend the diagnostic runner only; common kernel
