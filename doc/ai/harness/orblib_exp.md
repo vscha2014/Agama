@@ -15,7 +15,7 @@ must not be touched (see `../CONTRACT.md`, `production.md`).
   `log_{tag}.txt` — human-readable log, read by nobody.
 - Variations: `--no-double`, `--n-bin`, `--gh-id`, `--ser-id` (>0 raises
   `NotImplementedError` on purpose), `--save-orblib`, `--reuse-orblib`,
-  `--stream-orblib`, `--Q1`.
+  `--stream-orblib`, `--Q1`, `--offline` (no rclone at all, §3g).
 - `gh` is the halo inner slope (a search parameter); `gh_id` is the observational
   GH perturbation id. Orbit matrices depend on `(Q, gh, rh, rho0, incl, double,
   n_bin, ser_id)` but **not** on `gh_id`.
@@ -495,6 +495,16 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
   `monitor_tycho_*`, `log_*_pN`) go to `galAgama/tycho_logs/<RUN_TAG>_<TS>/`.
   `--no-sync` disables only the launcher's uploads; the harness still syncs
   history through rclone (live result sharing).
+- **`--offline`** (tycho has no working rclone, DECISIONS 2026-10-12): the
+  launcher passes `--offline` to the harness, never calls rclone (also not in
+  preflight, which instead counts local `out_*_d1_nb250_gh0_ser0*` and
+  `4UpsBoTorch_PCA_Sersic*` inputs) and at the end packs
+  `tycho_results_<RUN_TAG>_<TS>.tar.gz` (host history, launcher/run/monitor
+  logs, `log_*_pN`; no `.npz`, no checkpoints) for manual transfer. In the
+  harness `--offline` makes `load_from_yadisk` / `sync_to_yadisk` return before
+  any subprocess call and `finalize` skip the sync step and its alarm; ntfy
+  completion/error messages stay. `--offline --stream-orblib` is rejected.
+  Inputs from other hosts are copied by hand and are read-only.
 - Stop: Ctrl-C or `systemctl --user kill --signal=TERM <unit>.scope`; the
   launcher re-sends TERM to workers alive after 5 s and KILLs them after
   `TYCHO_STOP_GRACE=1800` s. `tee` ignores INT/TERM so the checkpoint write

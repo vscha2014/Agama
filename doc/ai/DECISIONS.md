@@ -400,7 +400,11 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - rclone on tycho cannot list Yandex.Disk (`410 GoneError`, also with a fresh
   binary, while `about` works); it will **not** be fixed. Code and result files
   travel by hand (Yandex.Disk daemon on another machine, or scp).
-- Consequence: tycho runs must be fully offline. The launcher already has
-  `--no-sync`; the harness still calls rclone in `load_from_yadisk` /
-  `sync_to_yadisk` (urgent ntfy on failure). An offline switch is proposed, not
-  implemented (local handoff `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`).
+- Consequence: tycho runs are fully offline. User choices: an offline switch
+  in the harness (not a stub `rclone`), ntfy kept, disk space checked by the user.
+  Implemented as `--offline` in the harness (`load_from_yadisk`/`sync_to_yadisk`
+  return before any rclone call, `finalize` skips the sync alarm; default off, VM
+  unchanged) and in `launch_tycho.sh` (no rclone, results bundle for manual
+  transfer). Details: `harness/orblib_exp.md` §3g.
+- Next on tycho (user plan): first `incl=90`; then the Q29 potential-convergence
+  pilot that never ran on the ya VM, adapted to tycho; then Q=1 studies.

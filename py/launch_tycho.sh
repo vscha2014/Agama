@@ -31,6 +31,7 @@ RESUME=0
 PREFLIGHT=0
 SAVE_ORBLIB=1
 DO_SYNC=1
+OFFLINE=0
 USE_SCOPE=1
 PRINT_LIMITS=0
 ORBLIB_DIR=""
@@ -50,6 +51,9 @@ for arg in "$@"; do
                 '  --no-save-orblib    Не сохранять библиотеки (reuse локальных остаётся).' \
                 '  --no-sync           Лаунчер не выгружает историю/логи (Python-скрипт' \
                 '                      по-прежнему синхронизирует историю через rclone).' \
+                '  --offline           Без rclone вообще: Python получает --offline, лаунчер' \
+                '                      ничего не выгружает и собирает tycho_results_*.tar.gz' \
+                '                      для ручного переноса (ntfy остаётся).' \
                 '  --preflight         Только проверки окружения и пробный scope с лимитами.' \
                 '  --no-scope          Без systemd-scope: БЕЗ лимита памяти (не рекомендуется).' \
                 'Env: CONDA_ENV=agamaBoTorch ("" — не активировать), PYTHON=python,' \
@@ -66,11 +70,12 @@ for arg in "$@"; do
         --orblib-dir=*)    ORBLIB_DIR="${arg#*=}" ;;
         --no-save-orblib)  SAVE_ORBLIB=0 ;;
         --no-sync)         DO_SYNC=0 ;;
+        --offline)         OFFLINE=1; DO_SYNC=0 ;;
         --preflight)       PREFLIGHT=1 ;;
         --no-scope)        USE_SCOPE=0 ;;
         --script=*)        CALC_SCRIPT="${arg#*=}" ;;
         --_print-limits)   PRINT_LIMITS=1 ;;
-        --no-double|--n-bin=*|--gh-id=*|--ser-id=*|--stream-orblib|--save-orblib|--reuse-orblib|--n_threads*|--suffix*|--q1)
+        --no-double|--n-bin=*|--gh-id=*|--ser-id=*|--stream-orblib|--save-orblib|--reuse-orblib|--n_threads*|--suffix*|--q1|--stream-orblib=*)
             echo "ОШИБКА: $arg не поддерживается launch_tycho.sh (d1_nb250, локальные библиотеки)" >&2
             exit 2
             ;;
@@ -222,7 +227,13 @@ preflight() {
     fi
     log "  ✓ Диск ${ORBLIB_DIR}: $(( ${free_kb:-0} / 1024 / 1024 )) GB свободно"
 
-    if rclone lsf "${RCLONE_REMOTE}:${REMOTE_DIR}/" --max-depth 1 --timeout 30s --contimeout 10s \
+    if [ "$OFFLINE" -eq 1 ]; then
+        local n_pool n_prior
+        n_pool=$(compgen -G "${WORK_DIR}/out_*_d1_nb250_gh0_ser0*.txt" | grep -c . || true)
+        n_prior=$(compgen -G "${WORK_DIR}/4UpsBoTorch_PCA_Sersic*.txt" | grep -c . || true)
+        log "  offline: rclone не используется; локально out_*_d1_nb250_gh0_ser0*: ${n_pool}," \
+            "4UpsBoTorch_PCA_Sersic*: ${n_prior} (без них — холодный старт LHS)"
+    elif rclone lsf "${RCLONE_REMOTE}:${REMOTE_DIR}/" --max-depth 1 --timeout 30s --contimeout 10s \
             --retries 1 --low-level-retries 1 > /dev/null 2>>"$LOGFILE"; then
         log "  ✓ rclone ${RCLONE_REMOTE}:${REMOTE_DIR}/ доступен"
     else
@@ -409,6 +420,7 @@ ORBLIB_FLAGS="--reuse-orblib --orblib-dir ${ORBLIB_DIR}"
 [ "$SAVE_ORBLIB" -eq 1 ] && ORBLIB_FLAGS="--save-orblib ${ORBLIB_FLAGS}"
 EXP_FLAGS=""
 [ "$Q1" -eq 1 ] && EXP_FLAGS="--Q1"
+[ "$OFFLINE" -eq 1 ] && EXP_FLAGS="${EXP_FLAGS} --offline"
 export HOSTNAME_SUFFIX="$HOSTNAME_ENV" RCLONE_REMOTE NTFY_TOPIC NTFY_SERVER
 
 # --- Остановка: сигналы доходят до Python (группа процессов/scope); пересылаем
@@ -491,4 +503,19 @@ done
 notify "launch_tycho ${RUN_TAG} на ${HOSTNAME_ENV}: коды ${WCODES[*]}" "$([ "$FINAL" -eq 0 ] && echo default || echo high)"
 log "Завершено, коды: ${WCODES[*]}"
 upload "$LOGFILE" "$LOG_REMOTE"
+if [ "$OFFLINE" -eq 1 ]; then
+    BUNDLE="${WORK_DIR}/tycho_results_${RUN_TAG}_${TIMESTAMP}.tar.gz"
+    declare -a CARRY=()
+    for f in "$(host_file)" "$LOGFILE" "$MONITOR_LOG" "${WORK_DIR}"/runlog_*_"${RUN_TAG}_${TIMESTAMP}".log \
+             "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}"_p*.txt; do
+        [ -f "$f" ] && CARRY+=("$(basename "$f")")
+    done
+    log "Offline: перенесите вручную (библиотеки .npz и checkpoint остаются на tycho):"
+    for f in "${CARRY[@]}"; do log "    $f"; done
+    if [ "${#CARRY[@]}" -gt 0 ] && tar -czf "$BUNDLE" -C "$WORK_DIR" "${CARRY[@]}" 2>>"$LOGFILE"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   архив: $(basename "$BUNDLE")"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   архив не создан: перенесите файлы по списку" >&2
+    fi
+fi
 exit "$FINAL"

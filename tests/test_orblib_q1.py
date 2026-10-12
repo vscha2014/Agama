@@ -295,6 +295,35 @@ def test_shared_yadisk_refresh_protects_both_local_modes(tmp_path, monkeypatch, 
     assert Path(name).read_text() == remote[name]
 
 
+def test_offline_cli_flag(monkeypatch):
+    assert configuration(monkeypatch)['OFFLINE'] is False
+    assert configuration(monkeypatch, '--offline', '--Q1')['OFFLINE'] is True
+    with pytest.raises(SystemExit) as error:
+        configuration(monkeypatch, '--offline', '--stream-orblib', '--save-orblib')
+    assert error.value.code == 2
+
+
+def test_offline_never_calls_rclone_and_sends_no_sync_alarm(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path('out_test.txt').write_text('90 1 0.4 1.5 70 0.6 1\n')
+    notes = []
+
+    def run(command, **kwargs):
+        raise AssertionError(f'subprocess called offline: {command}')
+
+    ns = functions('load_from_yadisk', 'sync_to_yadisk', 'finalize', OFFLINE=True,
+                   subprocess=SimpleNamespace(run=run), RCLONE_REMOTE='mock',
+                   UpsFile='out_test.txt', torchFile_result='log_test.txt',
+                   send_notification=lambda message, **kw: notes.append((message, kw)))
+    assert ns['load_from_yadisk'](['out_*.txt'], [], force_update=True) is None
+    assert ns['sync_to_yadisk']() is False
+    assert ns['sync_to_yadisk'](remote_dir='galaxy_results_emergency') is False
+    ns['finalize'](dict(Q=1.0, gh=0.0, rh=2.0, rho0=80.0), 0.6, 1.5)
+    assert len(notes) == 1 and 'ЗАВЕРШЁН' in notes[0][0]
+    assert notes[0][1]['priority'] != 'urgent'
+    assert Path('out_test.txt').read_text() == '90 1 0.4 1.5 70 0.6 1\n'
+
+
 @pytest.mark.parametrize('q1', [False, True])
 def test_nearest_incl_uses_shared_history_with_q_filter(tmp_path, monkeypatch, q1):
     monkeypatch.chdir(tmp_path)

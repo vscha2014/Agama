@@ -254,6 +254,34 @@ def test_no_sync_skips_launcher_uploads(tmp_path):
     assert not any(e.startswith(('rclone copyto', 'rclone deletefile')) for e in events)
 
 
+def test_offline_never_calls_rclone_and_bundles_results(tmp_path):
+    def setup(work):
+        (work / 'out_other_d1_nb250_gh0_ser0.txt').write_text('90 0.3 0 2 80 0.7 1.9 t\n')
+        (work / '4UpsBoTorch_PCA_Sersic_x.txt').write_text('90 0.3 0 2 80 0.7 1.9 t\n')
+    result, events, work = run(tmp_path, '--threads=4', '--offline', '--Q1', setup=setup)
+    assert result.returncode == 0, output(result)
+    assert not any(e.startswith('rclone') for e in events)
+    (argv,) = pythons(events)
+    assert '--offline' in argv and '--Q1' in argv
+    log = next(work.glob('launch_tycho_*.log')).read_text()
+    assert 'out_*_d1_nb250_gh0_ser0*: 1' in log and '4UpsBoTorch_PCA_Sersic*: 1' in log
+    bundle = work / 'tycho_results_Q1d1_nb250_gh0_ser0_i90.0_20261010_120000.tar.gz'
+    names = set(subprocess.run(['tar', '-tzf', str(bundle)], capture_output=True, text=True,
+                               check=True).stdout.split())
+    assert {'out_testhost_Q1d1_nb250_gh0_ser0.txt', 'log_testhost_Q1d1_nb250_gh0_ser0_p0.txt',
+            'runlog_p0_Q1d1_nb250_gh0_ser0_i90.0_20261010_120000.log',
+            'monitor_tycho_Q1d1_nb250_gh0_ser0_i90.0_20261010_120000.log',
+            'launch_tycho_Q1d1_nb250_gh0_ser0_i90.0_20261010_120000.log'} <= names
+    assert not any(n.endswith(('.npz', '.pkl')) for n in names)
+
+
+def test_offline_preflight_skips_rclone(tmp_path):
+    result, events, _ = run(tmp_path, '--threads=4', '--offline', '--preflight')
+    assert result.returncode == 0, output(result)
+    assert not any(e.startswith('rclone') for e in events)
+    assert 'холодный старт' in result.stdout
+
+
 def test_no_save_orblib_keeps_reuse(tmp_path):
     result, events, _ = run(tmp_path, '--threads=4', '--no-save-orblib')
     assert result.returncode == 0, output(result)

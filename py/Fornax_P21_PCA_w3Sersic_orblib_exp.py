@@ -95,10 +95,16 @@ parser.add_argument('--Q1', action='store_true',
                          'с фильтром Q=1. Несовместимо с --no-double.')
 parser.add_argument('--stream-orblib', action='store_true',
                     help='Управляемая очередь библиотек; требует фонового загрузчика launcher.')
+parser.add_argument('--offline', action='store_true',
+                    help='Без rclone/Яндекс.Диска: история читается и пишется только '
+                         'локально (ntfy остаётся). Несовместимо с --stream-orblib.')
 args = parser.parse_args()
 Q1 = args.Q1
+OFFLINE = args.offline
 if Q1 and args.no_double:
     parser.error('--Q1 требует удвоения d1; уберите --no-double')
+if OFFLINE and args.stream_orblib:
+    parser.error('--offline несовместим с --stream-orblib (доставка библиотек требует rclone)')
 
 if args.n_threads is not None:
     # Ограничиваем OpenMP ДО импорта agama
@@ -1087,6 +1093,9 @@ def sync_to_yadisk(local_dir='.', remote_dir='galAgama',
     Синхронизация результатов на Яндекс.Диск через rclone.
     Возвращает True при успехе.
     """
+    if globals().get('OFFLINE'):
+        print(f"  [offline] выгрузка на Яндекс.Диск пропущена ({remote_dir}): файлы остаются локально")
+        return False
     # Список файлов для синхронизации
     if globals().get('orblib_store') is not None and orblib_store.stopped():
         return False
@@ -1145,7 +1154,9 @@ def load_from_yadisk(storage_patterns, host_patterns,
                       (используется при старте скрипта для получения свежих данных)
     """
     
-    
+    if globals().get('OFFLINE'):
+        print("  [offline] Яндекс.Диск не опрашивается: используются только локальные файлы")
+        return
     if globals().get('orblib_store') is not None:
         if orblib_store.stopped():
             return
@@ -1329,6 +1340,10 @@ def finalize(best_params, best_Upsilon, best_penalty):
         tags=['white_check_mark']
         )
     
+    if globals().get('OFFLINE'):
+        print(f"\n[offline] Синхронизация пропущена: {UpsFile} и логи остаются локально")
+        return
+
     # 2. Синхронизация
     print("\nСинхронизация на Яндекс.Диск...")
     sync_ok = sync_to_yadisk()
