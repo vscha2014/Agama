@@ -447,6 +447,67 @@ requires reviewed Step 1A evidence there; no fingerprint bypass. Pilot STOP/sign
 handling is isolated from the harness checkpoint handler. No real VM/orbit run was
 performed while preparing this interface.
 
+## 3g. Running on the workstation tycho (`launch_tycho.sh`)
+
+Purpose: run the same search harness on the shared 16-thread / 31 GiB
+workstation within a quarter of its resources. It replaces the old local
+fork `Fornax_P21_symm_PCA_w3Sersic.py` + `run_single.sh`, which stays as a
+historical file: no OpenMP for `agama.orbit` (OMP=1 plus torch's libgomp
+limit), `trajsize=1000`, no libraries, old bounds, canonical `4Ups*` pool.
+Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
+
+- `bash launch_tycho.sh --preflight`, then `bash launch_tycho.sh [--incl=90.0]
+  [--Q1] [--nproc=1] [--threads=N] [--resume] [--orblib-dir=DIR]
+  [--no-save-orblib] [--no-sync]`. Run it in tmux or with `loginctl enable-linger`:
+  without linger the user scope dies at logout (preflight warns).
+- Budget: the launcher re-execs itself in ONE transient `systemd-run --user
+  --scope` (`agama-tycho-<EXP_ID>_i<incl>-<TS>.scope`), so workers, merge and
+  rclone share it: `CPUQuota = threads×100 %` (default threads `nproc/4`),
+  `MemoryMax = MemTotal/4` (`TYCHO_MEM_MAX`), `MemoryHigh` 90 % of it,
+  `MemorySwapMax=0` (OOM-kill instead of swapping, as on the VM),
+  `IOWeight=10` (only if the `io` controller is delegated), `OOMPolicy=continue`
+  (an OOM-killed worker must not stop the launcher before the merge), plus
+  `nice -n 19 ionice -c 3`. Inside the scope it logs `memory.max`/`swap.max`/
+  `cpu.max` and refuses to start if `memory.max` is unset.
+- Workers: default 1 × all threads; `--nproc=2` splits threads (2×2). Save
+  slots do not apply (they exist only with `--stream-orblib`), so two workers
+  may write `.npz` at once (block writer, ~8 MB buffers). AGAMA gets an explicit
+  `--n_threads`, because the quota does not narrow the affinity mask (the
+  harness default would be 16 threads). `OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS`
+  are set by the launcher **before** Python starts: the harness's own
+  `os.environ[...]` assignment runs after `import numpy, torch` and no longer
+  affects their thread pools.
+- Harness flags: `--save-orblib --reuse-orblib --orblib-dir`, **never**
+  `--stream-orblib`; `--no-double`, `--n-bin`, `--gh-id`, `--ser-id`,
+  `--n_threads`, `--suffix` are rejected (pool `d1_nb250_gh0_ser0` /
+  `Q1d1_*` only). Libraries stay on the local disk (~0.6 GB each). Preflight
+  requires `TYCHO_MIN_FREE_GB=40` free in the library directory.
+- Preflight: harness/`orblib_storage.py`/`table3.dat` present; conda env
+  (`CONDA_ENV=agamaBoTorch`, `""` skips) imports agama with
+  `setNumThreads`, torch, botorch, gpytorch, sklearn, scipy, requests; `cpu` and
+  `memory` delegated to `user@UID.service`; linger; disk; `rclone lsf`; free
+  `.tycho_launcher.lock`; with `--preflight` also a probe scope printing the
+  applied limits. `--no-scope` exists only as an explicit, unlimited fallback.
+- History as in `launch_orblib_exp.sh`: `append_and_remove` with `HASH:`,
+  per-process → `out_<host>_<EXP_ID>.txt`, upload, remote per-process copies
+  deleted; resume downloads missing per-process files/checkpoints; `.resv`
+  of this experiment cleared at start. Logs (`launch_tycho_*`, `runlog_*`,
+  `monitor_tycho_*`, `log_*_pN`) go to `galAgama/tycho_logs/<RUN_TAG>_<TS>/`.
+  `--no-sync` disables only the launcher's uploads; the harness still syncs
+  history through rclone (live result sharing).
+- Stop: Ctrl-C or `systemctl --user kill --signal=TERM <unit>.scope`; the
+  launcher re-sends TERM to workers alive after 5 s and KILLs them after
+  `TYCHO_STOP_GRACE=1800` s. `tee` ignores INT/TERM so the checkpoint write
+  cannot hit a broken pipe. Exit 75 = checkpoint written, 137 = OOM/KILL (no
+  checkpoint; rows and `.npz` survive); the merge runs in every case.
+- Monitoring: every `TYCHO_MONITOR_INTERVAL=60` s `free`, memory PSI and
+  `memory.current/peak`, `cpu.stat`, `df` of the scope; final `memory.peak`
+  and `usage_usec` in the launcher log; per-model timings stay in `log_*` and
+  the `# orbitlib times` comments.
+- No docker, sudo, swapfile or shutdown. Reservations are per host, so a
+  simultaneous VM run at the same `incl` can duplicate evaluations (no data
+  corruption); prefer different `incl`. Real tycho runs are done by the user.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -457,11 +518,12 @@ performed while preparing this interface.
 
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
-    test_orblib_storage.py test_single_model.py --rootdir=. --import-mode=importlib -p no:cacheprovider
+    test_orblib_storage.py test_single_model.py test_launch_tycho.py \
+    --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
     py/orblib_storage.py py/run_single_model.py tests/test_orblib_q1.py
 bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
-    && bash -n py/launch_multi_model.sh && git diff --check
+    && bash -n py/launch_multi_model.sh && bash -n py/launch_tycho.sh && git diff --check
 ```
 
 Do not run `python -m pytest` from the repo root: local `py/` shadows pytest's

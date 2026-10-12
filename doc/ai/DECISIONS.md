@@ -374,3 +374,33 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Verification/scope** | mock/numeric tests and static validation of local input
   rows, syntax and frozen-file diffs; no new real field/orbit/solver/VM run. Commands
   and artifacts are documented in the existing diagnostic README §7 and local handoff.
+
+## 2026-10-10 — Searches on the workstation tycho via the experimental harness (user request)
+
+- **Strategy** | instead of porting the harness features (OpenMP for
+  `agama.orbit`, no trajectories, orbit libraries, timing/RSS logs, signals,
+  reservations, PCA fixes, bounds) into the old fork
+  `Fornax_P21_symm_PCA_w3Sersic.py`, tycho runs
+  `Fornax_P21_PCA_w3Sersic_orblib_exp.py` unchanged through the new
+  `py/launch_tycho.sh`. The fork and `run_single.sh` stay untouched (no second
+  copy to keep in sync).
+- **Budget** | at most a quarter of the host: conda env + one `systemd-run
+  --user --scope` for the whole launcher, `CPUQuota = nproc/4 × 100 %`,
+  `MemoryMax = MemTotal/4`, `MemorySwapMax=0`, `OOMPolicy=continue`,
+  nice/ionice; explicit `--n_threads`. Default 1 worker × 4 threads, option 2×2.
+- **Libraries** | saved and reused locally (`--save-orblib --reuse-orblib`), no
+  `--stream-orblib`, no cloud catalog; preflight requires 40 GB free.
+- **History** | experimental d1 pool `out_tycho_d1_nb250_gh0_ser0*`
+  (`Q1d1_*` with `--Q1`), not the canonical `4Ups*` pool.
+- Mocked tests only (`tests/test_launch_tycho.py`); a property probe of the
+  scope (`--_print-limits`) was checked on the dev machine. No real tycho run.
+
+## 2026-10-12 — tycho runs without network sync (user decision)
+
+- rclone on tycho cannot list Yandex.Disk (`410 GoneError`, also with a fresh
+  binary, while `about` works); it will **not** be fixed. Code and result files
+  travel by hand (Yandex.Disk daemon on another machine, or scp).
+- Consequence: tycho runs must be fully offline. The launcher already has
+  `--no-sync`; the harness still calls rclone in `load_from_yadisk` /
+  `sync_to_yadisk` (urgent ntfy on failure). An offline switch is proposed, not
+  implemented (local handoff `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`).

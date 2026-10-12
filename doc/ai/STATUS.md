@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-08 (Q29 seed-42 pilot prepared for ya VM; no execution).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-12 (tycho offline handoff; no code change).
 
 ## Where the science stands
 
@@ -23,29 +23,26 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 ## Code state
 
 - Harness: `--Q1`, widened bounds, aperture-vertex grid, streaming orbit-library delivery.
+- `py/launch_tycho.sh` (2026-10-10, uncommitted): harness on tycho in ¼ of the host
+  (systemd user scope, 4 threads, MemTotal/4, no swap, local libraries, `out_tycho_d1_*`);
+  replaces the old fork `Fornax_P21_symm_PCA_w3Sersic.py`. 24 mocked tests; §3g.
 - `py/check_potential_convergence/`: seed-42 pilot CLI/offline VM wrapper prepared after `e650f76`.
   324 mocked/numeric tests pass; local model preflights complete; no real pilot/VM run.
-- Memory fix (`92f009e`, §3a) and archived-not-local warning (`13f1659`)
-  committed: no trajectories, block `.npz` writer, 2 save slots, SIGTERM → STOP → checkpoint, RSS logging;
-  launcher with 4 workers, host swap, swapless container limit, watchdogs,
-  emergency upload. **Measured on the VM 2026-10-01**: integration+save ≈1 GB,
-  peaks only in the solve phases (higher for float64 reuse), no host pressure.
-- Single-model check (`run_single_model.py`, `launch_single_model.sh`) and
-  multi-model launcher (§3b–§3c) committed in `70375a3`; single check ran OK
-  2026-10-01 (local `results/single_d1_nb250_gh0_ser0_i90.0/NOTES.md`), but its
-  repeats were one AGAMA realisation (same start seed per process). OpenMP fix
-  for `agama.orbit` verified 10-03 (same MD5, ≈20× faster); production port = Q23.
-- IC-seed scan (Q22 option A, §3d, committed `64afb3e`): `launch_single_model.sh
-  --ic-seeds=1-100 --repeats=4` **ran OK 2026-10-04** (local `results/seed/NOTES.md`,
-  REGISTRY): seeding works (seed 42 bit-identical to the default stream); the
-  production reference is a winner's-curse minimum, harness − production offset
-  consistent with zero ⇒ memory-fix/harness check closed. Penalty noise of one
-  evaluation measured (numbers in NOTES) — matters for Q16 and best-model ranking.
+- Memory fix (`92f009e`, §3a), archived-not-local warning (`13f1659`): no trajectories,
+  block `.npz` writer, save slots, SIGTERM → checkpoint, RSS logs, launcher watchdogs.
+  **VM 2026-10-01**: integration+save ≈1 GB, peaks only in solve phases, no host pressure.
+- Single-model check / multi-model launcher (§3b–§3c, `70375a3`) ran OK 2026-10-01
+  (local `results/single_d1_nb250_gh0_ser0_i90.0/NOTES.md`). OpenMP fix for
+  `agama.orbit` verified 10-03 (same MD5, ≈20× faster); production port = Q23.
+- IC-seed scan (Q22 A, §3d, `64afb3e`) **ran OK 2026-10-04** (local `results/seed/NOTES.md`):
+  seeding works; production reference is a winner's-curse minimum, harness − production
+  offset consistent with zero; single-evaluation penalty noise measured (Q16, ranking).
   4×8 layout faster than 1×32; peak memory well below limits.
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
-1. Optional: one 8×4 throughput measurement (memory allows it).
+1. tycho offline (no rclone, DECISIONS 2026-10-12): add harness/launcher `--offline`, then
+   user preflight + short run. Handoff: local `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`.
 2. Q29: authorise VM evidence/preflight, then free-Q pilot; review before the two Q1 controls.
    Handoff: `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.14; commands: diagnostic README §7.
    Keep exact local inputs/evidence; a different VM binary needs field validation, not a bypass.

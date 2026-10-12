@@ -14,6 +14,8 @@ from `paper/` or `results/<run_id>/` may end up in tracked files.
 | `launch_docker_parallel.sh` | **Production** VM orchestrator. Frozen. Never run in dev. |
 | `Fornax_P21_PCA_w3Sersic_orblib_exp.py` | Experimental harness (doubling / `n_bin` / `--Q1` / orbit libraries). Editable. |
 | `launch_orblib_exp.sh`, `orblib_storage.py` | Experimental orchestrator and orbit-library delivery. Editable. |
+| `launch_tycho.sh` | Runs the experimental harness on the workstation tycho in ¼ of its resources (systemd user scope, local libraries; `harness/orblib_exp.md` §3g). Editable. |
+| `Fornax_P21_symm_PCA_w3Sersic.py`, `run_single.sh` | Old local production fork for tycho (OMP=1, no libraries, old bounds). Superseded by `launch_tycho.sh`; kept unchanged. |
 | `diagnose_J_weighting.py`, `mass_histogram_all_incl.py`, `profile_likelihood_corner.py`, `filter_orblib_by_penalty.py` | Analysis helpers. |
 | `table3.dat` | Observed velocities. **Frozen — never edit.** |
 | `schwarzlib.py`, `pygama.py`, `schwarzschild.py`, `example_*`, `test_*`, `tutorial_*` | Upstream AGAMA. Do not modify. |
