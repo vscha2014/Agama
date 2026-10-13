@@ -408,3 +408,18 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   transfer). Details: `harness/orblib_exp.md` §3g.
 - Next on tycho (user plan): first `incl=90`; then the Q29 potential-convergence
   pilot that never ran on the ya VM, adapted to tycho; then Q=1 studies.
+
+## 2026-10-13 — Q29 pilot on tycho: native wrapper (user decisions)
+
+- New `py/check_potential_convergence/launch_potential_pair_local.sh`; the runner and
+  the docker VM wrapper are unchanged. One systemd user scope, 4 threads (`nproc/4`).
+- **Memory 8 GiB** (as on the VM, slightly above MemTotal/4): user choice;
+  `--memory-gb` overrides. Swap forbidden in the scope (OOM-kill instead).
+- **Sequential only**: refuse when a `agama-tycho-*`/`agama-pair-*` scope is active
+  or the `launch_tycho.sh` lock is held.
+- **Watchdogs notify only**: on tycho there is no billing and no swapless host
+  livelock (scope `MemorySwapMax=0` → OOM-kill); a fixed timeout risks stopping a
+  legitimately long refined-potential integration. Stall (`report.json` unchanged
+  6 h) and runtime (48 h) send one ntfy each; the host-memory stop is dropped.
+- `--threads` must be the same for free-Q and Q1 (environment signature).
+- ntfy on by default (`--no-notify`), status only. No real tycho run by the agent.

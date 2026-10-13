@@ -447,6 +447,17 @@ requires reviewed Step 1A evidence there; no fingerprint bypass. Pilot STOP/sign
 handling is isolated from the harness checkpoint handler. No real VM/orbit run was
 performed while preparing this interface.
 
+On tycho the same runner is driven by `launch_potential_pair_local.sh` (README §8,
+DECISIONS 2026-10-13): same CLI/input checks, but conda + one `systemd-run --user
+--scope` (`CPUQuota=threads×100%`, default `nproc/4`; `MemoryMax` 8 GiB;
+`MemorySwapMax=0`; `OOMPolicy=continue`; nice/ionice), real paths instead of
+read-only mounts, no network isolation (the runner has no network code). It refuses
+to run next to an active `agama-tycho-*`/`agama-pair-*` scope or the `launch_tycho.sh`
+lock. Stall/runtime watchdogs only send one status-only ntfy, never stop; TERM is
+forwarded to the runner (KILL after `PAIR_STOP_GRACE`), exit 124. Resource samples
+come from the scope cgroup (`resources.jsonl`, `scope_state.txt` with `oom_kill`).
+No rclone/docker/sudo/shutdown/upload. Tests: `test_potential_pair_local.py`.
+
 ## 3g. Running on the workstation tycho (`launch_tycho.sh`)
 
 Purpose: run the same search harness on the shared 16-thread / 31 GiB

@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-12 (tycho `--offline` implemented; no real run).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-13 (tycho Q29 pilot wrapper implemented; no real run).
 
 ## Where the science stands
 
@@ -26,8 +26,9 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 - `py/launch_tycho.sh` (`470c1f9` + offline): harness on tycho in ¼ of the host
   (systemd user scope, 4 threads, MemTotal/4, no swap, local libraries, `out_tycho_d1_*`);
   replaces the old fork `Fornax_P21_symm_PCA_w3Sersic.py`; `--offline` (no rclone) in harness+launcher. §3g.
-- `py/check_potential_convergence/`: seed-42 pilot CLI/offline VM wrapper prepared after `e650f76`.
-  324 mocked/numeric tests pass; local model preflights complete; no real pilot/VM run.
+- `py/check_potential_convergence/`: seed-42 pilot CLI/offline VM wrapper prepared after `e650f76`;
+  tycho wrapper `launch_potential_pair_local.sh` (scope 4 threads / 8 GiB / no swap, sequential only,
+  notify-only watchdogs; README §8). 386 mocked/numeric tests pass; no real pilot run.
 - Memory fix (`92f009e`, §3a), archived-not-local warning (`13f1659`): no trajectories,
   block `.npz` writer, save slots, SIGTERM → checkpoint, RSS logs, launcher watchdogs.
   **VM 2026-10-01**: integration+save ≈1 GB, peaks only in solve phases, no host pressure.
@@ -41,8 +42,9 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
-1. tycho (offline, DECISIONS 2026-10-12): user preflight + incl=90 run with `--offline`; adapt the
-   Q29 pilot launcher to tycho, then Q=1. Handoff: local `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`.
+1. tycho (offline, DECISIONS 2026-10-12/13): user preflight + incl=90 run with `--offline`; then
+   (sequentially) the Q29 pilot via `launch_potential_pair_local.sh`, then Q=1.
+   Handoff: local `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`.
 2. Q29: authorise VM evidence/preflight, then free-Q pilot; review before the two Q1 controls.
    Handoff: `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.14; commands: diagnostic README §7.
    Keep exact local inputs/evidence; a different VM binary needs field validation, not a bypass.

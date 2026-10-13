@@ -224,9 +224,10 @@ Multipole не сошёлся; это видно в `halo_ref_vs_reference`. З�
 
 ```bash
 ../../.venv-ai/bin/python -m pytest -q test_potential_convergence.py test_potential_pair.py \
-    --rootdir=. --import-mode=importlib -p no:cacheprovider
+    test_potential_pair_local.py --rootdir=. --import-mode=importlib -p no:cacheprovider
 python3 -m py_compile check_potential_convergence.py test_potential_convergence.py \
-    run_potential_pair.py test_potential_pair.py
+    run_potential_pair.py test_potential_pair.py test_potential_pair_local.py
+bash -n launch_potential_pair.sh && bash -n launch_potential_pair_local.sh
 ```
 
 Тесты проверяют математику (включая Plummer, гармонический предел, cusp и отсечку),
@@ -552,3 +553,73 @@ Runner codes: 0 — pass/validated; 1 — failed/stopped; 2 — input/overwrite/
 возвращает container code, либо 124 при timeout/stall/host-memory/signal stop.
 При `--shutdown`/`--notify` в `launcher.log` добавляются `shutdown_scheduled=+N|failed`
 и `notify=sent|failed`; код выхода wrapper от них не меняется — проверять строки в логе.
+
+## 8. Тот же пилот на tycho (без docker)
+
+`launch_potential_pair_local.sh` — нативный вариант wrapper §7 для общей рабочей
+станции tycho. Runner, проверки входов и порядок этапов те же; VM-wrapper не изменён.
+Отличия:
+
+- Вместо контейнера — conda env (`CONDA_ENV=agamaBoTorch`) и **один**
+  `systemd-run --user --scope` (`agama-pair-<mode>-<index>-<TS>.scope`):
+  `CPUQuota=threads×100%` (по умолчанию `nproc/4`), `MemoryMax=--memory-gb`
+  (по умолчанию 8 GiB), `MemoryHigh` 90 %, `MemorySwapMax=0`, `IOWeight=10`,
+  `OOMPolicy=continue`, `nice -n 19 ionice -c 3`. До запуска Python задаются
+  `OMP_NUM_THREADS=threads`, BLAS/NumExpr=1, `MPLBACKEND=Agg`. Если `memory.max`
+  scope не применён, runner не запускается.
+- Нет read-only mounts и `--network=none`: изоляция опирается на runner,
+  у которого нет сетевого/облачного кода (это проверяют тесты). Пути передаются
+  настоящие; входы по-прежнему относительны `--input-root` и не выходят за него.
+- Нет rclone, docker, sudo, shutdown, upload и удаления. Результаты остаются в `--output`.
+- Отказ, если активен scope `agama-tycho-*`/`agama-pair-*`, занят lock
+  `launch_tycho.sh` или lock `.potential_pair.lock` в родителе output: поиск и
+  пилот выполняются **последовательно**. Нужно `MemAvailable > memory-gb + 2 GiB`,
+  перед pilot — 20 GiB свободно (`PAIR_MIN_FREE_GB`).
+- Сторожа **только уведомляют**: если `run/report.json` не менялся
+  `--stall-alert` с (по умолчанию 21600), или общий счёт дольше `--runtime-alert` с
+  (172800), отправляется одно ntfy и строка `stall_alert=`/`runtime_alert=` в
+  `launcher.log`; расчёт не останавливается (`0` отключает). Runner обновляет
+  report.json только между стадиями, поэтому долгая интеграция — не признак зависания.
+- ntfy включён по умолчанию (`--no-notify` выключает), только статус: режим, индекс,
+  код, `status`, причина остановки, `oom_kill`, имя каталога — без penalty/дельт.
+- Остановка: Ctrl-C, `systemctl --user kill --signal=TERM <unit>.scope` или
+  `touch OUTPUT/run/STOP`. TERM передаётся runner, через `PAIR_STOP_GRACE=600` с — KILL;
+  код wrapper 124, `stop_reason=signal`. Иначе код runner (137 — OOM-kill по `MemoryMax`).
+- `--threads` одинаковый для free-Q и Q1: он входит в environment signature пилота.
+  `--shutdown`, `--image`, `--timeout`, `--stall` отвергаются (только VM).
+
+Скопировать в `~/Agama/py` актуальные `check_potential_convergence/` (оба
+лончера, `run_potential_pair.py`, `check_potential_convergence.py`), `run_single_model.py`,
+experimental harness и `table3.dat`; сверить `sha256sum` с репозиторием. Входы — тот
+же models-файл и dense-каталоги Step 1A (на tycho они уже есть, если отчёты получены
+там). Запуск в tmux или с `loginctl enable-linger`:
+
+```bash
+cd ~/Agama/py
+L=check_potential_convergence/launch_potential_pair_local.sh
+IN="$HOME/Agama/py/potential_checks"; OUT="$HOME/potential_pair_runs"; mkdir -p "$OUT"
+S=$(date +%Y%m%d_%H%M%S)
+R=(q1_dense/model_000/report.json q1_dense/model_001/report.json freeq_dense/model_000/report.json)
+for i in 2 0 1; do
+    bash "$L" --mode=validate --input-root="$IN" --models=models_potential_check.txt \
+        --model-index=$i --field-report="${R[$i]}" --output="$OUT/validate_${i}_$S" || break
+done
+for i in 2 0 1; do
+    bash "$L" --mode=preflight --input-root="$IN" --models=models_potential_check.txt \
+        --model-index=$i --field-report="${R[$i]}" --output="$OUT/preflight_${i}_$S" || break
+done
+bash "$L" --mode=pilot --input-root="$IN" --models=models_potential_check.txt \
+    --model-index=2 --field-report="${R[2]}" --output="$OUT/freeq_$S"
+```
+
+(`q1_dense`/`freeq_dense` — имена реальных dense-каталогов.) После просмотра free-Q
+(как в §7) — индексы 0 и 1 с `--reviewed-freeq="$OUT/freeq_$S/run/report.json"`.
+Если binary guard отвергает AGAMA (окружение изменилось), сначала `--mode=fields`
+и анализ новой evidence; обходить guard нельзя.
+
+Артефакты на месте `container_*`: `launcher.log` (параметры, лимиты scope,
+`runner_exit`, `exit_code`, `oom_kill`, `notify=`), `runner.log` (stdout/stderr runner),
+`resources.jsonl` (`memory.current/peak`, swap, `cpu.stat`, PSI, MemAvailable каждые
+`PAIR_MONITOR_INTERVAL=30` с), `scope_state.txt` (`memory.peak`, `memory.events`,
+`cpu.stat`). Содержимое `run/` — как в §7. Тесты:
+`test_potential_pair_local.py` (PATH-стабы, fake cgroup, без systemd/AGAMA).
