@@ -1,6 +1,6 @@
 # Project status
 
-Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-13 (tycho Q29 pilot wrapper implemented; no real run).
+Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10-14 (Q29 pilot executed on tycho; Q30 opened).
 
 ## Where the science stands
 
@@ -42,18 +42,16 @@ Rewritten (not appended) at the end of every task; ≤ 60 lines. Update: 2026-10
 
 ## Next steps (proposed, need PI go-ahead for anything expensive)
 
-1. tycho (offline, DECISIONS 2026-10-12/13): user preflight + incl=90 run with `--offline`; then
-   (sequentially) the Q29 pilot via `launch_potential_pair_local.sh`, then Q=1.
-   Handoff: local `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`.
-2. Q29: authorise VM evidence/preflight, then free-Q pilot; review before the two Q1 controls.
-   Handoff: `results/Q1d1_rh_bounds/HANDOFF_POTENTIAL_CHECK.md` §8.14; commands: diagnostic README §7.
-   Keep exact local inputs/evidence; a different VM binary needs field validation, not a bypass.
-   Use live potentials, not .ini; no automatic seed expansion, cloud delivery or production adoption.
+1. Q30 (PI): refined multipole for free-Q? Pilot on tycho (DECISIONS 2026-10-14): N184/l24
+   converged; free-Q penalty shift ≫ δP, Q1 ≲ δP. Recommended: A/B pairs at 3–4 more free-Q
+   points, then switch harness if the shift varies. Notes: local `results/Q1d1_rh_bounds/NOTES.md`.
+2. tycho (offline): incl=90 search and Q=1 studies via `launch_tycho.sh --offline`; run
+   sequentially with pilots. Handoff: local `results/tycho_d1_nb250_gh0_ser0/HANDOFF.md`.
 3. Later: batch re-score/fetch (tar offsets); Q16 J weighting; recompute 77 lost libraries.
 
 ## Open questions
 
 Q15 (Upsilon Brent into production), Q16 (J weighting / sampling density), Q17–Q19
 (shard consolidation, `ic`/`inttime`, shard naming), Q20 (production `pipefail`), Q23
-(OpenMP wrap in production), Q29 (pilot execution gates) — see `questions_for_pi.md`.
-Decided (`DECISIONS.md`): Q21, Q22, Q28, TR bound, PCA std floor.
+(OpenMP wrap in production), Q30 (refined multipole for free-Q) — see `questions_for_pi.md`.
+Decided (`DECISIONS.md`): Q21, Q22, Q28, Q29, TR bound, PCA std floor.

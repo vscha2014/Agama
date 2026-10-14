@@ -423,3 +423,15 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   6 h) and runtime (48 h) send one ntfy each; the host-memory stop is dropped.
 - `--threads` must be the same for free-Q and Q1 (environment signature).
 - ntfy on by default (`--no-notify`), status only. No real tycho run by the agent.
+
+## 2026-10-14 — Q29 pilot executed on tycho (closes Q29)
+
+- User ran the eleven-integration seed-42 pilot on tycho with
+  `launch_potential_pair_local.sh` instead of the ya VM: validate → preflight → free-Q →
+  agent review → both Q1 controls. All `pilot_pass`, technical budget met, no OOM.
+- The tycho conda env resolved to a different AGAMA build (same 1.0.156, other `agama.so`)
+  than the 2026-10-08 evidence; the binary guard stopped the preflight. User chose fresh
+  Step 1A evidence in that env (`--mode=fields`) rather than the old env; field metrics and
+  statuses matched the old evidence to ≤ 2e-6 relative. The guard was not bypassed.
+- Outcome (numbers local only): N184/l24 is converged at penalty level (C agrees);
+  free-Q changes by ≫ δP between N23/l4 and N184/l24, Q1 controls by ≲ δP. Follow-up: Q30.

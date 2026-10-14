@@ -108,21 +108,28 @@ integration. The harness fix was applied on 2026-10-03 (user request, see
 penalty equal to round-off, orbit integration ≈20× faster on 32 vCPU.
 **Question:** port the same wrap to `_yaVM.py`?
 
-## Q29. Execution gates after preparing the Step 1B pilot  [affects: diagnostics only]
+## Q30. Refined multipole potential for free-Q searches?  [affects: CONTRACT §potential (`lmax=4`), harness]
 
-The user approved preparation for ya VM according to the recommended option B,
-seed-42 eleven-integration design and engineering tolerances; that answer and
-its scope are in DECISIONS (2026-10-08). The diagnostic pilot CLI and separate
-offline Docker wrapper are prepared. Approval was to prepare, not run on the VM.
+The Q29 seed-42 pilot ran on tycho (DECISIONS 2026-10-14). With common IC, the free-Q
+control (flattened halo) changes penalty by about twenty times the agreed δP when the
+baseline N23/l4 multipole is replaced by N184/l24; N399/l40 agrees with N184/l24, so
+the refined setting is converged and the baseline is not. Both Q1 controls change by
+≲ δP. The shift comes from the orbit library, not from Upsilon. Integration is not
+slower with the refined potential. Numbers: local `results/Q1d1_rh_bounds/NOTES.md`.
 
-**Remaining question:** authorise VM validation/preflight (and field-only evidence
-if its AGAMA binary differs), then the five-integration free-Q pilot? After its
-report/resources are reviewed, separately authorise the six Q1 integrations.
-The wrapper requires explicit review of the free-Q report for Q1 execution.
+Consequence: free-Q search history and its best model were evaluated on a biased
+objective; whether the minimum and J move is unknown (one point, one seed).
 
-Recommended order: input/field/binary checks → free-Q pilot → review correctness,
-A/A, strict-search budget, C/B, native/common and resources → Q1 controls. No
-automatic retries, seed expansion, pool/catalog writes, cloud operations or deletion.
-The additional seven seeds per model and any production adoption remain separate
-future decisions, not implied by this pilot. Commands: diagnostic README §7;
-local handoff §8.14. No scientific pilot has been executed during preparation.
+Options:
+- A. Switch the experimental harness to N184/l24 for all new searches (free-Q and Q1),
+  then re-run free-Q near the good valley and recompute J. Cleanest; production untouched;
+  old free-Q history becomes a different objective (keep it, label it).
+- B. Keep `lmax=4` and report the shift as a systematic. Cheapest; leaves a known bias of
+  the free-Q penalty comparable to the Q1–free-Q gap.
+- C. First a small diagnostic: A/B pairs (common IC) at 3–4 further free-Q points along the
+  valley (e.g. the top-4 set). A nearly constant shift ⇒ offset only (minimum/J stable);
+  a varying shift ⇒ A is required. ~1 h per point on tycho, no search.
+
+Recommendation: C, then A if the shift varies by more than δP along the valley.
+Blocked: new free-Q searches and any free-Q vs Q1 comparison in the article. Q1 searches
+can proceed (baseline adequate at δP level), but A would also change them for consistency.
