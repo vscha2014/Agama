@@ -29,14 +29,19 @@ exec "$@"
     'python': r'''#!/bin/bash
 if [ "$1" = "-c" ]; then exit "${PY_IMPORT_FAIL:-0}"; fi
 echo "python $* OMP=$OMP_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS" >> "$HOME/events"
-sfx=""; exp="d1_nb250_gh0_ser0"; prev=""
+sfx=""; exp="d1_nb250_gh0_ser0"; prev=""; rep=""
 for a in "$@"; do
     [ "$prev" = "--suffix" ] && sfx="$a"
+    [ "$prev" = "--report" ] && rep="$a"
     [ "$a" = "--Q1" ] && exp="Q1d1_nb250_gh0_ser0"
     prev="$a"
 done
 echo "90.0 0.27 0 2.4 90 0.66 1.25${sfx} t" >> "out_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
 echo "log" > "log_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
+if [ -n "$rep" ]; then
+    echo "{\"status\": \"ok\", \"suffix\": \"$sfx\"}" > "$rep"
+    echo "single-model check $sfx status=ok" > "${rep%.json}.txt"
+fi
 echo "worker $sfx done"
 if [ -n "${PY_HANG:-}" ]; then
     trap 'echo "checkpoint written $sfx"; exit 75' TERM INT
@@ -69,7 +74,11 @@ def workdir(tmp_path, memory_max='8192000000', controllers='cpuset cpu io memory
     work = tmp_path / 'py'
     work.mkdir()
     (work / LAUNCHER.name).write_text(LAUNCHER.read_text())
-    for name in (SCRIPT, 'orblib_storage.py', 'table3.dat'):
+    (work / SCRIPT).write_text(
+        "bounds_original = {'Q': (0.05, 2.5), 'gh': (0.0, 1.6), 'rh': (0.5, 30.0), "
+        "'rho0': (10.0, 120.0), 'Upsilon': (0.1, 1.6)}\n")
+    (work / 'run_single_model.py').write_text((ROOT / 'py/run_single_model.py').read_text())
+    for name in ('orblib_storage.py', 'table3.dat'):
         (work / name).touch()
     (tmp_path / 'meminfo').write_text('MemTotal:       32000000 kB\nMemAvailable:   30000000 kB\n')
     (tmp_path / 'proc_cgroup').write_text('0::/user.slice/agama-test.scope\n')
@@ -276,10 +285,53 @@ def test_offline_never_calls_rclone_and_bundles_results(tmp_path):
 
 
 def test_offline_preflight_skips_rclone(tmp_path):
-    result, events, _ = run(tmp_path, '--threads=4', '--offline', '--preflight')
+    def setup(work):
+        (work / 'out_other_Q1d1_nb250_gh0_ser0.txt').write_text('90 1.0 0 25 33.57 0.6 1.75 t\n')
+    result, events, _ = run(tmp_path, '--threads=4', '--offline', '--Q1', '--preflight', setup=setup)
     assert result.returncode == 0, output(result)
     assert not any(e.startswith('rclone') for e in events)
+    assert 'out_*_d1_nb250_gh0_ser0*: 1' in result.stdout
     assert 'холодный старт' in result.stdout
+
+
+def test_models_mode_runs_sequentially_within_8gb_scope_and_bundles_offline(tmp_path):
+    models_text = (
+        '90.0 1.0 0.0 25.0 36.0 0.6003 1.7581 2026-10-06 14:42:52  # m0_rh25_rho36.0\n'
+        '90.0 1.0 0.0 30.0 38.5 0.6003 1.7581 2026-10-06 14:42:52  # m1_rh30_rho38.5\n'
+    )
+
+    def setup(work):
+        (work / 'models.txt').write_text(models_text)
+        stop = work / 'orblib/.storage'
+        stop.mkdir(parents=True)
+        (stop / 'STOP').write_text('stale stop')
+    result, events, work = run(tmp_path, '--threads=4', '--offline', '--models=models.txt', setup=setup)
+    assert result.returncode == 0, output(result)
+    assert not any(e.startswith('rclone') for e in events)
+    assert not (work / 'orblib/.storage/STOP').exists()
+    scope = [e for e in events if e.startswith('systemd-run') and '--unit=' in e]
+    assert len(scope) == 1
+    for prop in ('CPUQuota=400%', 'MemoryMax=8589934592', 'MemoryHigh=7730941131',
+                 'MemorySwapMax=0', 'IOWeight=10', 'OOMPolicy=continue'):
+        assert prop in scope[0].split()
+    runs = pythons(events)
+    assert len(runs) == 2
+    assert [r[r.index('--rh') + 1] for r in runs] == ['25.0', '30.0']
+    assert [r[r.index('--rho0') + 1] for r in runs] == ['36.0', '38.5']
+    assert [r[r.index('--suffix') + 1] for r in runs] == ['multi20261010_120000m0', 'multi20261010_120000m1']
+    for r in runs:
+        assert r[r.index('--protocols') + 1] == 'exp'
+        assert r[r.index('--n_threads') + 1] == '4' and 'OMP=4' in r and 'OPENBLAS=4' in r
+    summary = (work / 'summary_multi_20261010_120000.txt').read_text()
+    assert 'multi-model summary: 2 models' in summary and 'status=ok' in summary
+    bundle = work / 'tycho_results_multi_d1_nb250_gh0_ser0_n2_20261010_120000.tar.gz'
+    names = set(subprocess.run(['tar', '-tzf', str(bundle)], capture_output=True, text=True,
+                               check=True).stdout.split())
+    assert {'out_testhost_d1_nb250_gh0_ser0_multi20261010_120000m0.txt',
+            'out_testhost_d1_nb250_gh0_ser0_multi20261010_120000m1.txt',
+            'summary_multi_20261010_120000.txt',
+            'report_multi_20261010_120000_m0.json',
+            'report_multi_20261010_120000_m0.txt'} <= names
 
 
 def test_no_save_orblib_keeps_reuse(tmp_path):
@@ -317,3 +369,29 @@ def test_no_shutdown_docker_or_sudo_commands():
     code = [line for line in LAUNCHER.read_text().splitlines() if not line.lstrip().startswith('#')]
     for line in code:
         assert not re.search(r'(^|[\s;&|(])(sudo|docker|shutdown|swapon|mkswap)\s', line), line
+
+
+def test_git_results_auto_detects_parent_results_repo_and_pushes(tmp_path):
+    remote = tmp_path / 'remote.git'
+    results = tmp_path / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    (results / 'out_prev_Q1d1_nb250_gh0_ser0.txt').write_text('90.0 1.0 0.0 25.0 33.57 0.6 1.75 t\n')
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+
+    result, events, work = run(tmp_path, '--threads=4', '--Q1')
+    assert result.returncode == 0, output(result)
+    assert not any(e.startswith('rclone ') for e in events)
+    (argv,) = pythons(events)
+    assert '--offline' in argv and '--Q1' in argv
+    assert not (work / 'out_prev_Q1d1_nb250_gh0_ser0.txt').exists()
+    merged = results / 'out_testhost_Q1d1_nb250_gh0_ser0.txt'
+    assert merged.exists() and not merged.is_symlink() and '1.25p0' in merged.read_text()
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    assert '1.25p0' in (verify / 'out_testhost_Q1d1_nb250_gh0_ser0.txt').read_text()
+    assert len(list(verify.glob('logs/Q1d1_nb250_gh0_ser0_i90.0_*/log_testhost_Q1d1_nb250_gh0_ser0_p0.txt'))) == 1

@@ -435,3 +435,22 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   statuses matched the old evidence to ≤ 2e-6 relative. The guard was not bypassed.
 - Outcome (numbers local only): N184/l24 is converged at penalty level (C agrees);
   free-Q changes by ≫ δP between N23/l4 and N184/l24, Q1 controls by ≲ δP. Follow-up: Q30.
+
+## 2026-10-20 — Git-backed `results/` sync for VM and tycho launchers (user decision)
+
+- **Context** | Yandex.Disk (`rclone`) is unavailable across protocols; history and run
+  artifacts now live in the private GitHub repository `results/` (locally excluded from
+  the public `Agama` repository), while code and `py/table3.dat` are updated on VMs via
+  `git pull` of the public `Agama` repository.
+- **Decision** | All experimental launchers (`launch_multi_model.sh`,
+  `launch_single_model.sh`, `launch_orblib_exp.sh`, `launch_tycho.sh`) auto-detect
+  `${WORK_DIR}/../results/.git` (or accept `--results-dir=DIR`, `--git-results`,
+  `--no-git-results`). At start they `git pull --ff-only` and the Python scripts read
+  historical `4Ups*`/`out_*` directly from `../results/` (`-v "${RESULTS_DIR}:/results"` in
+  Docker) without copying them into `py/`. At finish and on emergency, per-worker
+  `out_<host>_<EXP_ID>_<sfx>.txt` files are merged via `append_and_remove` (`HASH:`) into
+  the end of the regular file `../results/out_<host>_<EXP_ID>.txt` (no symlinks), while
+  logs, reports and `MODELS_FILE` go into `../results/logs/<RUN_TAG>_<TS>/` (`../results/logs/seed/<RUN_TAG>_<TS>/`
+  for `--ic-seeds`), followed by `git commit` + `git push` with `pull --rebase` retries.
+  `.npz` orbit libraries (~618 MB) stay local on the VM (`ORBLIB_LOCAL_STORE=1` in
+  `launch_orblib_exp.sh` preserves save slots and `STOP` handling without `rclone`).

@@ -173,23 +173,29 @@ print(f"Идентификатор процесса: {hostname_proc}")
 print(f"Эксперимент: double={DOUBLE}, n_bin={N_BIN}, gh_id={GH_ID}, "
       f"ser_id={SER_ID}, save_orblib={SAVE_ORBLIB}, Q={'1 (fixed)' if Q1 else 'free'}")
 
+RESULTS_DIR = os.environ.get('RESULTS_DIR') or ('../results' if os.path.isdir('../results') else '')
+_history_dirs = [''] + ([RESULTS_DIR.rstrip('/') + '/']
+                        if RESULTS_DIR and os.path.abspath(RESULTS_DIR) != os.path.abspath('.')
+                        else [])
+
 # Файлы своего сервера (не перезаписываются при синке) — того же эксперимента
 host_patterns = [
-    f"out_{_hostname_env}_{tag}{suffix}.txt"
-    for tag in history_ids for suffix in ('', '_p*')
+    f"{d}out_{_hostname_env}_{tag}{suffix}.txt"
+    for d in _history_dirs for tag in history_ids for suffix in ('', '_p*')
 ]
 
 # Пул для PCA/синка: все процессы (любой хост) ТОГО ЖЕ эксперимента.
 # Разделители '_' в EXP_ID защищают от ложных совпадений (nb250 != nb2500).
 storage_patterns = [
-    f"out_*_{tag}{suffix}.txt"
-    for tag in history_ids for suffix in ('_*', '')
+    f"{d}out_*_{tag}{suffix}.txt"
+    for d in _history_dirs for tag in history_ids for suffix in ('_*', '')
 ]
 
 # Canonical production history is a prior-only parameter source. Its penalty
 # and orbit libraries are never reused by the experimental evaluation.
 prior_seed_patterns = [
-    "4UpsBoTorch_PCA_Sersic*.txt",
+    f"{d}4UpsBoTorch_PCA_Sersic*.txt"
+    for d in _history_dirs
 ]
 
 # Архивные файлы со СТАРОЙ (неверной) геометрией posang=46.8, q_ap=0.7.
@@ -198,7 +204,8 @@ prior_seed_patterns = [
 # отделены от storage_patterns/host_patterns, чтобы устаревшие penalty никогда
 # не попадали в PCA-модель напрямую. Активируется флагом --init-from-pa468.
 seed_patterns = [
-    "4UpsBoTorch_PCA_PA46.8_Sersic_*.txt",
+    f"{d}4UpsBoTorch_PCA_PA46.8_Sersic_*.txt"
+    for d in _history_dirs
 ]
 
 
@@ -227,7 +234,7 @@ import agama
 ORBLIB_SAVE_SLOTS = int(os.environ.get('ORBLIB_SAVE_SLOTS', '2'))
 orblib_store = (Store(ORBLIB_DIR, int(os.environ.get('ORBLIB_RESERVE_BYTES', '2000000000')),
                       save_slots=ORBLIB_SAVE_SLOTS)
-                if args.stream_orblib else None)
+                if args.stream_orblib or (SAVE_ORBLIB and os.environ.get('ORBLIB_LOCAL_STORE') == '1') else None)
 if orblib_store is not None and not SAVE_ORBLIB:
     parser.error('--stream-orblib требует --save-orblib')
 
@@ -2584,8 +2591,8 @@ def build_initial_pca_from_bootstrap(bootstrap_results,
         numpy.average((X_tr - weighted_mean)**2,
                        weights=weights, axis=0)
     )
-    weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
     weighted_std  = numpy.maximum(weighted_std, WeightedScaler.std_floor(bounds_original, use_log_scale))
+    weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
     X_scaled      = (X_tr - weighted_mean) / weighted_std
 
     # Если точек мало — уменьшаем n_components
@@ -3065,8 +3072,8 @@ def _update_pca_model(model_data, data_good, new_params, new_penalties,
         numpy.average((X_tr_all - weighted_mean)**2,
                        weights=weights, axis=0)
     )
-    weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
     weighted_std  = numpy.maximum(weighted_std, WeightedScaler.std_floor(bounds_original, use_log_scale))
+    weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
     X_scaled_all  = (X_tr_all - weighted_mean) / weighted_std
 
     n_components  = model_data['pca'].n_components_
@@ -3299,9 +3306,9 @@ def run_pca_optimization(
     global checkpoint_for_stop
 
     _resume_initial = False
+    checkpoint_for_stop = globals().get('save_initial_checkpoint')
+    _checkpoint_path = f'checkpoint_{hostname_proc}.pkl'
     if globals().get('orblib_store') is not None:
-        checkpoint_for_stop = save_initial_checkpoint
-        _checkpoint_path = f'checkpoint_{hostname_proc}.pkl'
         if not resume and os.path.exists(_checkpoint_path):
             _complete = orblib_store.control / f'complete_{hostname_proc}'
             with open(_checkpoint_path, 'rb') as stream:
@@ -3322,6 +3329,12 @@ def run_pca_optimization(
                 proc_rng.bit_generator.state = _saved['rng_state']
             _ups_recent[:] = _saved.get('ups_recent', [])
         check_storage_stop()
+    elif resume and os.path.exists(_checkpoint_path):
+        try:
+            with open(_checkpoint_path, 'rb') as stream:
+                _resume_initial = pickle.load(stream).get('phase') == 'initial'
+        except Exception:
+            pass
 
     if Q1:
         n_components = min(n_components, 3)
@@ -3680,8 +3693,8 @@ def run_pca_optimization(
         numpy.average((X_transformed - weighted_mean)**2,
                        weights=weights, axis=0)
     )
-    weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
     weighted_std  = numpy.maximum(weighted_std, WeightedScaler.std_floor(bounds_original, use_log_scale))
+    weighted_std  = numpy.where(weighted_std < 1e-10, 1.0, weighted_std)
     X_scaled      = (X_transformed - weighted_mean) / weighted_std
 
     # Если точек мало (bootstrap) — уменьшаем n_components
@@ -3817,6 +3830,7 @@ def run_pca_optimization(
     checkpoint_file = f"checkpoint_{hostname_proc}.pkl"
     start_iter      = 1
     do_prior        = True
+    state           = {}
 
     if resume and not _resume_initial and os.path.exists(checkpoint_file):
         try:
@@ -3865,6 +3879,7 @@ def run_pca_optimization(
         except Exception as e:
             if globals().get('orblib_store') is not None:
                 raise
+            state = {}
             msg = (f"ПРЕДУПРЕЖДЕНИЕ: checkpoint повреждён ({e}),\n"
                    f"  стартуем с нуля")
             _write("# " + msg)
@@ -3874,11 +3889,11 @@ def run_pca_optimization(
         _write("# Checkpoint не найден, запуск с нуля")
 
     completed_iteration = start_iter - 1
+    turbo.params_obs = (state['params_obs'] if resume and not _resume_initial
+                        and os.path.exists(checkpoint_file) and 'params_obs' in state else
+                        [dict(zip(('Q', 'gh', 'rh', 'rho0'), map(float, row[1:5]))) for row in data_good])
+    checkpoint_for_stop = lambda: save_checkpoint(X_obs, Y_obs, turbo, completed_iteration, sync=False)
     if globals().get('orblib_store') is not None:
-        turbo.params_obs = (state['params_obs'] if resume and not _resume_initial
-                            and os.path.exists(checkpoint_file) and 'params_obs' in state else
-                            [dict(zip(('Q', 'gh', 'rh', 'rho0'), map(float, row[1:5]))) for row in data_good])
-        checkpoint_for_stop = lambda: save_checkpoint(X_obs, Y_obs, turbo, completed_iteration, sync=False)
         check_storage_stop()
     if Q1:
         do_prior = False
@@ -4018,8 +4033,8 @@ def run_pca_optimization(
             ], dim=0)
             _write(f"  Априорная точка добавлена. Penalty={-prior_y:.6f}")
             prior_added = True
+            turbo.params_obs.append(prior_eval_params.copy())
             if globals().get('orblib_store') is not None:
-                turbo.params_obs.append(prior_eval_params.copy())
                 checkpoint_for_stop()
                 check_storage_stop()
         if not prior_added:
@@ -4133,8 +4148,8 @@ def run_pca_optimization(
         Y_obs       = torch.cat([Y_obs, Y_next],  dim=0)
         y_last      = y_next
         completed_iteration = iteration
+        turbo.params_obs.append(new_params_i.copy())
         if globals().get('orblib_store') is not None:
-            turbo.params_obs.append(new_params_i.copy())
             checkpoint_for_stop()
             check_storage_stop()
 

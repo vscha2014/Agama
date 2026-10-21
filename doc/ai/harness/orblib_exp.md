@@ -34,8 +34,9 @@ must not be touched (see `../CONTRACT.md`, `production.md`).
 - PCA weights everywhere: `exp(-(penalty − penalty.min()) / 0.1)` — prevents
   all-zero underflow on cold-start penalties above 100. The weighted std is
   floored at `WeightedScaler.STD_FLOOR_FRAC` (0.05) × the bound width in the
-  transformed space (log10 `rh`, `rho0`), so best rows sharing a bound value no
-  longer blow up the PCA box (2026-10-05, harness only).
+  transformed space (log10 `rh`, `rho0`) **before** the `< 1e-10 → 1.0`
+  guard, so best rows sharing a bound value (or zero-variance `gh=0` subsets) no
+  longer blow up or zero out a PCA axis (2026-10-05 / 2026-10-15, harness only).
 - Q1 seeding before the first PCA: per source (compatible `out`, canonical
   `4Ups`, opt-in PA46.8) at most 24 nearest-`Q` candidates, ranked by old penalty
   within their own source, ordered with rank-biased per-process RNG; at most 10
@@ -202,7 +203,8 @@ Everything below exists to keep that from recurring.
 - **Signals.** SIGTERM/SIGINT write the storage `STOP` marker with reason
   `signal <name> from controller`; the existing polls turn that into
   `StorageStop` → checkpoint → exit 75, which the launcher understands. Without
-  a store the checkpoint is written directly. A signal arriving inside a long C
+  a store the checkpoint is written directly (`save_initial_checkpoint` before
+  TuRBO, then `save_checkpoint` with `turbo.params_obs` once TuRBO starts). A signal arriving inside a long C
   call (`agama.orbit`, `agama.solveOpt`) is acted on only after that call
   returns — hence the launcher's `ORBLIB_STOP_GRACE`. A container killed by the
   cgroup OOM gets SIGKILL and writes **no** checkpoint; what survives: history
@@ -468,9 +470,14 @@ limit), `trajsize=1000`, no libraries, old bounds, canonical `4Ups*` pool.
 Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
 
 - `bash launch_tycho.sh --preflight`, then `bash launch_tycho.sh [--incl=90.0]
-  [--Q1] [--nproc=1] [--threads=N] [--resume] [--orblib-dir=DIR]
-  [--no-save-orblib] [--no-sync]`. Run it in tmux or with `loginctl enable-linger`:
-  without linger the user scope dies at logout (preflight warns).
+  [--Q1] [--models=FILE] [--memory-gb=N] [--nproc=1] [--threads=N] [--resume]
+  [--orblib-dir=DIR] [--no-save-orblib] [--no-sync] [--offline]`. Run it in tmux
+  or with `loginctl enable-linger`: without linger the user scope dies at logout
+  (preflight warns). With `--models=FILE`, `run_single_model.py --protocols exp`
+  evaluates each row of `FILE` sequentially inside the single scope (default
+  `MemoryMax=8 GiB`, `threads=nproc/4`, libraries saved in `orblib/`), writes
+  `summary_multi_<TS>.txt` and `out_<host>_d1_nb250_gh0_ser0_multi<TS>m<i>.txt`
+  pool files, and with `--offline` bundles them into `tycho_results_*.tar.gz`.
 - Budget: the launcher re-execs itself in ONE transient `systemd-run --user
   --scope` (`agama-tycho-<EXP_ID>_i<incl>-<TS>.scope`), so workers, merge and
   rclone share it: `CPUQuota = threads×100 %` (default threads `nproc/4`),
@@ -508,7 +515,7 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
   history through rclone (live result sharing).
 - **`--offline`** (tycho has no working rclone, DECISIONS 2026-10-12): the
   launcher passes `--offline` to the harness, never calls rclone (also not in
-  preflight, which instead counts local `out_*_d1_nb250_gh0_ser0*` and
+  preflight, which instead counts local `out_*_[Q1]d1_nb250_gh0_ser0*` and
   `4UpsBoTorch_PCA_Sersic*` inputs) and at the end packs
   `tycho_results_<RUN_TAG>_<TS>.tar.gz` (host history, launcher/run/monitor
   logs, `log_*_pN`; no `.npz`, no checkpoints) for manual transfer. In the
@@ -528,6 +535,14 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
 - No docker, sudo, swapfile or shutdown. Reservations are per host, so a
   simultaneous VM run at the same `incl` can duplicate evaluations (no data
   corruption); prefer different `incl`. Real tycho runs are done by the user.
+
+## 3h. Git-backed `results/` synchronization (without `rclone` / Yandex.Disk)
+
+When `${WORK_DIR}/../results/.git` is present (or `--git-results` / `--results-dir=DIR` is passed; disable with `--no-git-results`), all four launchers (`launch_multi_model.sh`, `launch_single_model.sh`, `launch_orblib_exp.sh`, `launch_tycho.sh`) switch automatically from `rclone` to the private `results/` Git repository (`DECISIONS.md` 2026-10-20):
+
+- **Direct reading from `../results/`**: `Fornax_P21_PCA_w3Sersic_orblib_exp.py` and `run_single_model.py` read `4UpsBoTorch_PCA_*.txt` and `out_*_[Q1]d*_nb*_gh*_ser*.txt` directly from `RESULTS_DIR` (`../results`, mounted in Docker as `-v "${RESULTS_DIR}:/results"` with `RESULTS_DIR=/results`), without copying history files into `py/`. At start the launcher runs `git -C "$RESULTS_DIR" pull --ff-only` (unless `--preflight`). `--models=FILE` is also resolved relative to `RESULTS_DIR`, `RESULTS_DIR/logs/`, `RESULTS_DIR/logs/Q1d1_rh_bounds/` and `RESULTS_DIR/Q1d1_rh_bounds/`.
+- **Orbit libraries (`.npz`)**: kept locally on the VM/host (`DO_UPLOAD=0` in single/multi; `--offline` + `ORBLIB_LOCAL_STORE=1` in `launch_orblib_exp.sh` so local `Store` save slots, disk reserve and `STOP` markers still work without `rclone`). `.npz` and `.tar` are excluded by `results/.gitignore`.
+- **Merged per-host history (`out_<host>_<EXP_ID>.txt`, no symlinks) and run logs**: each worker writes its temporary `out_<host>_<EXP_ID>_<sfx>.txt` in `py/`; at finish (and on emergency) all per-worker files are merged via `append_and_remove` (`HASH:`) into the end of the regular file `RESULTS_DIR/out_<host>_<EXP_ID>.txt` (materialising any legacy symlink at that path first). Logs, reports, summaries and `MODELS_FILE` go directly to `RESULTS_DIR/logs/<RUN_TAG>_<TS>/` (for `--ic-seeds` — `RESULTS_DIR/logs/seed/<RUN_TAG>_<TS>/`), followed by `git add -A`, `git commit`, and `git push` (with up to 3 `git pull --rebase --autostash` retries).
 
 ## 4. Editing rules
 

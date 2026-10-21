@@ -1174,3 +1174,60 @@ def test_shared_solver_preserves_original_penalty_formula(tmp_path, dtype):
     numpy.testing.assert_array_equal(details['weights'], weights)
     for i in range(2):
         numpy.testing.assert_array_equal(details['residuals'][i], matrix[i].dot(weights)-datasets[i].cons_val)
+
+
+def init_results_git_repo(base_dir):
+    remote = base_dir / 'remote.git'
+    results = base_dir / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test User'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    (results / '.gitignore').write_text('*.npz\n*.tar\n')
+    write_history(results)
+    models_dir = results / 'logs' / 'Q1d1_rh_bounds'
+    models_dir.mkdir(parents=True)
+    (models_dir / 'models_probe.txt').write_text(MODELS_TEXT)
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+    return remote, results
+
+
+def test_multi_launcher_git_results_syncs_and_pushes_without_rclone(tmp_path):
+    remote, results = init_results_git_repo(tmp_path)
+    work = tmp_path / 'py'
+    work.mkdir()
+    result, events = run_multi(work, '--models=models_probe.txt', f'--results-dir={results}',
+                               '--no-shutdown', models=None)
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    assert not any(e.startswith(('rclone ', 'storage ')) for e in events)
+    assert not list(work.glob('4Ups*')) and not list(work.glob('out_*'))
+    assert len(list(work.glob('orblib_single/*_m*/*.npz'))) == 4
+    merged = results / 'out_testhost_d1_nb250_gh0_ser0.txt'
+    assert merged.exists() and not merged.is_symlink()
+    assert merged.read_text().count('HASH:') == 4
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    assert (verify / 'out_testhost_d1_nb250_gh0_ser0.txt').read_text().count('HASH:') == 4
+    assert len(list(verify.glob('logs/multi_d1_nb250_gh0_ser0_n4_*/summary_multi_*.txt'))) == 1
+    assert len(list(verify.glob('logs/multi_d1_nb250_gh0_ser0_n4_*/models_probe.txt'))) == 1
+
+
+def test_single_launcher_git_results_pulls_history_and_pushes_results(tmp_path):
+    remote, results = init_results_git_repo(tmp_path)
+    work = tmp_path / 'py'
+    work.mkdir()
+    result, events = run_launcher(work, '--repeats=2', f'--results-dir={results}',
+                                  '--no-shutdown', history=False)
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    assert not any(e.startswith(('rclone ', 'storage ')) for e in events)
+    assert not (work / '4UpsBoTorch_PCA_Sersic_test_p0.txt').exists()
+    assert not list(work.glob('out_*'))
+    merged = results / 'out_testhost_d1_nb250_gh0_ser0.txt'
+    assert merged.exists() and not merged.is_symlink()
+    assert merged.read_text().count('HASH:') == 2
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    assert (verify / 'out_testhost_d1_nb250_gh0_ser0.txt').read_text().count('HASH:') == 2
+    assert len(list(verify.glob('logs/single_d1_nb250_gh0_ser0_i90.0_*/summary_single_*.txt'))) == 1

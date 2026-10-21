@@ -565,13 +565,21 @@ def static_context(mod):
     return context, dict(exp=exp, prod=prod, identical=identical)
 
 
+def default_params_from():
+    results_dir = os.environ.get('RESULTS_DIR') or ('../results' if os.path.isdir('../results') else '')
+    dirs = [''] + ([results_dir.rstrip('/') + '/']
+                   if results_dir and os.path.abspath(results_dir) != os.path.abspath('.')
+                   else [])
+    return [f'{d}{pattern}' for d in dirs for pattern in DEFAULT_PARAMS_FROM]
+
+
 def resolve_reference(args):
     explicit = [key for key in PARAM_KEYS if getattr(args, key) is not None]
     if len(explicit) == len(PARAM_KEYS) and not args.params_from:
         ref = dict(incl=args.incl, upsilon=None, penalty=None, source='command line', line=None)
     else:
         import glob
-        patterns = args.params_from or DEFAULT_PARAMS_FROM
+        patterns = args.params_from or default_params_from()
         paths = [p for pattern in patterns for p in glob.glob(pattern)]
         ref = best_reference(paths, args.incl)
         if ref is None:

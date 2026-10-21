@@ -216,6 +216,42 @@ def test_pca_box_stays_finite_when_best_rows_share_a_bound_value(tmp_path, q1):
                                       list(result['params'].values()))
 
 
+def test_std_floor_applies_when_column_has_zero_variance(tmp_path, monkeypatch):
+    ns, _, _, _, _ = seed_namespace(tmp_path, monkeypatch, extra_functions=(
+        'WeightedScaler', 'build_initial_pca_from_bootstrap', '_update_pca_model',
+        'run_pca_optimization', 'adaptive_penalty_cutoff', 'load_fresh_data_from_files',
+        'pca_to_params_fixed', 'params_to_pca_fixed', 'save_checkpoint'))
+    captured = {}
+
+    def turbo_factory(**kwargs):
+        captured['scale'] = kwargs['model_data']['scaler'].scale_.copy()
+        return SimpleNamespace(length=0.6)
+
+    ns.update(PCA=NumpyPCA, TuRBO_PCA_Fixed=turbo_factory,
+              torch=SimpleNamespace(tensor=ArrayTensor, double='double', device=lambda x: x,
+                                    cuda=SimpleNamespace(is_available=lambda: False)),
+              send_notification=lambda *a, **kw: None)
+    floor = ns['WeightedScaler'].std_floor(BOUNDS, True)
+    results = [dict(params=dict(Q=1.0, gh=0.0, rh=3.5 + i, rho0=34.0 + i), penalty=2.0 + 0.05 * i)
+               for i in range(12)]
+    model = ns['build_initial_pca_from_bootstrap'](
+        results, BOUNDS, n_components=3, output_file=str(tmp_path / 'pca.log'))
+    numpy.testing.assert_allclose(model['scaler'].scale_[1], floor[1])
+    model_new, *_ = ns['_update_pca_model'](
+        model, model['data_good'], [r['params'] for r in results[:5]], [1.9] * 5,
+        BOUNDS, True, 2.5, ArrayTensor(numpy.zeros((1, 3))), ArrayTensor([[-1.9]]),
+        SimpleNamespace(), str(tmp_path / 'update.log'), None, None,
+        read_parallel=False, incl_filter=90.0)
+    numpy.testing.assert_allclose(model_new['scaler'].scale_[1], floor[1])
+    rows = numpy.array([[90.0, 1.0, 0.0, 3.5 + i, 34.0 + i, 0.6, 2.0 + 0.05 * i] for i in range(12)])
+    numpy.savetxt(tmp_path / 'out_zero_gh.txt', rows)
+    ns['run_pca_optimization'](
+        storage_patterns=['out_*.txt'], host_patterns=[], prior_patterns=[],
+        output_file=str(tmp_path / 'run.log'), resume=False, reserve_points=False,
+        n_components=3, n_iter=0)
+    numpy.testing.assert_allclose(captured['scale'][1], floor[1])
+
+
 @pytest.mark.parametrize('q1', [False, True])
 def test_history_reads_both_modes_without_dedup(tmp_path, monkeypatch, q1):
     monkeypatch.chdir(tmp_path)
@@ -913,6 +949,57 @@ def test_stream_stop_saves_last_completed_evaluation_and_resumes(tmp_path, monke
     assert len(evaluated) == expected_count
 
 
+@pytest.mark.parametrize('q1', [False, True])
+def test_stop_without_store_saves_turbo_checkpoint_and_resumes(tmp_path, monkeypatch, q1):
+    ns, _, _, _, syncs = seed_namespace(tmp_path, monkeypatch, extra_functions=(
+        'run_pca_optimization', 'WeightedScaler', 'adaptive_penalty_cutoff',
+        'load_fresh_data_from_files', 'pca_to_params_fixed', 'params_to_pca_fixed',
+        'save_checkpoint', 'q1_checkpoint_coords', 'save_initial_checkpoint', '_handle_stop_signal'))
+    rows = write_seed_history(tmp_path / 'out_previous.txt', count=10)
+    rows[:, 1] = 1.0 if q1 else 0.8
+    rows[:, 6] = 5.0
+    numpy.savetxt(tmp_path / 'out_previous.txt', rows)
+    evaluated = []
+
+    def turbo_factory(**kwargs):
+        return SimpleNamespace(length=0.6, length_min=0.01, success_count=0, failure_count=0,
+                               model_data=kwargs['model_data'], bounds_original=BOUNDS,
+                               suggest=lambda *a, **k: ArrayTensor([[0.1, 0.2, 0.3]]),
+                               _update_tr=lambda *a: None)
+
+    def evaluate(pc, model, bounds, *args):
+        evaluated.append(ns['pca_to_params_fixed'](pc, model, bounds))
+        ns.update(best_overall_target=-4.0, best_overall_Upsilon=0.6)
+        if len(evaluated) == 2:
+            ns['_handle_stop_signal'](15, None)
+        return -4.0
+
+    ns.update(Q1=q1, PCA=NumpyPCA, TuRBO_PCA_Fixed=turbo_factory,
+              torch=SimpleNamespace(tensor=ArrayTensor, double='double', device=lambda x: x,
+                                    cat=lambda tensors, dim=0: ArrayTensor(numpy.concatenate([t.values for t in tensors], axis=dim)),
+                                    cuda=SimpleNamespace(is_available=lambda: False)),
+              orblib_store=None, signal=SimpleNamespace(Signals=lambda n: SimpleNamespace(name='SIGTERM')),
+              atomic_bytes=lambda path, data: Path(path).write_bytes(data),
+              EVALUATION_CONTEXT='same', _ups_recent=[], do_resume=False,
+              UpsFile=str(tmp_path / 'out_current.txt'),
+              read_active_reservations=lambda *a, **k: [],
+              halo_IC_lib_weights_pca_fixed=evaluate, send_notification=lambda *a, **k: None)
+    kwargs = dict(storage_patterns=['out_*.txt'], host_patterns=[], prior_patterns=[],
+                  output_file=str(tmp_path / 'run.log'), reserve_points=False, n_components=3)
+    with pytest.raises(SystemExit) as exc:
+        ns['run_pca_optimization'](**kwargs, resume=False, n_iter=5)
+    assert exc.value.code == 75
+    checkpoint = next(tmp_path.glob('checkpoint_*.pkl'))
+    state = pickle.loads(checkpoint.read_bytes())
+    assert state['phase'] == 'turbo'
+    assert state['iteration'] == 1
+    assert state['params_obs'][-1] == evaluated[0]
+    assert state['Y_obs'][-1, 0] == -4.0
+    assert not syncs
+    ns['run_pca_optimization'](**kwargs, resume=True, n_iter=1)
+    assert len(evaluated) == 2
+
+
 def test_completed_points_use_compatible_context_and_keep_history(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     path = tmp_path / 'out_history.txt'
@@ -1013,3 +1100,59 @@ def test_launcher_help_is_side_effect_free():
                             text=True, capture_output=True, check=True)
     assert '--Q1' in result.stdout
     assert '--no-shutdown' in result.stdout
+    assert '--git-results' in result.stdout
+
+
+def test_launcher_git_results_mode_uses_local_store_and_pushes_to_git(tmp_path):
+    remote = tmp_path / 'remote.git'
+    results = tmp_path / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    (results / 'out_prev_Q1d1_nb250_gh0_ser0.txt').write_text('90 1 0.0 25.0 33.57 0.6 1.75\n')
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+
+    work = tmp_path / 'py'
+    work.mkdir()
+    launcher = work / LAUNCHER.name
+    launcher.write_text(LAUNCHER.read_text())
+    (work / SCRIPT.name).touch()
+    (work / 'table3.dat').touch()
+    (work / 'orblib_storage.py').touch()
+    prefix = '''
+hostname() { printf 'testhost'; }
+nproc() { printf '4'; }
+rclone() { printf 'UNEXPECTED rclone %s\\n' "$*" >> "$HOME/calls.txt"; return 1; }
+curl() { return 0; }
+sudo() { printf 'UNEXPECTED sudo\\n' >> "$HOME/calls.txt"; return 1; }
+docker() {
+    printf 'docker %s\\n' "$*" >> "$HOME/calls.txt"
+    case "$1" in
+        image|info|stats|stop|kill) return 0 ;;
+    esac
+    printf '90 1 0.0 28.0 43.5 0.46 1.53\\n' > "$WORK_DIR/out_${HOSTNAME_ENV}_${EXP_ID}_p0.txt"
+    printf 'mock diagnostic\\n' > "$WORK_DIR/log_${HOSTNAME_ENV}_${EXP_ID}_p0.txt"
+    return 0
+}
+source "$0" "$@"
+'''
+    result = subprocess.run(
+        ['bash', '-c', prefix, str(launcher), '--Q1', '--nproc=1', '--no-shutdown'],
+        cwd=work, text=True, capture_output=True, timeout=30,
+        env=dict(os.environ, HOME=str(tmp_path), ORBLIB_SWAPFILE='0'))
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / 'calls.txt').read_text()
+    assert 'UNEXPECTED' not in calls
+    assert '--offline' in calls and '--stream-orblib' not in calls
+    assert 'ORBLIB_LOCAL_STORE=1' in calls and 'RESULTS_DIR=/results' in calls
+    assert not (work / 'out_prev_Q1d1_nb250_gh0_ser0.txt').exists()
+    merged = results / 'out_testhost_Q1d1_nb250_gh0_ser0.txt'
+    assert merged.exists() and not merged.is_symlink()
+    assert '90 1 0.0 28.0 43.5 0.46 1.53' in merged.read_text()
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    assert '90 1 0.0 28.0 43.5 0.46 1.53' in (verify / 'out_testhost_Q1d1_nb250_gh0_ser0.txt').read_text()
+    assert len(list(verify.glob('logs/Q1d1_nb250_gh0_ser0_i90.0_*/log_testhost_Q1d1_nb250_gh0_ser0_p0.txt'))) == 1

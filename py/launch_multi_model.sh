@@ -36,6 +36,8 @@ MODELS_FILE=""
 DO_SHUTDOWN=1
 DO_UPLOAD=1
 PREFLIGHT=0
+RESULTS_DIR="${RESULTS_DIR:-}"
+GIT_RESULTS_MODE="${GIT_RESULTS:-auto}"
 
 for arg in "$@"; do
     case $arg in
@@ -46,6 +48,9 @@ for arg in "$@"; do
                 '                   (форматы out_*/4Ups*, J_factor_*, Jcomputed_*; "# метка" в конце строки' \
                 '                   допускается). incl и параметры берутся из строки, её penalty/Upsilon —' \
                 '                   опорные. Одна интеграция + штатный поиск Upsilon (протокол exp).' \
+                '  --results-dir=D  Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
+                '  --git-results    Синхронизировать историю и отчёты через git-репозиторий results (без rclone).' \
+                '  --no-git-results Отключить автопереключение на ../results и использовать rclone.' \
                 '  --no-shutdown    Не выключать VM после завершения.' \
                 '  --no-upload      Не выгружать .npz в общий каталог galAgama/orblib.' \
                 '  --preflight      Все модели без интегрирования: импорт, геометрия, имя библиотеки;' \
@@ -57,6 +62,9 @@ for arg in "$@"; do
             exit 0
             ;;
         --models=*)      MODELS_FILE="${arg#*=}" ;;
+        --results-dir=*) RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
+        --git-results)   GIT_RESULTS_MODE=1 ;;
+        --no-git-results) GIT_RESULTS_MODE=0 ;;
         --no-shutdown)   DO_SHUTDOWN=0      ;;
         --no-upload)     DO_UPLOAD=0        ;;
         --preflight)     PREFLIGHT=1        ;;
@@ -66,6 +74,33 @@ for arg in "$@"; do
             ;;
     esac
 done
+[ -n "$RESULTS_DIR" ] || RESULTS_DIR="${WORK_DIR}/../results"
+GIT_RESULTS=0
+if [ "$GIT_RESULTS_MODE" = "1" ]; then
+    GIT_RESULTS=1
+elif [ "$GIT_RESULTS_MODE" = "auto" ] && [ -e "${RESULTS_DIR}/.git" ]; then
+    GIT_RESULTS=1
+fi
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    if [ ! -e "${RESULTS_DIR}/.git" ]; then
+        echo "ОШИБКА: git-репозиторий результатов не найден: ${RESULTS_DIR}/.git" >&2
+        exit 2
+    fi
+    RESULTS_DIR="$(cd "$RESULTS_DIR" && pwd)"
+    DO_UPLOAD=0
+fi
+if [ -n "$MODELS_FILE" ] && [ ! -f "$MODELS_FILE" ]; then
+    for _cand in "${WORK_DIR}/${MODELS_FILE}" \
+                 "${RESULTS_DIR}/${MODELS_FILE}" \
+                 "${RESULTS_DIR}/logs/${MODELS_FILE}" \
+                 "${RESULTS_DIR}/logs/Q1d1_rh_bounds/${MODELS_FILE}" \
+                 "${RESULTS_DIR}/Q1d1_rh_bounds/${MODELS_FILE}"; do
+        if [ -f "$_cand" ]; then
+            MODELS_FILE="$_cand"
+            break
+        fi
+    done
+fi
 if [ -z "$MODELS_FILE" ] || [ ! -f "$MODELS_FILE" ]; then
     echo "ОШИБКА: нужен существующий --models=FILE (получено: '${MODELS_FILE}')" >&2
     exit 2
@@ -166,10 +201,63 @@ notify() {
     fi
 }
 
+GIT_RUN_SUB="logs/${RUN_TAG}_${TIMESTAMP}"
+
+append_and_remove() {
+    local src="$1" dst="$2" label="$3"
+    [ -f "$src" ] || return 0
+    if [ -L "$dst" ]; then
+        local target
+        target="$(readlink -f "$dst" 2>/dev/null || true)"
+        if [ -n "$target" ] && [ -f "$target" ]; then
+            cp --remove-destination "$target" "$dst"
+        else
+            rm -f "$dst"
+        fi
+    fi
+    local src_lines
+    src_lines=$(grep -v "^#" "$src" | grep -v "^[[:space:]]*$" | grep -c "" 2>/dev/null || echo 0)
+    if [ "$src_lines" -eq 0 ]; then
+        log "  Пропуск (нет строк данных): $src"
+        rm -f "$src"
+        return 0
+    fi
+    local src_hash
+    src_hash=$({ basename "$src"; grep -v "^#" "$src" | grep -v "^[[:space:]]*$"; } | md5sum | cut -d' ' -f1)
+    if [ -f "$dst" ] && grep -q "HASH:${src_hash}" "$dst" 2>/dev/null; then
+        log "  Пропуск: $src уже добавлен (HASH:${src_hash})"
+        rm -f "$src"
+        return 0
+    fi
+    log "  $(basename "$src") → $dst ($src_lines строк данных, HASH:${src_hash})"
+    if {
+        echo ""
+        echo "# ============================================================"
+        echo "# Добавлено из: $src"
+        echo "# Label:  ${label}"
+        echo "# Time:   $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# Lines:  $src_lines"
+        echo "# HASH:${src_hash}"
+        echo "# ============================================================"
+        cat "$src"
+    } >> "$dst"; then
+        rm -f "$src"
+        return 0
+    fi
+    log "  ОШИБКА записи в $dst — $src сохранён!"
+    return 1
+}
+
 upload_file() {
     local src="$1"
     local dest="$2"
     [ -f "$src" ] || return 0
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        mkdir -p "${RESULTS_DIR}/${GIT_RUN_SUB}"
+        cp -Lf "$src" "${RESULTS_DIR}/${GIT_RUN_SUB}/$(basename "$src")" 2>>"$LOGFILE" || return 1
+        log "    ✓ $(basename "$src") → results/${GIT_RUN_SUB}/"
+        return 0
+    fi
     if rclone copyto "$src" "${RCLONE_REMOTE}:${dest}" \
             --config "${RCLONE_CONF_DIR}/rclone.conf" \
             --timeout 30s --contimeout 10s --max-duration 120s \
@@ -182,6 +270,47 @@ upload_file() {
     return 1
 }
 
+sync_from_results_git() {
+    [ "$GIT_RESULTS" -eq 1 ] || return 0
+    if [ "$PREFLIGHT" -eq 0 ] && git -C "$RESULTS_DIR" remote get-url origin >/dev/null 2>&1; then
+        if git -C "$RESULTS_DIR" pull --ff-only >>"$LOGFILE" 2>&1; then
+            log "  ✓ git pull в ${RESULTS_DIR}"
+        else
+            log "  ~ git pull в ${RESULTS_DIR} не выполнен (используется локальная копия)"
+        fi
+    fi
+}
+
+commit_and_push_results() {
+    [ "$GIT_RESULTS" -eq 1 ] || return 0
+    local msg="$1"
+    git -C "$RESULTS_DIR" add -A >>"$LOGFILE" 2>&1 || return 1
+    if git -C "$RESULTS_DIR" diff --cached --quiet; then
+        return 0
+    fi
+    local uname uemail
+    uname="$(git -C "$RESULTS_DIR" config user.name 2>/dev/null || true)"
+    uemail="$(git -C "$RESULTS_DIR" config user.email 2>/dev/null || true)"
+    git -C "$RESULTS_DIR" \
+        -c user.name="${uname:-AGAMA VM ${HOSTNAME_ENV}}" \
+        -c user.email="${uemail:-agama@${HOSTNAME_ENV}}" \
+        commit -m "$msg" >>"$LOGFILE" 2>&1 || return 1
+    if ! git -C "$RESULTS_DIR" remote get-url origin >/dev/null 2>&1; then
+        log "  ✓ Зафиксировано в локальном git results (${msg})"
+        return 0
+    fi
+    local attempt
+    for attempt in 1 2 3; do
+        if git -C "$RESULTS_DIR" push origin HEAD >>"$LOGFILE" 2>&1; then
+            log "  ✓ git push в results (${msg})"
+            return 0
+        fi
+        git -C "$RESULTS_DIR" pull --rebase --autostash origin >>"$LOGFILE" 2>&1 || true
+    done
+    log "  ✗ Не удалось выполнить git push в ${RESULTS_DIR}"
+    return 1
+}
+
 schedule_shutdown() {
     local delay="$1"
     local reason="$2"
@@ -190,6 +319,7 @@ schedule_shutdown() {
     fi
     SHUTDOWN_DONE=1
     upload_file "$LOGFILE" "${RESULTS_REMOTE}/$(basename "$LOGFILE")" || true
+    commit_and_push_results "Log ${RUN_TAG}_${TIMESTAMP} on ${HOSTNAME_ENV}" || true
     if [ "$DO_SHUTDOWN" -ne 1 ]; then
         log "Выключение пропущено (--no-shutdown/--preflight): ${reason}"
         return 0
@@ -225,8 +355,15 @@ emergency_upload() {
     [ "$EMERGENCY_DONE" -eq 1 ] && return 0
     EMERGENCY_DONE=1
     local dest="${REMOTE_DIR}/galaxy_results_emergency/${RUN_TAG}_${TIMESTAMP}"
-    log "  Аварийная выгрузка логов в ${RCLONE_REMOTE}:${dest}"
+    log "  Аварийная выгрузка логов"
     local f
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        for f in "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt; do
+            [ -f "$f" ] || continue
+            append_and_remove "$f" "${RESULTS_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt" \
+                "EMERGENCY: exp=${EXP_ID}, host=${HOSTNAME_ENV}" || true
+        done
+    fi
     for f in "$LOGFILE" "$MONITOR_LOG" "$MODELS_FILE" \
              "${WORK_DIR}/dockerlog_${RUN_TAG}_m"*"_${TIMESTAMP}.log" \
              "${WORK_DIR}/report_multi_${TIMESTAMP}_m"* \
@@ -234,6 +371,7 @@ emergency_upload() {
     do
         upload_file "$f" "${dest}/$(basename "$f")" || true
     done
+    commit_and_push_results "Emergency logs ${RUN_TAG}_${TIMESTAMP} on ${HOSTNAME_ENV}" || true
 }
 
 on_exit() {
@@ -419,6 +557,10 @@ run_container() {
     set +e
     # --memory-swap == --memory: swap контейнеру запрещён, превышение → OOM-kill (137).
     # rclone-конфиг НЕ монтируется: раннер не выполняет облачных операций.
+    local -a results_mount=()
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        results_mount=(-v "${RESULTS_DIR}:/results" -e RESULTS_DIR="/results")
+    fi
     docker run --rm \
         --name "${NAMES[$i]}" \
         --cpuset-cpus="${CPU_RANGES[$i]}" \
@@ -427,6 +569,7 @@ run_container() {
         -e HOST_UID="$(id -u)" \
         -e HOST_GID="$(id -g)" \
         -v "${WORK_DIR}:/workspace" \
+        ${results_mount[@]+"${results_mount[@]}"} \
         -e ORBLIB_RESERVE_BYTES="${ORBLIB_RESERVE_BYTES}" \
         -e ORBLIB_SAVE_SLOTS="${ORBLIB_SAVE_SLOTS}" \
         -e HOSTNAME_SUFFIX="${HOSTNAME_ENV}" \
@@ -523,13 +666,22 @@ for ((i = 0; i < NMODELS; i++)); do
 done
 log "  orblib           = ${SINGLE_ROOT}/${TIMESTAMP}_m*"
 log "  выгрузка .npz    = $DO_UPLOAD → ${RCLONE_REMOTE}:${ORBLIB_REMOTE_DIR}"
-log "  результаты       = ${RCLONE_REMOTE}:${RESULTS_REMOTE}"
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    log "  история (git)    = ${RESULTS_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
+    log "  логи/отчёты (git)= ${RESULTS_DIR}/${GIT_RUN_SUB}"
+else
+    log "  результаты       = ${RCLONE_REMOTE}:${RESULTS_REMOTE}"
+fi
 log "  shutdown         = $DO_SHUTDOWN"
 log "  Раскладка ядер   = ${CPU_RANGES[*]}"
 log "======================================================"
 
-[ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
-    || die "rclone не настроен: ${RCLONE_CONF_DIR}/rclone.conf"
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    sync_from_results_git
+else
+    [ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
+        || die "rclone не настроен: ${RCLONE_CONF_DIR}/rclone.conf"
+fi
 for f in "$RUNNER" "$CALC_SCRIPT" table3.dat orblib_storage.py; do
     [ -f "${WORK_DIR}/${f}" ] || die "не найден ${WORK_DIR}/${f}"
 done
@@ -672,8 +824,13 @@ log "ШАГ 4: Выгрузка истории и отчётов"
 if [ "$PREFLIGHT" -eq 0 ]; then
     for ((i = 0; i < NMODELS; i++)); do
         pool="${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${SUFFIXES[$i]}.txt"
-        # Уникальное имя в пуле d1: без слияния в файл хоста, ничего не перезаписывается.
-        upload_file "$pool" "${REMOTE_DIR}/$(basename "$pool")" || FINAL_RC=1
+        if [ "$GIT_RESULTS" -eq 1 ]; then
+            append_and_remove "$pool" "${RESULTS_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt" \
+                "RESULT(${EXIT_CODES[$i]}): incl=${M_INCL[$i]}, exp=${EXP_ID}, suffix=${SUFFIXES[$i]}, host=${HOSTNAME_ENV}" \
+                || FINAL_RC=1
+        else
+            upload_file "$pool" "${REMOTE_DIR}/$(basename "$pool")" || FINAL_RC=1
+        fi
     done
 fi
 for f in "${WORK_DIR}/report_multi_${TIMESTAMP}_m"* \
@@ -683,6 +840,9 @@ do
     [ -f "$f" ] || continue
     upload_file "$f" "${RESULTS_REMOTE}/$(basename "$f")" || true
 done
+if [ "$PREFLIGHT" -eq 0 ]; then
+    commit_and_push_results "Results ${RUN_TAG}_${TIMESTAMP} on ${HOSTNAME_ENV}" || FINAL_RC=1
+fi
 
 # ==============================================================
 # ШАГ 5: БИБЛИОТЕКИ → ОБЩИЙ КАТАЛОГ

@@ -41,6 +41,8 @@ RESUME=0
 DO_SHUTDOWN=1
 EXTRA_ARGS=""
 CALC_SCRIPT="${CALC_SCRIPT:-Fornax_P21_PCA_w3Sersic_orblib_exp.py}"
+RESULTS_DIR="${RESULTS_DIR:-}"
+GIT_RESULTS_MODE="${GIT_RESULTS:-auto}"
 # Параметры эксперимента (нужны оркестратору для EXP_ID/KEY;
 # пробрасываются и в Python-скрипт).
 DOUBLE=1
@@ -57,6 +59,9 @@ for arg in "$@"; do
                 '  --Q1           Фиксировать Q=1, d1; запись Q1d1_*, чтение d1/Q1d1 при Q=1.' \
                 '  --no-double    Отключить удвоение; несовместимо с --Q1.' \
                 '  --n-bin=250    Число звёзд на апертуру.' \
+                '  --results-dir=D  Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
+                '  --git-results    Синхронизировать историю и логи через git-репозиторий results (без rclone).' \
+                '  --no-git-results Отключить автопереключение на ../results и использовать rclone.' \
                 '  --resume       Продолжить с checkpoint выбранного режима.' \
                 '  --no-shutdown  Не выключать VM после завершения.' \
                 'По умолчанию: свободный Q, d1, incl=90, gh-id=0, ser-id=0.' \
@@ -72,6 +77,9 @@ for arg in "$@"; do
             ;;
         --incl=*)      INCL="${arg#*=}"        ;;
         --nproc=*)     N_PROC="${arg#*=}"      ;;
+        --results-dir=*) RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
+        --git-results)   GIT_RESULTS_MODE=1 ;;
+        --no-git-results) GIT_RESULTS_MODE=0 ;;
         --resume)      RESUME=1                ;;
         --no-shutdown) DO_SHUTDOWN=0           ;;
         --script=*)    CALC_SCRIPT="${arg#*=}" ;;
@@ -87,6 +95,20 @@ for arg in "$@"; do
         *)             EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
     esac
 done
+[ -n "$RESULTS_DIR" ] || RESULTS_DIR="${WORK_DIR}/../results"
+GIT_RESULTS=0
+if [ "$GIT_RESULTS_MODE" = "1" ]; then
+    GIT_RESULTS=1
+elif [ "$GIT_RESULTS_MODE" = "auto" ] && [ -e "${RESULTS_DIR}/.git" ]; then
+    GIT_RESULTS=1
+fi
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    if [ ! -e "${RESULTS_DIR}/.git" ]; then
+        echo "ОШИБКА: git-репозиторий результатов не найден: ${RESULTS_DIR}/.git" >&2
+        exit 2
+    fi
+    RESULTS_DIR="$(cd "$RESULTS_DIR" && pwd)"
+fi
 
 NTFY_TOPIC="${NTFY_TOPIC:-GalaxySchwarzschildFornax}"
 NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
@@ -140,7 +162,11 @@ SNAP_BEFORE="${ORBLIB_DIR}/.snapshot_before_${RUN_TAG}_${TIMESTAMP}.txt"
 
 # Флаги эксперимента для Python-скрипта (сейв+реюз орблибов включены:
 # управление библиотеками — смысл этого оркестратора).
-EXP_FLAGS="--n-bin=${NBIN} --gh-id=${GHID} --ser-id=${SERID} --save-orblib --reuse-orblib --stream-orblib"
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    EXP_FLAGS="--n-bin=${NBIN} --gh-id=${GHID} --ser-id=${SERID} --save-orblib --reuse-orblib --offline"
+else
+    EXP_FLAGS="--n-bin=${NBIN} --gh-id=${GHID} --ser-id=${SERID} --save-orblib --reuse-orblib --stream-orblib"
+fi
 [ "$DOUBLE" -eq 0 ] && EXP_FLAGS="--no-double $EXP_FLAGS"
 [ "$Q1" -eq 1 ] && EXP_FLAGS="--Q1 $EXP_FLAGS"
 
@@ -300,6 +326,15 @@ append_and_remove() {
     local label="$3"
 
     [ -f "$src" ] || return 0
+    if [ -L "$dst" ]; then
+        local target
+        target="$(readlink -f "$dst" 2>/dev/null || true)"
+        if [ -n "$target" ] && [ -f "$target" ]; then
+            cp --remove-destination "$target" "$dst"
+        else
+            rm -f "$dst"
+        fi
+    fi
 
     local src_lines
     src_lines=$(grep -v "^#" "$src" \
@@ -346,6 +381,14 @@ append_and_remove() {
     fi
 }
 
+host_out_file() {
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        printf '%s/out_%s_%s.txt' "$RESULTS_DIR" "$HOSTNAME_ENV" "$EXP_ID"
+    else
+        printf '%s/out_%s_%s.txt' "$WORK_DIR" "$HOSTNAME_ENV" "$EXP_ID"
+    fi
+}
+
 # История эксперимента: per-proc → общий файл хоста (аналог 4Ups в проде,
 # но с новыми именами out_*). log_* не объединяются (диагностика).
 merge_proc_files() {
@@ -353,12 +396,61 @@ merge_proc_files() {
     local label="$2"
     append_and_remove \
         "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.txt" \
-        "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"        \
+        "$(host_out_file)" \
         "$label"
+}
+
+sync_from_results_git() {
+    [ "$GIT_RESULTS" -eq 1 ] || return 0
+    if git -C "$RESULTS_DIR" remote get-url origin >/dev/null 2>&1; then
+        if git -C "$RESULTS_DIR" pull --ff-only >>"$LOGFILE" 2>&1; then
+            log "  ✓ git pull в ${RESULTS_DIR}"
+        else
+            log "  ~ git pull в ${RESULTS_DIR} не выполнен (используется локальная копия)"
+        fi
+    fi
+}
+
+commit_and_push_results() {
+    [ "$GIT_RESULTS" -eq 1 ] || return 0
+    local msg="$1"
+    git -C "$RESULTS_DIR" add -A >>"$LOGFILE" 2>&1 || return 1
+    if git -C "$RESULTS_DIR" diff --cached --quiet; then
+        return 0
+    fi
+    local uname uemail
+    uname="$(git -C "$RESULTS_DIR" config user.name 2>/dev/null || true)"
+    uemail="$(git -C "$RESULTS_DIR" config user.email 2>/dev/null || true)"
+    git -C "$RESULTS_DIR" \
+        -c user.name="${uname:-AGAMA VM ${HOSTNAME_ENV}}" \
+        -c user.email="${uemail:-agama@${HOSTNAME_ENV}}" \
+        commit -m "$msg" >>"$LOGFILE" 2>&1 || return 1
+    if ! git -C "$RESULTS_DIR" remote get-url origin >/dev/null 2>&1; then
+        log "  ✓ Зафиксировано в локальном git results (${msg})"
+        return 0
+    fi
+    local attempt
+    for attempt in 1 2 3; do
+        if git -C "$RESULTS_DIR" push origin HEAD >>"$LOGFILE" 2>&1; then
+            log "  ✓ git push в results (${msg})"
+            return 0
+        fi
+        git -C "$RESULTS_DIR" pull --rebase --autostash origin >>"$LOGFILE" 2>&1 || true
+    done
+    log "  ✗ Не удалось выполнить git push в ${RESULTS_DIR}"
+    return 1
 }
 
 download_from_yadisk() {
     local fname="$1"
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        if [ -f "${RESULTS_DIR}/${fname}" ]; then
+            cp -Lf "${RESULTS_DIR}/${fname}" "${WORK_DIR}/${fname}" 2>>"$LOGFILE" \
+                && log "  ✓ Скопирован из results: $fname" && return 0
+        fi
+        log "  ~ Не найден в results: $fname"
+        return 1
+    fi
     local remote_path="${RCLONE_REMOTE}:${REMOTE_DIR}/${fname}"
     rclone copyto "$remote_path" "${WORK_DIR}/${fname}" \
         --config "${RCLONE_CONF_DIR}/rclone.conf" \
@@ -374,6 +466,16 @@ upload_to_yadisk() {
     [ -f "$filepath" ] || return 0
     local fname
     fname=$(basename "$filepath")
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        local run_sub="logs/${RUN_TAG}_${TIMESTAMP}"
+        if [ "$filepath" != "$(host_out_file)" ]; then
+            mkdir -p "${RESULTS_DIR}/${run_sub}"
+            cp -Lf "$filepath" "${RESULTS_DIR}/${run_sub}/${fname}" 2>>"$LOGFILE" || return 1
+        fi
+        commit_and_push_results "Update ${fname} (${RUN_TAG}) on ${HOSTNAME_ENV}" || true
+        log "  ✓ Сохранено в results: $fname"
+        return 0
+    fi
     rclone copyto "$filepath" \
         "${RCLONE_REMOTE}:${REMOTE_DIR}/${fname}" \
         --config "${RCLONE_CONF_DIR}/rclone.conf" \
@@ -391,6 +493,25 @@ upload_to_yadisk() {
 emergency_upload() {
     [ "$EMERGENCY_DONE" -eq 1 ] && return 0
     EMERGENCY_DONE=1
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        local git_dest="${RESULTS_DIR}/logs/${RUN_TAG}_${TIMESTAMP}"
+        log "  Аварийная выгрузка логов в ${git_dest}"
+        mkdir -p "$git_dest"
+        local f sfx
+        for sfx in "${SUFFIXES[@]}"; do
+            merge_proc_files "$sfx" "EMERGENCY: incl=${INCL}, exp=${EXP_ID}, suffix=${sfx}, host=${HOSTNAME_ENV}" || true
+        done
+        for f in "$LOGFILE" "$MONITOR_LOG" \
+                 "${WORK_DIR}/dockerlog_"*"_${TIMESTAMP}.log" \
+                 "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_p"*.txt \
+                 "${ORBLIB_DIR}/.storage/STOP"
+        do
+            [ -f "$f" ] || continue
+            cp -Lf "$f" "${git_dest}/$(basename "$f")" 2>>"$LOGFILE" || true
+        done
+        commit_and_push_results "Emergency logs ${RUN_TAG}_${TIMESTAMP} on ${HOSTNAME_ENV}" || true
+        return 0
+    fi
     local dest="${RCLONE_REMOTE}:${REMOTE_DIR}/galaxy_results_emergency/${RUN_TAG}_${TIMESTAMP}"
     log "  Аварийная выгрузка логов в ${dest}"
     local f
@@ -571,6 +692,7 @@ handle_stall() {
 }
 
 delete_from_yadisk() {
+    [ "$GIT_RESULTS" -eq 1 ] && return 0
     storage_stopped && return 0
     local fname="$1"
     rclone deletefile \
@@ -691,6 +813,12 @@ run_container() {
     # есть swap контейнеру запрещён и при превышении лимита worker получает
     # явный OOM-kill (код 137) вместо многочасового thrashing'а всей VM.
     # Оставить --memory-swap незаданным нельзя: по умолчанию это 2×--memory.
+    local -a rclone_mount=()
+    if [ "$GIT_RESULTS" -eq 1 ]; then
+        rclone_mount=(-v "${RESULTS_DIR}:/results" -e RESULTS_DIR="/results" -e ORBLIB_LOCAL_STORE=1)
+    else
+        rclone_mount=(-v "${RCLONE_CONF_DIR}:/workspace/.config/rclone:ro" -e RCLONE_CONFIG="/workspace/.config/rclone/rclone.conf")
+    fi
     docker run --rm \
         --name "agama_orblib_${HOSTNAME_ENV}_${RUN_TAG}_${sfx}" \
         --cpuset-cpus="${cpu_start}-${cpu_end}" \
@@ -701,9 +829,7 @@ run_container() {
         -e HOST_GID="$(id -g)" \
         \
         -v "${WORK_DIR}:/workspace" \
-        -v "${RCLONE_CONF_DIR}:/workspace/.config/rclone:ro" \
-        \
-        -e RCLONE_CONFIG="/workspace/.config/rclone/rclone.conf" \
+        "${rclone_mount[@]}" \
         -e RCLONE_REMOTE="${RCLONE_REMOTE}" \
         -e ORBLIB_RESERVE_BYTES="${ORBLIB_RESERVE_BYTES}" \
         -e ORBLIB_SAVE_SLOTS="${ORBLIB_SAVE_SLOTS}" \
@@ -768,7 +894,7 @@ run_container() {
     # Загружаем обновлённый общий файл истории на Яндекс.Диск
     (
         flock -x 200
-        upload_to_yadisk "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
+        upload_to_yadisk "$(host_out_file)"
     ) 200>"${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 
     # Диагностический лог процесса (log_*) и лог контейнера — заливаем
@@ -809,8 +935,12 @@ log "  Порог PSI avg60  = ${ORBLIB_PSI_LIMIT}% × ${ORBLIB_PSI_SAMPLES}"
 log "  Таймаут простоя  = ${ORBLIB_STALL_TIMEOUT} s"
 log "======================================================"
 
-[ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
-    || die "rclone не настроен: ${RCLONE_CONF_DIR}/rclone.conf"
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    sync_from_results_git
+else
+    [ -f "${RCLONE_CONF_DIR}/rclone.conf" ] \
+        || die "rclone не настроен: ${RCLONE_CONF_DIR}/rclone.conf"
+fi
 
 for f in "${CALC_SCRIPT}" table3.dat; do
     [ -f "${WORK_DIR}/${f}" ] || die "не найден ${WORK_DIR}/${f}"
@@ -860,12 +990,18 @@ log "  Лимит памяти контейнера: ${MEM_LIMIT} байт (~$((
 # ШАГ 0: PRE-DOWNLOAD ШАРДОВ БИБЛИОТЕК ОРБИТ
 # ==============================================================
 log ""
-log "ШАГ 0: Проверка индекса и досылка очереди без скачивания старых библиотек"
-log "Пофайловая выгрузка: attempts=${ORBLIB_UPLOAD_ATTEMPTS}, deadline=${ORBLIB_FILE_TIMEOUT}s, reserve=${ORBLIB_RESERVE_BYTES} bytes"
-PREPARE_FLAGS=()
-[ "$RESUME" -eq 0 ] || PREPARE_FLAGS+=(--resume)
-if ! storage_cli prepare "${PREPARE_FLAGS[@]}" >>"$LOGFILE" 2>&1; then
-    die "Хранилище не готово: проверьте лог; для старых tar нужен явный orblib_storage.py index"
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    log "ШАГ 0: Локальное хранение .npz в ${ORBLIB_DIR} (синхронизация истории через git results)"
+    mkdir -p "${ORBLIB_DIR}/.storage"
+    rm -f "${ORBLIB_DIR}/.storage/STOP" "${ORBLIB_DIR}/.storage/FINISH"
+else
+    log "ШАГ 0: Проверка индекса и досылка очереди без скачивания старых библиотек"
+    log "Пофайловая выгрузка: attempts=${ORBLIB_UPLOAD_ATTEMPTS}, deadline=${ORBLIB_FILE_TIMEOUT}s, reserve=${ORBLIB_RESERVE_BYTES} bytes"
+    PREPARE_FLAGS=()
+    [ "$RESUME" -eq 0 ] || PREPARE_FLAGS+=(--resume)
+    if ! storage_cli prepare "${PREPARE_FLAGS[@]}" >>"$LOGFILE" 2>&1; then
+        die "Хранилище не готово: проверьте лог; для старых tar нужен явный orblib_storage.py index"
+    fi
 fi
 
 # ==============================================================
@@ -901,7 +1037,7 @@ if [ $RESUME -eq 1 ]; then
             "RESUME-PRE: incl=${INCL}, exp=${EXP_ID}, suffix=${sfx}, host=${HOSTNAME_ENV}"
     done
 
-    upload_to_yadisk "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
+    upload_to_yadisk "$(host_out_file)"
 
     for sfx in "${SUFFIXES[@]}"; do
         delete_from_yadisk "out_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.txt"
@@ -933,8 +1069,10 @@ fi
 # ==============================================================
 log ""
 log "ШАГ 2: Запуск $N_PROC контейнеров..."
-storage_cli watch >>"$LOGFILE" 2>&1 &
-UPLOADER_PID=$!
+if [ "$GIT_RESULTS" -eq 0 ]; then
+    storage_cli watch >>"$LOGFILE" 2>&1 &
+    UPLOADER_PID=$!
+fi
 start_resource_sampler
 
 declare -a PIDS
@@ -971,7 +1109,7 @@ while :; do
         if kill -0 "$pid" 2>/dev/null; then running=1; fi
     done
     [ "$running" -eq 1 ] || break
-    if ! kill -0 "$UPLOADER_PID" 2>/dev/null && ! storage_stopped; then
+    if [ -n "$UPLOADER_PID" ] && ! kill -0 "$UPLOADER_PID" 2>/dev/null && ! storage_stopped; then
         storage_cli stop --reason "Background uploader exited before workers" || true
     fi
 
@@ -1041,7 +1179,7 @@ done
 # Считаем из уже отслеженного FAILED — без обращения к файловой системе.
 DONE_COUNT=$((N_PROC - FAILED))
 if storage_stopped; then
-    wait "$UPLOADER_PID" || true
+    [ -n "$UPLOADER_PID" ] && { wait "$UPLOADER_PID" || true; }
     # При активном STOP обычный upload_to_yadisk — no-op, поэтому логи
     # доставляем в обход него (иначе их можно снять только с самой VM).
     emergency_upload
@@ -1072,15 +1210,19 @@ done
 # ШАГ 5: MULTIPART UPLOAD БИБЛИОТЕК ОРБИТ (snapshot-diff)
 # ==============================================================
 log ""
-log "ШАГ 5: Ожидание подтверждения всех новых библиотек"
-storage_cli finish
-if ! wait "$UPLOADER_PID"; then
-    die "Очередь доставки не завершена; checkpoints и .npz остаются на VM"
-fi
-UPLOADER_PID=""
-storage_cli check || die "Есть недоставленные библиотеки; успешный финал запрещён"
-if storage_stopped; then
-    die "Доставка остановлена; продолжение через --resume"
+if [ "$GIT_RESULTS" -eq 1 ]; then
+    log "ШАГ 5: Библиотеки .npz оставлены локально в ${ORBLIB_DIR} (режим git results)"
+else
+    log "ШАГ 5: Ожидание подтверждения всех новых библиотек"
+    storage_cli finish
+    if ! wait "$UPLOADER_PID"; then
+        die "Очередь доставки не завершена; checkpoints и .npz остаются на VM"
+    fi
+    UPLOADER_PID=""
+    storage_cli check || die "Есть недоставленные библиотеки; успешный финал запрещён"
+    if storage_stopped; then
+        die "Доставка остановлена; продолжение через --resume"
+    fi
 fi
 
 # ==============================================================
@@ -1091,7 +1233,7 @@ log "ШАГ 6: Финальная синхронизация на Яндекс.�
 
 (
     flock -x 200
-    upload_to_yadisk "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
+    upload_to_yadisk "$(host_out_file)"
 ) 200>"${WORK_DIR}/.upload_lock_orblib_${RUN_TAG}"
 
 for sfx in "${SUFFIXES[@]}"; do
@@ -1116,7 +1258,7 @@ log "  Успешно: ${DONE_COUNT}/${N_PROC}, ошибок: ${FAILED}"
 for i in $(seq 0 $((N_PROC - 1))); do
     log "    ${SUFFIXES[$i]}: код ${EXIT_CODES[$i]}"
 done
-out_final="${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}.txt"
+out_final="$(host_out_file)"
 if [ -f "$out_final" ]; then
     lines=$(grep -v "^#" "$out_final" | grep -c "" 2>/dev/null || echo 0)
     size=$(du -h "$out_final" | cut -f1)
