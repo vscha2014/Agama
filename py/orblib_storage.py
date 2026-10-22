@@ -19,7 +19,7 @@ import time
 import zipfile
 
 
-NAME_RE = re.compile(r'orblib_i[-+0-9.]+_d[01]_nb[0-9]+_ser[0-9]+_geom[0-9a-fA-F]+_[0-9a-fA-F]{10}\.npz')
+NAME_RE = re.compile(r'orblib_i[-+0-9.]+_d[01]_nb[0-9]+_ser[0-9]+(?:_l[0-9]+n[0-9]+)?_geom[0-9a-fA-F]+_[0-9a-fA-F]{10}\.npz')
 SCALARS = ('Q', 'gh', 'rh', 'rho0', 'incl', 'double', 'n_bin', 'ser_id',
            'numOrbits', 'trajsize', 'intTime', 'degree', 'ghorder')
 

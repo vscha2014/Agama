@@ -25,6 +25,9 @@ _THREADS_AUTO=$(( N_VCPU / 4 ))
 
 INCL="90.0"
 Q1=0
+L24=0
+POT_LMAX=4
+POT_NGRID=23
 N_PROC=1
 THREADS="${TYCHO_THREADS:-$_THREADS_AUTO}"
 RESUME=0
@@ -47,7 +50,10 @@ for arg in "$@"; do
     case $arg in
         --help|-h)
             printf '%s\n' \
-                'Использование: bash launch_tycho.sh [--incl=90.0] [--Q1] [--models=FILE] [опции]' \
+                'Использование: bash launch_tycho.sh [--incl=90.0] [--Q1] [--l24] [--models=FILE] [опции]' \
+                '  --l24               Уточнённое мультипольное разложение N=184, lmax=24.' \
+                '  --pot-lmax=N        Порядок гармоник lmax мультиполя (по умолчанию 4).' \
+                '  --pot-ngrid=M       Число радиальных узлов gridSizeR мультиполя (по умолчанию 23).' \
                 '  --models=FILE       Точечный расчёт моделей из FILE (последовательно в одном' \
                 '                      scope через run_single_model.py --protocols exp; по умолчанию' \
                 '                      лимит памяти 8 GiB, потоков nproc/4).' \
@@ -76,6 +82,9 @@ for arg in "$@"; do
             ;;
         --incl=*)          INCL="${arg#*=}" ;;
         --Q1)              Q1=1 ;;
+        --l24)             L24=1; POT_LMAX=24; POT_NGRID=184 ;;
+        --pot-lmax=*)      POT_LMAX="${arg#*=}" ;;
+        --pot-ngrid=*)     POT_NGRID="${arg#*=}" ;;
         --models=*)        MODELS_FILE="${arg#*=}" ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
@@ -135,12 +144,26 @@ TIMESTAMP="${TYCHO_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 case "$ORBLIB_DIR" in /*) ;; *) ORBLIB_DIR="${WORK_DIR}/${ORBLIB_DIR}" ;; esac
 
 # --- Валидация ---
-for _v in N_PROC THREADS TYCHO_MIN_FREE_GB TYCHO_STOP_GRACE TYCHO_MONITOR_INTERVAL; do
+for _v in N_PROC THREADS TYCHO_MIN_FREE_GB TYCHO_STOP_GRACE TYCHO_MONITOR_INTERVAL POT_LMAX POT_NGRID; do
     if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
         echo "ОШИБКА: $_v должно быть целым >= 0 (получено: '${!_v}')" >&2
         exit 2
     fi
 done
+if [ $(( POT_LMAX % 2 )) -ne 0 ] || [ "$POT_NGRID" -lt 4 ]; then
+    echo "ОШИБКА: нужно чётное POT_LMAX >= 0 и POT_NGRID >= 4 (получено: lmax=${POT_LMAX}, ngrid=${POT_NGRID})" >&2
+    exit 2
+fi
+POT_TAG=""
+if [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; then
+    POT_TAG="_l${POT_LMAX}n${POT_NGRID}"
+fi
+declare -a POT_FLAGS=()
+if [ "$L24" -eq 1 ] && [ "$POT_LMAX" -eq 24 ] && [ "$POT_NGRID" -eq 184 ]; then
+    POT_FLAGS+=(--l24)
+elif [ -n "$POT_TAG" ]; then
+    POT_FLAGS+=(--pot-lmax "$POT_LMAX" --pot-ngrid "$POT_NGRID")
+fi
 if [ "$N_PROC" -lt 1 ] || [ "$THREADS" -lt "$N_PROC" ]; then
     echo "ОШИБКА: нужно 1 <= nproc <= threads (nproc=$N_PROC, threads=$THREADS)" >&2
     exit 2
@@ -204,8 +227,8 @@ if ! [[ "$MEM_MAX" =~ ^[0-9]+$ ]] || [ "$MEM_MAX" -lt $((1024 * 1024 * 1024)) ];
 fi
 MEM_HIGH=$(( MEM_MAX / 10 * 9 ))
 
-EXP_ID="d1_nb250_gh0_ser0"
-[ "$Q1" -eq 1 ] && [ -z "$MODELS_FILE" ] && EXP_ID="Q1${EXP_ID}"
+EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
+[ "$Q1" -eq 1 ] && EXP_ID="Q1${EXP_ID}"
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 if [ -n "$MODELS_FILE" ]; then
     RUN_TAG="multi_${EXP_ID}_n${NMODELS}"
@@ -587,6 +610,9 @@ if [ -n "$MODELS_FILE" ]; then
     monitor_loop &
     MONITOR_PID=$!
     log "Последовательный запуск ${NMODELS} моделей из $(basename "$MODELS_FILE") (по ${THREADS_PER_PROC} потоков)"
+    declare -a SINGLE_EXTRA=()
+    [ "$Q1" -eq 1 ] && SINGLE_EXTRA+=(--Q1)
+    SINGLE_EXTRA+=(${POT_FLAGS[@]+"${POT_FLAGS[@]}"})
     for ((i = 0; i < NMODELS; i++)); do
         [ "$STOP_REQUESTED" -eq 1 ] && break
         sfx="${M_SUFFIXES[i]}"
@@ -605,6 +631,7 @@ if [ -n "$MODELS_FILE" ]; then
                 --orblib-dir "${ORBLIB_DIR}" \
                 --report "${WORK_DIR}/${M_REPORTS[i]}" \
                 --n_threads "$THREADS_PER_PROC" \
+                ${SINGLE_EXTRA[@]+"${SINGLE_EXTRA[@]}"} \
             > >(trap '' INT TERM; exec tee -a "$proc_log") 2>&1 &
         WPIDS=("$!")
         mstart=$(date +%s)
@@ -688,6 +715,9 @@ else
     [ "$SAVE_ORBLIB" -eq 1 ] && ORBLIB_FLAGS="--save-orblib ${ORBLIB_FLAGS}"
     EXP_FLAGS=""
     [ "$Q1" -eq 1 ] && EXP_FLAGS="--Q1"
+    if [ "${#POT_FLAGS[@]}" -gt 0 ]; then
+        EXP_FLAGS="${EXP_FLAGS} ${POT_FLAGS[*]}"
+    fi
     if [ "$OFFLINE" -eq 1 ] || [ "$GIT_RESULTS" -eq 1 ]; then
         EXP_FLAGS="${EXP_FLAGS} --offline"
     fi

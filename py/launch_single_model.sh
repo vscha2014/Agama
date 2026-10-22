@@ -37,6 +37,10 @@ RUNNER="run_single_model.py"
 CALC_SCRIPT="Fornax_P21_PCA_w3Sersic_orblib_exp.py"
 
 INCL="90.0"
+Q1=0
+L24=0
+POT_LMAX=4
+POT_NGRID=23
 REPEATS=4
 DO_SHUTDOWN=1
 DO_UPLOAD=1
@@ -52,6 +56,10 @@ for arg in "$@"; do
             printf '%s\n' \
                 'Использование: bash launch_single_model.sh [--repeats=4] [--incl=90.0] [опции]' \
                 '  --repeats=N      Число независимых реализаций (контейнеров), по умолчанию 4.' \
+                '  --Q1             Записывать историю в Q1d1_* (пул фиксированного Q=1).' \
+                '  --l24            Уточнённое мультипольное разложение N=184, lmax=24.' \
+                '  --pot-lmax=N     Порядок гармоник lmax мультиполя (по умолчанию 4).' \
+                '  --pot-ngrid=M    Число радиальных узлов gridSizeR мультиполя (по умолчанию 23).' \
                 '  --results-dir=D  Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
                 '  --git-results    Синхронизировать историю и отчёты через git-репозиторий results (без rclone).' \
                 '  --no-git-results Отключить автопереключение на ../results и использовать rclone.' \
@@ -72,6 +80,10 @@ for arg in "$@"; do
             exit 0
             ;;
         --incl=*)        INCL="${arg#*=}"   ;;
+        --Q1)            Q1=1; RUNNER_ARGS+=("--Q1") ;;
+        --l24)           L24=1; POT_LMAX=24; POT_NGRID=184 ;;
+        --pot-lmax=*)    POT_LMAX="${arg#*=}" ;;
+        --pot-ngrid=*)   POT_NGRID="${arg#*=}" ;;
         --repeats=*)     REPEATS="${arg#*=}" ;;
         --results-dir=*) RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)   GIT_RESULTS_MODE=1 ;;
@@ -148,8 +160,22 @@ ORBLIB_WATCH_INTERVAL="${ORBLIB_WATCH_INTERVAL:-10}"
 ORBLIB_MEMINFO="${ORBLIB_MEMINFO:-/proc/meminfo}"
 ORBLIB_PSI_PATH="${ORBLIB_PSI_PATH:-/proc/pressure/memory}"
 
+if ! [[ "$POT_LMAX" =~ ^[0-9]+$ ]] || ! [[ "$POT_NGRID" =~ ^[0-9]+$ ]] || [ $(( POT_LMAX % 2 )) -ne 0 ] || [ "$POT_NGRID" -lt 4 ]; then
+    echo "ОШИБКА: нужно чётное POT_LMAX >= 0 и POT_NGRID >= 4 (получено: lmax='${POT_LMAX}', ngrid='${POT_NGRID}')" >&2
+    exit 2
+fi
+POT_TAG=""
+if [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; then
+    POT_TAG="_l${POT_LMAX}n${POT_NGRID}"
+fi
+if [ "$L24" -eq 1 ] && [ "$POT_LMAX" -eq 24 ] && [ "$POT_NGRID" -eq 184 ]; then
+    RUNNER_ARGS+=("--l24")
+elif [ -n "$POT_TAG" ]; then
+    RUNNER_ARGS+=("--pot-lmax=${POT_LMAX}" "--pot-ngrid=${POT_NGRID}")
+fi
 # Конфигурация штатного свободного поиска (как в проде: удвоение, n_bin=250).
-EXP_ID="d1_nb250_gh0_ser0"
+EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
+[ "$Q1" -eq 1 ] && EXP_ID="Q1${EXP_ID}"
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 RUN_TAG="single_${EXP_ID}_i${INCL_FMT}"
 SINGLE_ROOT="${WORK_DIR}/orblib_single"

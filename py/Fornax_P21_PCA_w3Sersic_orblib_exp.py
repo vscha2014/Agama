@@ -98,9 +98,20 @@ parser.add_argument('--stream-orblib', action='store_true',
 parser.add_argument('--offline', action='store_true',
                     help='Без rclone/Яндекс.Диска: история читается и пишется только '
                          'локально (ntfy остаётся). Несовместимо с --stream-orblib.')
+parser.add_argument('--pot-lmax', dest='pot_lmax', type=int, default=4,
+                    help='Максимальный порядок гармоник lmax мультипольного потенциала (по умолчанию 4).')
+parser.add_argument('--pot-ngrid', dest='pot_ngrid', type=int, default=23,
+                    help='Число радиальных узлов gridSizeR мультипольного потенциала (по умолчанию 23).')
+parser.add_argument('--l24', action='store_true',
+                    help='Уточнённый мультипольный потенциал N=184, lmax=24 (эквивалентно --pot-lmax=24 --pot-ngrid=184).')
 args = parser.parse_args()
 Q1 = args.Q1
 OFFLINE = args.offline
+POT_LMAX = 24 if args.l24 else int(args.pot_lmax)
+POT_NGRID = 184 if args.l24 else int(args.pot_ngrid)
+if POT_LMAX < 0 or (POT_LMAX % 2) != 0 or POT_NGRID < 4:
+    parser.error('--pot-lmax должен быть чётным >= 0, --pot-ngrid >= 4')
+POT_TAG = '' if (POT_LMAX, POT_NGRID) == (4, 23) else f'_l{POT_LMAX}n{POT_NGRID}'
 if Q1 and args.no_double:
     parser.error('--Q1 требует удвоения d1; уберите --no-double')
 if OFFLINE and args.stream_orblib:
@@ -153,16 +164,24 @@ def orblib_key(Q, gh, rh, rho0):
     исключена по построению, а не отлавливается постфактум при lookup."""
     _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
     _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
+    _pot_tag = '' if abs(float(Q) - 1.0) <= 1e-12 else globals().get('POT_TAG', '')
     name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
-            f"_ser{SER_ID}_geom{GEOM_HASH}_{_phash}.npz")
+            f"_ser{SER_ID}{_pot_tag}_geom{GEOM_HASH}_{_phash}.npz")
     return name, os.path.join(ORBLIB_DIR, name)
 
 # Идентификатор эксперимента: кодирует (1) удвоение, (2) число звёзд/апертуру,
 # (3) реализацию GH, (4) реализацию Серсика. incl остаётся столбцом данных и
 # фильтруется в коде (как в проде), в имя файла не входит.
-HISTORY_ID = f"d{int(DOUBLE)}_nb{N_BIN}_gh{GH_ID}_ser{SER_ID}"
+_BASE_HISTORY_ID = f"d{int(DOUBLE)}_nb{N_BIN}_gh{GH_ID}_ser{SER_ID}"
+HISTORY_ID = f"d{int(DOUBLE)}_nb{N_BIN}_gh{GH_ID}{POT_TAG}_ser{SER_ID}"
 EXP_ID = f"{'Q1' if Q1 else ''}{HISTORY_ID}"
-history_ids = [HISTORY_ID, f"Q1{HISTORY_ID}"] if DOUBLE else [HISTORY_ID]
+if Q1 and DOUBLE:
+    history_ids = list(dict.fromkeys([_BASE_HISTORY_ID, f"Q1{_BASE_HISTORY_ID}",
+                                      HISTORY_ID, f"Q1{HISTORY_ID}"]))
+elif DOUBLE and not POT_TAG:
+    history_ids = [HISTORY_ID, f"Q1{HISTORY_ID}"]
+else:
+    history_ids = [HISTORY_ID]
 
 # hostname_proc несёт идентичность эксперимента → ВСЕ производные файлы
 # (out/log/checkpoint/diagnose) автоматически изолированы по эксперименту,
@@ -171,7 +190,8 @@ hostname_proc = f"{_hostname_env}_{EXP_ID}_{_proc}"
 
 print(f"Идентификатор процесса: {hostname_proc}")
 print(f"Эксперимент: double={DOUBLE}, n_bin={N_BIN}, gh_id={GH_ID}, "
-      f"ser_id={SER_ID}, save_orblib={SAVE_ORBLIB}, Q={'1 (fixed)' if Q1 else 'free'}")
+      f"ser_id={SER_ID}, pot=l{POT_LMAX}n{POT_NGRID}, save_orblib={SAVE_ORBLIB}, "
+      f"Q={'1 (fixed)' if Q1 else 'free'}")
 
 RESULTS_DIR = os.environ.get('RESULTS_DIR') or ('../results' if os.path.isdir('../results') else '')
 _history_dirs = [''] + ([RESULTS_DIR.rstrip('/') + '/']
@@ -196,7 +216,10 @@ storage_patterns = [
 prior_seed_patterns = [
     f"{d}4UpsBoTorch_PCA_Sersic*.txt"
     for d in _history_dirs
-]
+] + ([
+    f"{d}out_*_{_BASE_HISTORY_ID}{suffix}.txt"
+    for d in _history_dirs for suffix in ('_*', '')
+] if POT_TAG and DOUBLE else [])
 
 # Архивные файлы со СТАРОЙ (неверной) геометрией posang=46.8, q_ap=0.7.
 # Используются ТОЛЬКО как источник кандидатов-параметров для начальных точек
@@ -329,10 +352,13 @@ def completed_point(params):
         except FileNotFoundError:
             continue
         with stream:
+            valid_contexts = {globals().get('EVALUATION_CONTEXT')}
+            if abs(float(params['Q']) - 1.0) <= 1e-12 and globals().get('_BASE_EVALUATION_CONTEXT'):
+                valid_contexts.add(globals().get('_BASE_EVALUATION_CONTEXT'))
             for line in stream:
                 if line.startswith('# storage-context '):
                     context = line.split()[-1]
-                if line.startswith('#') or (context is not None and context != globals().get('EVALUATION_CONTEXT')):
+                if line.startswith('#') or (context is not None and context not in valid_contexts):
                     continue
                 try:
                     row = numpy.array([float(v) for v in line.split()[:7]])
@@ -1061,13 +1087,22 @@ numOrbits = 100000
 # RuntimeFncTarget во время интегрирования и от записи траекторий не зависят);
 # поле trajsize остаётся в .npz только как обязательный скаляр формата.
 TRAJSIZE_STORED = 0
-EVALUATION_CONTEXT = hashlib.sha256(
+_BASE_EVALUATION_CONTEXT = hashlib.sha256(
     repr((incl, DOUBLE, N_BIN, GH_ID, SER_ID, GEOM_HASH, alphah, betah,
           numOrbits, 100.0, 1.0, 0.1, 1.6,
           UPS_XATOL, UPS_BRACKET_DELTA, UPS_BRACKET_NMED, UPS_SUBSAMPLE_FRAC)).encode()
     + b''.join(numpy.asarray(value).tobytes() for dataset in datasets
                for value in (dataset.cons_val, dataset.cons_err))
 ).hexdigest()
+EVALUATION_CONTEXT = (_BASE_EVALUATION_CONTEXT if (POT_LMAX, POT_NGRID) == (4, 23) else
+    hashlib.sha256(
+        repr((incl, DOUBLE, N_BIN, GH_ID, SER_ID, GEOM_HASH, alphah, betah,
+              numOrbits, 100.0, 1.0, 0.1, 1.6,
+              UPS_XATOL, UPS_BRACKET_DELTA, UPS_BRACKET_NMED, UPS_SUBSAMPLE_FRAC,
+              POT_LMAX, POT_NGRID)).encode()
+        + b''.join(numpy.asarray(value).tobytes() for dataset in datasets
+                   for value in (dataset.cons_val, dataset.cons_err))
+    ).hexdigest())
 
 bounds_original = {
     'Q': (0.05, 2.5),
@@ -1474,17 +1509,26 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             cutoffstrength=2.5
         )
         
-        pot_gal = agama.Potential(
-            type='Multipole',
-            density=agama.Density(densityStars, densityHalo),
-            lmax=4, mmax=0, gridSizeR=23
-        )
+        _pot_lmax = int(globals().get('POT_LMAX', 4))
+        _pot_ngrid = int(globals().get('POT_NGRID', 23))
+        if diagnostic is not None or (_pot_lmax, _pot_ngrid) == (4, 23):
+            pot_gal = agama.Potential(
+                type='Multipole',
+                density=agama.Density(densityStars, densityHalo),
+                lmax=4, mmax=0, gridSizeR=23
+            )
         if diagnostic is not None:
             return diagnostic(baseline=pot_gal, density_stars=densityStars,
                               density_halo=densityHalo, datasets=datasets, params=dict(params),
                               num_orbits=numOrbits, int_time=intTime, regul=regul,
                               upsilon_bounds=(Upsilon_lower, Upsilon_upper),
                               solve_library=solve_orbit_library)
+        pot_orbit = (pot_gal if (_pot_lmax, _pot_ngrid) == (4, 23) else
+                     agama.Potential(
+                         type='Multipole',
+                         density=agama.Density(densityStars, densityHalo),
+                         lmax=_pot_lmax, mmax=0, gridSizeR=_pot_ngrid
+                     ))
         
         # --- Lookup сохранённой библиотеки орбит (--reuse-orblib) ---
         # ТОЛЬКО локальные файлы в ORBLIB_DIR (никакой сети в горячем цикле);
@@ -1558,19 +1602,19 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                 print(f"  [orblib] build claimed: {_ol_name}")
             _t_sample = time.perf_counter()
             ic = numpy.vstack((
-                densityStars.sample(int(numOrbits), potential=pot_gal)[0]
+                densityStars.sample(int(numOrbits), potential=pot_orbit)[0]
             ))
             sample_time_s = time.perf_counter() - _t_sample
 
             _t_orbit = time.perf_counter()
-            inttime = pot_gal.Tcirc(ic) * intTime
+            inttime = pot_orbit.Tcirc(ic) * intTime
             log_mem('before integration')
             # Траектории НЕ запрашиваются: при trajsize=1000 agama.orbit
             # выделял ~3.2 GB на процесс (100000 × (1000×6 float32 + 1000
             # float64)), и этот массив выбрасывался следующей же строкой.
             with agama.setNumThreads(AGAMA_ORBIT_THREADS):
                 matrices = agama.orbit(
-                    potential=pot_gal,
+                    potential=pot_orbit,
                     ic=ic,
                     time=inttime,
                     Omega=0.0,
@@ -2404,7 +2448,7 @@ def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
                               sync_interval=None, storage_patterns=None,
                               host_patterns=None, min_total_points=None,
                               resv_dir=None, reserve_eps=0.02,
-                              reserve_ttl_sec=7200):
+                              reserve_ttl_sec=7200, existing_data=None):
     """
     Формирует начальные точки из АРХИВНЫХ файлов (seed_patterns, например
     PA46.8) для того же target_incl, ПЕРЕСЧИТЫВАЯ penalty с текущей
@@ -2435,8 +2479,20 @@ def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
 
     print(f"  [seed-pa468] Файлов: {len(all_files)}")
 
+    def _row_key(r):
+        if 'orblib_key' in globals():
+            return orblib_key(float(r[1]), float(r[2]), float(r[3]), float(r[4]))[0]
+        return f"{float(r[1]):.6g}_{float(r[2]):.6g}_{float(r[3]):.6g}_{float(r[4]):.6g}"
+
+    known_keys = set()
+    n_existing = 0
+    if existing_data is not None and len(existing_data) > 0:
+        n_existing = len(existing_data)
+        for r in existing_data:
+            known_keys.add(_row_key(r))
+
     # --- Шаг 2: прочитать строки на ТОМ ЖЕ наклонении ---
-    rows = []
+    rows_by_key = {}
     for filepath in all_files:
         try:
             with open(filepath, 'r') as fh:
@@ -2451,16 +2507,30 @@ def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
                         row = [float(p) for p in parts[:7]]
                     except ValueError:
                         continue
+                    if not numpy.all(numpy.isfinite(row)):
+                        continue
                     if abs(row[0] - target_incl) > 0.01:
                         continue
                     if row[3] <= 0 or row[4] <= 0:
                         continue
                     if row[6] >= 1e5:
                         continue
-                    rows.append(row)
+                    if not globals().get('Q1', False) and abs(row[1] - 1.0) <= 1e-9:
+                        continue
+                    if bounds_original and any(
+                            not (bounds_original[name][0] <= row[j] <= bounds_original[name][1])
+                            for j, name in enumerate(('Q', 'gh', 'rh', 'rho0'), start=1)
+                            if name in bounds_original):
+                        continue
+                    rk = _row_key(row)
+                    if rk in known_keys:
+                        continue
+                    if rk not in rows_by_key or row[6] < rows_by_key[rk][6]:
+                        rows_by_key[rk] = row
         except FileNotFoundError:
             pass
 
+    rows = list(rows_by_key.values())
     if not rows:
         print(f"  [seed-pa468] Нет точек на incl={target_incl:.2f}° в архиве.")
         return [], None
@@ -2483,6 +2553,8 @@ def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
     n_success = 0
     data_refresh = None   # свежий снимок диска при раннем выходе
     for i, params in enumerate(candidates):
+        if min_total_points is not None and n_existing + n_success >= min_total_points:
+            break
         resv_fp, skip = _try_reserve_candidate(
             params, resv_dir, reserve_eps, reserve_ttl_sec, bounds_original)
         if skip:
@@ -2521,6 +2593,11 @@ def seed_points_from_patterns(seed_patterns, target_incl, bounds_original,
         finally:
             release_reservation(resv_fp)
 
+        if min_total_points is not None and n_existing + n_success >= min_total_points:
+            data_refresh = _periodic_bootstrap_sync(
+                sync_interval or 1, sync_interval or 1, target_incl,
+                storage_patterns, host_patterns, min_total_points)
+            break
         data_refresh = _periodic_bootstrap_sync(
             i + 1, sync_interval, target_incl,
             storage_patterns, host_patterns, min_total_points)
@@ -3495,6 +3572,50 @@ def run_pca_optimization(
                 else:
                     data = seed_rows
                 _write(f"  SEED PA46.8 дал {len(seed_results)} точек, "
+                       f"всего {len(data)}")
+                n_have          = len(data) if data is not None else 0
+                data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)
+
+        if not data_sufficient and prior_patterns:
+            _write("Источник начальных точек: prior_patterns "
+                   "(орбиты и penalty пересчитываются)...")
+            n_seed = (24 if n_have == 0
+                      else max(8, MIN_POINTS_FOR_PCA - n_have + 3))
+            seed_results, seed_refresh = seed_points_from_patterns(
+                seed_patterns       = prior_patterns,
+                target_incl         = incl,
+                bounds_original     = bounds_original,
+                n_seed              = n_seed,
+                penalty_cutoff_frac = 0.3,
+                strategy            = 'best_diverse',
+                rng                 = proc_rng,
+                sync_interval       = bootstrap_sync_interval,
+                storage_patterns    = storage_patterns,
+                host_patterns       = host_patterns,
+                min_total_points    = MIN_POINTS_FOR_PCA,
+                resv_dir            = resv_dir,
+                reserve_eps         = reserve_eps,
+                reserve_ttl_sec     = reserve_ttl_sec,
+                existing_data       = data,
+            )
+            if seed_results:
+                bootstrap_results = (bootstrap_results or []) + seed_results
+                seed_rows = numpy.array([
+                    [incl,
+                     r['params']['Q'],  r['params']['gh'],
+                     r['params']['rh'], r['params']['rho0'],
+                     0.0,               r['penalty']]
+                    for r in seed_results
+                ])
+                if seed_refresh is not None:
+                    data = seed_refresh
+                    _write(f"  Ранний выход prior-seed: свежий снимок диска "
+                           f"— {len(data)} точек (свои + параллельные)")
+                elif data is not None and len(data) > 0:
+                    data = numpy.vstack([data, seed_rows])
+                else:
+                    data = seed_rows
+                _write(f"  SEED prior_patterns дал {len(seed_results)} точек, "
                        f"всего {len(data)}")
                 n_have          = len(data) if data is not None else 0
                 data_sufficient = (n_have >= MIN_POINTS_FOR_PCA)

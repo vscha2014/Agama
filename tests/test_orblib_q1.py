@@ -1156,3 +1156,54 @@ source "$0" "$@"
     subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
     assert '90 1 0.0 28.0 43.5 0.46 1.53' in (verify / 'out_testhost_Q1d1_nb250_gh0_ser0.txt').read_text()
     assert len(list(verify.glob('logs/Q1d1_nb250_gh0_ser0_i90.0_*/log_testhost_Q1d1_nb250_gh0_ser0_p0.txt'))) == 1
+
+
+def test_l24_isolates_freeq_history_and_preserves_q1_orblib_key(monkeypatch):
+    cfg = configuration(monkeypatch, '--l24')
+    assert (cfg['POT_LMAX'], cfg['POT_NGRID'], cfg['POT_TAG']) == (24, 184, '_l24n184')
+    assert cfg['HISTORY_ID'] == 'd1_nb250_gh0_l24n184_ser0'
+    assert cfg['EXP_ID'] == 'd1_nb250_gh0_l24n184_ser0'
+    assert cfg['history_ids'] == ['d1_nb250_gh0_l24n184_ser0']
+    assert any('4UpsBoTorch_PCA_Sersic*.txt' in p for p in cfg['prior_seed_patterns'])
+    assert any('out_*_d1_nb250_gh0_ser0.txt' in p for p in cfg['prior_seed_patterns'])
+    assert any('out_*_d1_nb250_gh0_ser0_*.txt' in p for p in cfg['prior_seed_patterns'])
+    ns = functions('orblib_key', q1=False, DOUBLE=True, N_BIN=250, SER_ID=0,
+                   GEOM_HASH='b99b4c93', ORBLIB_DIR='orblib', POT_TAG='_l24n184')
+    name_freeq, _ = ns['orblib_key'](0.267119, 0.0, 2.4142, 90.443)
+    name_q1, _ = ns['orblib_key'](1.0, 0.0, 28.0, 43.5)
+    assert '_ser0_l24n184_geomb99b4c93_' in name_freeq
+    assert '_ser0_geomb99b4c93_' in name_q1 and '_l24n184' not in name_q1
+
+
+def test_seed_points_from_patterns_filters_q1_existing_and_stops_at_min_total(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    evaluated = []
+    ns = functions('seed_points_from_patterns', 'select_bootstrap_candidates', '_params_to_dummy_pc',
+                   'orblib_key', 'OrblibBusyError',
+                   q1=False, DOUBLE=True, N_BIN=250, SER_ID=0,
+                   GEOM_HASH='b99b4c93', ORBLIB_DIR='orblib', POT_TAG='_l24n184',
+                   densityStars=None, datasets=None, alphah=2.0, betah=3,
+                   _try_reserve_candidate=lambda *a: ('r', False),
+                   release_reservation=lambda *a: None,
+                   _periodic_bootstrap_sync=lambda *a: None)
+
+    def evaluate(*args, direct_params, **kwargs):
+        evaluated.append(direct_params.copy())
+        return -(1.5 + 0.01 * len(evaluated))
+
+    ns['halo_IC_lib_weights_pca_fixed'] = evaluate
+    prior = tmp_path / 'prior.txt'
+    lines = [
+        '90.0 1.0 0.0 28.0 43.5 0.46 1.53 2026-10-16 04:00:00',
+        '90.0 0.267 0.0 2.41 90.4 0.65 1.32 2026-10-01 17:00:00',
+        '90.0 0.267 0.0 2.41 90.4 0.65 1.33 2026-10-01 17:01:00',
+    ] + [f'90.0 {0.25 + i*0.01:.3f} 0.0 {2.2 + i*0.1:.2f} {85.0 + i:.1f} 0.65 {1.30 + i*0.01:.3f} d t'
+         for i in range(12)]
+    prior.write_text('\n'.join(lines) + '\n')
+    existing = numpy.array([[90.0, 0.267, 0.0, 2.41, 90.4, 0.65, 1.55]])
+    results, _ = ns['seed_points_from_patterns'](
+        [str(prior)], 90.0, BOUNDS, n_seed=24, penalty_cutoff_frac=0.8,
+        strategy='best_diverse', min_total_points=4, existing_data=existing)
+    assert len(results) == 3 and len(evaluated) == 3
+    assert all(p['Q'] != 1.0 for p in evaluated)
+    assert all(not (abs(p['Q'] - 0.267) < 1e-6 and abs(p['rh'] - 2.41) < 1e-6) for p in evaluated)

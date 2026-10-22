@@ -1040,3 +1040,10 @@ def test_manifest_cannot_reference_missing_library(store):
         name=NAME, object='objects/' + NAME, size=1, md5=storage.digest(b'x'), metadata={})).encode()
     with pytest.raises(ValueError, match='Missing'):
         storage.prepare(store, remote, resume=True)
+
+
+def test_validate_name_accepts_optional_multipole_tag():
+    storage.validate_name('orblib_i90.0_d1_nb250_ser0_geomb99b4c93_0123456789.npz')
+    storage.validate_name('orblib_i90.0_d1_nb250_ser0_l24n184_geomb99b4c93_0123456789.npz')
+    with pytest.raises(ValueError, match='Invalid library name'):
+        storage.validate_name('orblib_i90.0_d1_nb250_ser0_l24_geomb99b4c93_0123456789.npz')

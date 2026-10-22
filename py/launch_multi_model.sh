@@ -33,6 +33,10 @@ RUNNER="run_single_model.py"
 CALC_SCRIPT="Fornax_P21_PCA_w3Sersic_orblib_exp.py"
 
 MODELS_FILE=""
+Q1=0
+L24=0
+POT_LMAX=4
+POT_NGRID=23
 DO_SHUTDOWN=1
 DO_UPLOAD=1
 PREFLIGHT=0
@@ -48,6 +52,10 @@ for arg in "$@"; do
                 '                   (форматы out_*/4Ups*, J_factor_*, Jcomputed_*; "# метка" в конце строки' \
                 '                   допускается). incl и параметры берутся из строки, её penalty/Upsilon —' \
                 '                   опорные. Одна интеграция + штатный поиск Upsilon (протокол exp).' \
+                '  --Q1             Записывать историю в Q1d1_* (пул фиксированного Q=1).' \
+                '  --l24            Уточнённое мультипольное разложение N=184, lmax=24.' \
+                '  --pot-lmax=N     Порядок гармоник lmax мультиполя (по умолчанию 4).' \
+                '  --pot-ngrid=M    Число радиальных узлов gridSizeR мультиполя (по умолчанию 23).' \
                 '  --results-dir=D  Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
                 '  --git-results    Синхронизировать историю и отчёты через git-репозиторий results (без rclone).' \
                 '  --no-git-results Отключить автопереключение на ../results и использовать rclone.' \
@@ -62,6 +70,10 @@ for arg in "$@"; do
             exit 0
             ;;
         --models=*)      MODELS_FILE="${arg#*=}" ;;
+        --Q1)            Q1=1 ;;
+        --l24)           L24=1; POT_LMAX=24; POT_NGRID=184 ;;
+        --pot-lmax=*)    POT_LMAX="${arg#*=}" ;;
+        --pot-ngrid=*)   POT_NGRID="${arg#*=}" ;;
         --results-dir=*) RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)   GIT_RESULTS_MODE=1 ;;
         --no-git-results) GIT_RESULTS_MODE=0 ;;
@@ -142,8 +154,17 @@ ORBLIB_WATCH_INTERVAL="${ORBLIB_WATCH_INTERVAL:-10}"
 ORBLIB_MEMINFO="${ORBLIB_MEMINFO:-/proc/meminfo}"
 ORBLIB_PSI_PATH="${ORBLIB_PSI_PATH:-/proc/pressure/memory}"
 
+if ! [[ "$POT_LMAX" =~ ^[0-9]+$ ]] || ! [[ "$POT_NGRID" =~ ^[0-9]+$ ]] || [ $(( POT_LMAX % 2 )) -ne 0 ] || [ "$POT_NGRID" -lt 4 ]; then
+    echo "ОШИБКА: нужно чётное POT_LMAX >= 0 и POT_NGRID >= 4 (получено: lmax='${POT_LMAX}', ngrid='${POT_NGRID}')" >&2
+    exit 2
+fi
+POT_TAG=""
+if [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; then
+    POT_TAG="_l${POT_LMAX}n${POT_NGRID}"
+fi
 # Конфигурация штатного свободного поиска (как в проде: удвоение, n_bin=250).
-EXP_ID="d1_nb250_gh0_ser0"
+EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
+[ "$Q1" -eq 1 ] && EXP_ID="Q1${EXP_ID}"
 RUN_TAG="multi_${EXP_ID}_n${NMODELS}"
 SINGLE_ROOT="${WORK_DIR}/orblib_single"
 RESULTS_REMOTE="${REMOTE_DIR}/single_model/${RUN_TAG}_${TIMESTAMP}"
@@ -553,6 +574,12 @@ run_container() {
     local proc_log="${WORK_DIR}/dockerlog_${RUN_TAG}_m${i}_${TIMESTAMP}.log"
     local extra=()
     [ "$PREFLIGHT" -eq 1 ] && extra+=(--preflight)
+    [ "$Q1" -eq 1 ] && extra+=(--Q1)
+    if [ "$L24" -eq 1 ] && [ "$POT_LMAX" -eq 24 ] && [ "$POT_NGRID" -eq 184 ]; then
+        extra+=(--l24)
+    elif [ -n "$POT_TAG" ]; then
+        extra+=(--pot-lmax "$POT_LMAX" --pot-ngrid "$POT_NGRID")
+    fi
     log "  Контейнер m${i}: CPU=${CPU_RANGES[$i]} incl=${M_INCL[$i]} suffix=${sfx} orblib=${ORBLIB_DIRS[$i]}"
     set +e
     # --memory-swap == --memory: swap контейнеру запрещён, превышение → OOM-kill (137).

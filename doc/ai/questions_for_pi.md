@@ -9,7 +9,7 @@ Do not guess answers. Format of a new entry:
 Context (2–5 lines). Options with trade-offs. Recommendation. What is blocked.
 ```
 
-Answered so far: Q1–Q14 and the posang/`q_ap` correction → see `DECISIONS.md`.
+Answered so far: Q1–Q14, Q21, Q22, Q28–Q30 and the posang/`q_ap` correction → see `DECISIONS.md`.
 
 ---
 
@@ -107,29 +107,3 @@ integration. The harness fix was applied on 2026-10-03 (user request, see
 `DECISIONS.md`) and verified on the VM: bit-identical library (same MD5),
 penalty equal to round-off, orbit integration ≈20× faster on 32 vCPU.
 **Question:** port the same wrap to `_yaVM.py`?
-
-## Q30. Refined multipole potential for free-Q searches?  [affects: CONTRACT §potential (`lmax=4`), harness]
-
-The Q29 seed-42 pilot ran on tycho (DECISIONS 2026-10-14). With common IC, the free-Q
-control (flattened halo) changes penalty by about twenty times the agreed δP when the
-baseline N23/l4 multipole is replaced by N184/l24; N399/l40 agrees with N184/l24, so
-the refined setting is converged and the baseline is not. Both Q1 controls change by
-≲ δP. The shift comes from the orbit library, not from Upsilon. Integration is not
-slower with the refined potential. Numbers: local `results/Q1d1_rh_bounds/NOTES.md`.
-
-Consequence: free-Q search history and its best model were evaluated on a biased
-objective; whether the minimum and J move is unknown (one point, one seed).
-
-Options:
-- A. Switch the experimental harness to N184/l24 for all new searches (free-Q and Q1),
-  then re-run free-Q near the good valley and recompute J. Cleanest; production untouched;
-  old free-Q history becomes a different objective (keep it, label it).
-- B. Keep `lmax=4` and report the shift as a systematic. Cheapest; leaves a known bias of
-  the free-Q penalty comparable to the Q1–free-Q gap.
-- C. First a small diagnostic: A/B pairs (common IC) at 3–4 further free-Q points along the
-  valley (e.g. the top-4 set). A nearly constant shift ⇒ offset only (minimum/J stable);
-  a varying shift ⇒ A is required. ~1 h per point on tycho, no search.
-
-Recommendation: C, then A if the shift varies by more than δP along the valley.
-Blocked: new free-Q searches and any free-Q vs Q1 comparison in the article. Q1 searches
-can proceed (baseline adequate at δP level), but A would also change them for consistency.

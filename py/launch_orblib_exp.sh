@@ -47,6 +47,9 @@ GIT_RESULTS_MODE="${GIT_RESULTS:-auto}"
 # пробрасываются и в Python-скрипт).
 DOUBLE=1
 Q1=0
+L24=0
+POT_LMAX=4
+POT_NGRID=23
 NBIN=250
 GHID=0
 SERID=0
@@ -55,8 +58,11 @@ for arg in "$@"; do
     case $arg in
         --help|-h)
             printf '%s\n' \
-                'Использование: bash launch_orblib_exp.sh [--Q1] [--incl=90.0] [--nproc=N]' \
+                'Использование: bash launch_orblib_exp.sh [--Q1] [--l24] [--incl=90.0] [--nproc=N]' \
                 '  --Q1           Фиксировать Q=1, d1; запись Q1d1_*, чтение d1/Q1d1 при Q=1.' \
+                '  --l24          Уточнённое мультипольное разложение N=184, lmax=24.' \
+                '  --pot-lmax=N   Порядок гармоник lmax мультиполя (по умолчанию 4).' \
+                '  --pot-ngrid=M  Число радиальных узлов gridSizeR мультиполя (по умолчанию 23).' \
                 '  --no-double    Отключить удвоение; несовместимо с --Q1.' \
                 '  --n-bin=250    Число звёзд на апертуру.' \
                 '  --results-dir=D  Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
@@ -85,6 +91,9 @@ for arg in "$@"; do
         --script=*)    CALC_SCRIPT="${arg#*=}" ;;
         --no-double)   DOUBLE=0                ;;
         --Q1)          Q1=1                    ;;
+        --l24)         L24=1; POT_LMAX=24; POT_NGRID=184 ;;
+        --pot-lmax=*)  POT_LMAX="${arg#*=}"    ;;
+        --pot-ngrid=*) POT_NGRID="${arg#*=}"   ;;
         --q1)
             echo 'ОШИБКА: используйте --Q1 с заглавной Q' >&2
             exit 2
@@ -139,9 +148,17 @@ ORBLIB_WATCH_INTERVAL="${ORBLIB_WATCH_INTERVAL:-10}"
 ORBLIB_MEMINFO="${ORBLIB_MEMINFO:-/proc/meminfo}"
 ORBLIB_PSI_PATH="${ORBLIB_PSI_PATH:-/proc/pressure/memory}"
 
+if ! [[ "$POT_LMAX" =~ ^[0-9]+$ ]] || ! [[ "$POT_NGRID" =~ ^[0-9]+$ ]] || [ $(( POT_LMAX % 2 )) -ne 0 ] || [ "$POT_NGRID" -lt 4 ]; then
+    echo "ОШИБКА: нужно чётное POT_LMAX >= 0 и POT_NGRID >= 4 (получено: lmax='${POT_LMAX}', ngrid='${POT_NGRID}')" >&2
+    exit 2
+fi
+POT_TAG=""
+if [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; then
+    POT_TAG="_l${POT_LMAX}n${POT_NGRID}"
+fi
 # --- Идентификаторы эксперимента ---
 # EXP_ID — как в Python-скрипте (входит в имена out_/log_/checkpoint_).
-EXP_ID="d${DOUBLE}_nb${NBIN}_gh${GHID}_ser${SERID}"
+EXP_ID="d${DOUBLE}_nb${NBIN}_gh${GHID}${POT_TAG}_ser${SERID}"
 if [ "$Q1" -eq 1 ]; then
     if [ "$DOUBLE" -ne 1 ]; then
         echo "ОШИБКА: --Q1 требует удвоения d1; уберите --no-double" >&2
@@ -169,6 +186,11 @@ else
 fi
 [ "$DOUBLE" -eq 0 ] && EXP_FLAGS="--no-double $EXP_FLAGS"
 [ "$Q1" -eq 1 ] && EXP_FLAGS="--Q1 $EXP_FLAGS"
+if [ "$L24" -eq 1 ] && [ "$POT_LMAX" -eq 24 ] && [ "$POT_NGRID" -eq 184 ]; then
+    EXP_FLAGS="--l24 $EXP_FLAGS"
+elif [ -n "$POT_TAG" ]; then
+    EXP_FLAGS="--pot-lmax=${POT_LMAX} --pot-ngrid=${POT_NGRID} $EXP_FLAGS"
+fi
 
 # --- Валидация и авто-раскладка процессов по ядрам ---
 if ! [[ "$N_PROC" =~ ^[0-9]+$ ]] || [ "$N_PROC" -lt 1 ]; then

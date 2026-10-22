@@ -1231,3 +1231,48 @@ def test_single_launcher_git_results_pulls_history_and_pushes_results(tmp_path):
     subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
     assert (verify / 'out_testhost_d1_nb250_gh0_ser0.txt').read_text().count('HASH:') == 2
     assert len(list(verify.glob('logs/single_d1_nb250_gh0_ser0_i90.0_*/summary_single_*.txt'))) == 1
+
+
+def test_l24_builds_only_pot_orbit_without_baseline_overhead(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mod, _ = real_halo_module(tmp_path, None)
+    mod.SAVE_ORBLIB = mod.REUSE_ORBLIB = False
+    mod.POT_LMAX, mod.POT_NGRID, mod.POT_TAG = 24, 184, '_l24n184'
+    runner.prepare_module(mod, None)
+    pot_calls = []
+
+    def make_potential(**kw):
+        pot_calls.append(kw)
+        return SimpleNamespace(Tcirc=lambda ic: numpy.ones(len(ic)), tag=kw)
+
+    mod.agama.Potential = make_potential
+    value = mod.halo_IC_lib_weights_pca_fixed(
+        numpy.zeros(4), None, mod.bounds_original, mod.densityStars, mod.datasets, 2, 3,
+        direct_params=dict(Q=0.267, gh=0.0, rh=2.41, rho0=90.4))
+    assert value < 0
+    assert len(pot_calls) == 1
+    assert pot_calls[0]['lmax'] == 24 and pot_calls[0]['gridSizeR'] == 184
+
+    pot_calls.clear()
+    captured = []
+    mod.halo_IC_lib_weights_pca_fixed(
+        numpy.zeros(4), None, mod.bounds_original, mod.densityStars, mod.datasets, 2, 3,
+        direct_params=dict(Q=0.267, gh=0.0, rh=2.41, rho0=90.4),
+        diagnostic=lambda **kw: captured.append(kw['baseline'].tag) or {'ok': True})
+    assert len(pot_calls) == 1
+    assert captured[0]['lmax'] == 4 and captured[0]['gridSizeR'] == 23
+
+
+def test_runner_l24_and_q1_flags_propagate_to_module_argv(monkeypatch):
+    monkeypatch.setenv('HOSTNAME_SUFFIX', 'testhost')
+    args = runner.parse_args(['--suffix', 's0', '--orblib-dir', 'orblib', '--l24'])
+    argv = runner.module_argv(args)
+    assert '--l24' in argv
+    cfg = script_configuration(monkeypatch, argv)
+    assert cfg['EXP_ID'] == 'd1_nb250_gh0_l24n184_ser0'
+
+    args_q1 = runner.parse_args(['--suffix', 's1', '--orblib-dir', 'orblib', '--Q1'])
+    argv_q1 = runner.module_argv(args_q1)
+    assert '--Q1' in argv_q1
+    cfg_q1 = script_configuration(monkeypatch, argv_q1)
+    assert cfg_q1['EXP_ID'] == 'Q1d1_nb250_gh0_ser0'

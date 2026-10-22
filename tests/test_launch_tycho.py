@@ -29,13 +29,15 @@ exec "$@"
     'python': r'''#!/bin/bash
 if [ "$1" = "-c" ]; then exit "${PY_IMPORT_FAIL:-0}"; fi
 echo "python $* OMP=$OMP_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS" >> "$HOME/events"
-sfx=""; exp="d1_nb250_gh0_ser0"; prev=""; rep=""
+sfx=""; q1=""; pot=""; prev=""; rep=""
 for a in "$@"; do
     [ "$prev" = "--suffix" ] && sfx="$a"
     [ "$prev" = "--report" ] && rep="$a"
-    [ "$a" = "--Q1" ] && exp="Q1d1_nb250_gh0_ser0"
+    [ "$a" = "--Q1" ] && q1="Q1"
+    [ "$a" = "--l24" ] && pot="_l24n184"
     prev="$a"
 done
+exp="${q1}d1_nb250_gh0${pot}_ser0"
 echo "90.0 0.27 0 2.4 90 0.66 1.25${sfx} t" >> "out_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
 echo "log" > "log_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
 if [ -n "$rep" ]; then
@@ -395,3 +397,23 @@ def test_git_results_auto_detects_parent_results_repo_and_pushes(tmp_path):
     subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
     assert '1.25p0' in (verify / 'out_testhost_Q1d1_nb250_gh0_ser0.txt').read_text()
     assert len(list(verify.glob('logs/Q1d1_nb250_gh0_ser0_i90.0_*/log_testhost_Q1d1_nb250_gh0_ser0_p0.txt'))) == 1
+
+
+def test_l24_search_writes_isolated_history_in_git_results(tmp_path):
+    remote = tmp_path / 'remote.git'
+    results = tmp_path / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    (results / '4UpsBoTorch_PCA_Sersic_tycho.txt').write_text('90.0 0.267 0.0 2.41 90.4 0.65 1.32 t\n')
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+
+    result, events, _ = run(tmp_path, '--threads=4', '--l24', '--incl=90.0')
+    assert result.returncode == 0, output(result)
+    (argv,) = pythons(events)
+    assert '--l24' in argv and '--offline' in argv
+    merged = results / 'out_testhost_d1_nb250_gh0_l24n184_ser0.txt'
+    assert merged.exists() and '1.25p0' in merged.read_text()

@@ -8,14 +8,25 @@ must not be touched (see `../CONTRACT.md`, `production.md`).
 
 ## 1. Experiment identity
 
-- `EXP_ID = d{0|1}_nb{N}_gh{G}_ser{S}`; fixed-Q writes `Q1d1_nb250_gh0_ser0`.
+- `EXP_ID = d{0|1}_nb{N}_gh{G}[_l{L}n{R}]_ser{S}`; fixed-Q writes `Q1d1_nb250_gh0_ser0`
+  (and `--l24` free-Q writes `d1_nb250_gh0_l24n184_ser0`).
   `EXP_ID` is embedded in `hostname_proc`, so every derived file is isolated per
-  experiment. Penalties from different `d`/`nb` are never pooled.
+  experiment. Penalties from different `d`/`nb` or different `free-Q` multipole grids are never pooled.
 - `out_{tag}.txt` — history (one line per model, read by parallel workers);
   `log_{tag}.txt` — human-readable log, read by nobody.
 - Variations: `--no-double`, `--n-bin`, `--gh-id`, `--ser-id` (>0 raises
   `NotImplementedError` on purpose), `--save-orblib`, `--reuse-orblib`,
-  `--stream-orblib`, `--Q1`, `--offline` (no rclone at all, §3g).
+  `--stream-orblib`, `--Q1`, `--l24` (`--pot-lmax=24 --pot-ngrid=184`),
+  `--offline` (no rclone at all, §3g).
+- Refined multipole (`--l24`): builds only `pot_orbit` (`lmax=24, gridSizeR=184`)
+  at runtime when `diagnostic is None` (baseline `pot_gal` stays inside a guarded
+  branch for the Step 1A/1B AST parser and `diagnostic` callback). For `free-Q`
+  (`--l24`), `history_ids = ['d1_nb250_gh0_l24n184_ser0']` so the PCA/TuRBO pool is
+  isolated from both old `lmax=4` rows and the `Q=1` pool; all previous `free-Q`
+  history files (`4UpsBoTorch_PCA_Sersic*.txt` and `out_*_d1_nb250_gh0_ser0*.txt`)
+  enter `prior_seed_patterns` and seed initial `Q != 1` points with orbits and
+  `penalty` recomputed in `N=184, lmax=24`. For `Q == 1.0`, `orblib_key` omits
+  `_l24n184` so spherical-halo `.npz` libraries remain reusable without recomputation.
 - `gh` is the halo inner slope (a search parameter); `gh_id` is the observational
   GH perturbation id. Orbit matrices depend on `(Q, gh, rh, rho0, incl, double,
   n_bin, ser_id)` but **not** on `gh_id`.

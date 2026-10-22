@@ -297,6 +297,15 @@ def module_argv(args):
             *storage, '--orblib-dir', args.orblib_dir, '--no-resume']
     if args.n_threads is not None:
         argv += ['--n_threads', str(args.n_threads)]
+    if getattr(args, 'Q1', False):
+        argv.append('--Q1')
+    if getattr(args, 'l24', False):
+        argv.append('--l24')
+    else:
+        if getattr(args, 'pot_lmax', 4) != 4:
+            argv += ['--pot-lmax', str(args.pot_lmax)]
+        if getattr(args, 'pot_ngrid', 23) != 23:
+            argv += ['--pot-ngrid', str(args.pot_ngrid)]
     return argv
 
 
@@ -562,6 +571,10 @@ def static_context(mod):
                    evaluation_context=mod.EVALUATION_CONTEXT,
                    num_dof=int(sum(int(numpy.sum(d.cons_err > 0)) for d in mod.datasets)),
                    n_apertures=len(mod.sectAPP), double=bool(mod.DOUBLE), n_bin=int(mod.N_BIN))
+    pot_lmax = int(getattr(mod, 'POT_LMAX', 4))
+    pot_ngrid = int(getattr(mod, 'POT_NGRID', 23))
+    if (pot_lmax, pot_ngrid) != (4, 23):
+        context.update(pot_lmax=pot_lmax, pot_ngrid=pot_ngrid)
     return context, dict(exp=exp, prod=prod, identical=identical)
 
 
@@ -805,6 +818,14 @@ def parse_args(argv=None):
     parser.add_argument('--workers', type=int, default=None)
     parser.add_argument('--subsample-seed', type=int, default=20261001)
     parser.add_argument('--n_threads', type=int, default=None)
+    parser.add_argument('--Q1', action='store_true',
+                        help='Route history output to Q1d1_* (fixed spherical halo pool)')
+    parser.add_argument('--pot-lmax', dest='pot_lmax', type=int, default=4,
+                        help='Multipole lmax for the working orbit potential (default 4)')
+    parser.add_argument('--pot-ngrid', dest='pot_ngrid', type=int, default=23,
+                        help='Multipole radial gridSizeR for the working orbit potential (default 23)')
+    parser.add_argument('--l24', action='store_true',
+                        help='Refined multipole potential N=184, lmax=24 (--pot-lmax=24 --pot-ngrid=184)')
     parser.add_argument('--preflight', action='store_true',
                         help='Import, report geometry and library name; no integration')
     parser.add_argument('--summarize', nargs='+', default=None, metavar='REPORT',
@@ -814,6 +835,10 @@ def parse_args(argv=None):
                         help='Print the rows of a models file tab-separated (incl Q gh rh rho0 '
                              'penalty Upsilon source; standard library only) and exit')
     args = parser.parse_args(argv)
+    if args.l24:
+        args.pot_lmax, args.pot_ngrid = 24, 184
+    if args.pot_lmax < 0 or (args.pot_lmax % 2) != 0 or args.pot_ngrid < 4:
+        parser.error('--pot-lmax must be an even integer >= 0 and --pot-ngrid >= 4')
     if args.split_seeds is not None:
         try:
             args.split_seeds = split_seeds(parse_seed_list(args.split_seeds), args.workers or 1)

@@ -454,3 +454,25 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   for `--ic-seeds`), followed by `git commit` + `git push` with `pull --rebase` retries.
   `.npz` orbit libraries (~618 MB) stay local on the VM (`ORBLIB_LOCAL_STORE=1` in
   `launch_orblib_exp.sh` preserves save slots and `STOP` handling without `rclone`).
+
+## 2026-10-22 — Q30: refined multipole (`--l24`) for free-Q searches and `Q1d1` consolidation (user decision)
+
+- **Skip fixed-seed valley check** | Do not run a separate `seed=42` pass on `models_top4.txt`;
+  proceed directly to the `TuRBO-PCA` `free-Q` search with the converged multipole
+  `N=184, lmax=24` (`--l24`, equivalent to `--pot-lmax=24 --pot-ngrid=184`).
+- **Zero-overhead `pot_orbit`** | Keep the literal `pot_gal = agama.Potential(..., lmax=4, mmax=0, gridSizeR=23)`
+  assignment inside `if diagnostic is not None or (_pot_lmax, _pot_ngrid) == (4, 23):` so the
+  Step 1A/1B AST parser (`read_recipe`) and `diagnostic` callback remain intact, while during
+  ordinary `--l24` runs (`diagnostic is None`) only `pot_orbit` (`lmax=24, gridSizeR=184`) is
+  constructed at runtime (zero extra CPU or RAM overhead).
+- **Consolidate `Q=1` history into `Q1d1_*`** | All `Q=1` blocks from single/multi-model probe
+  runs previously written into `out_*_d1_nb250_gh0_ser0.txt` are moved into
+  `out_*_Q1d1_nb250_gh0_ser0.txt` (`results/`), leaving only old `free-Q` (`lmax=4`) rows in
+  `out_*_d1_nb250_gh0_ser0.txt`. Future `Q=1` runs via `run_single_model.py` and launchers use `--Q1`.
+- **History and library isolation vs `Q=1` reuse** | Under `--l24`, `HISTORY_ID = d1_nb250_gh0_l24n184_ser0`;
+  the `free-Q` PCA/TuRBO pool reads only `out_*_d1_nb250_gh0_l24n184_ser0*.txt` (not mixing in
+  the `Q=1` pool). All previous `free-Q` (`lmax=4`) files (`4UpsBoTorch_PCA_Sersic*.txt` and
+  `out_*_d1_nb250_gh0_ser0*.txt`) are included in `prior_seed_patterns` to seed initial `free-Q`
+  points (`Q != 1`) with orbits and penalties recomputed in `N=184, lmax=24`. For `Q == 1.0`,
+  `orblib_key` omits `_l24n184` and `--Q1` reads `Q1d1` history, so existing `Q=1` penalties
+  and `.npz` libraries remain reusable without recomputation.
