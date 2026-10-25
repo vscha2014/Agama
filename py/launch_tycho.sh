@@ -39,6 +39,9 @@ USE_SCOPE=1
 PRINT_LIMITS=0
 ORBLIB_DIR=""
 MODELS_FILE=""
+SEED_SPEC=""
+SEED_MODE=0
+PROTOCOLS="exp"
 MEMORY_GB=""
 RESULTS_DIR="${RESULTS_DIR:-}"
 GIT_RESULTS_MODE="${GIT_RESULTS:-auto}"
@@ -55,8 +58,13 @@ for arg in "$@"; do
                 '  --pot-lmax=N        Порядок гармоник lmax мультиполя (по умолчанию 4).' \
                 '  --pot-ngrid=M       Число радиальных узлов gridSizeR мультиполя (по умолчанию 23).' \
                 '  --models=FILE       Точечный расчёт моделей из FILE (последовательно в одном' \
-                '                      scope через run_single_model.py --protocols exp; по умолчанию' \
+                '                      scope через run_single_model.py; по умолчанию протокол exp,' \
                 '                      лимит памяти 8 GiB, потоков nproc/4).' \
+                '  --ic-seeds=SPEC     Скан seed AGAMA для моделей из --models=FILE (например 1-20);' \
+                '                      каждая модель считает все seed в одном процессе, только exp,' \
+                '                      библиотеки .npz не сохраняются, результаты → results/logs/seed/.' \
+                '  --protocols=LIST    Протоколы для --models=FILE (по умолчанию exp; например exp,reuse,prod' \
+                '                      для проверки полного поиска Upsilon на готовых .npz без записи в пул out_*).' \
                 '  --memory-gb=N       Явный лимит MemoryMax в GiB (по умолчанию MemTotal/4' \
                 '                      для поиска и 8 GiB для --models=FILE).' \
                 '  --results-dir=D     Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
@@ -86,6 +94,8 @@ for arg in "$@"; do
         --pot-lmax=*)      POT_LMAX="${arg#*=}" ;;
         --pot-ngrid=*)     POT_NGRID="${arg#*=}" ;;
         --models=*)        MODELS_FILE="${arg#*=}" ;;
+        --ic-seeds=*)      SEED_SPEC="${arg#*=}" ;;
+        --protocols=*)     PROTOCOLS="${arg#*=}" ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)     GIT_RESULTS_MODE=1 ;;
@@ -179,6 +189,15 @@ if [ -n "$MEMORY_GB" ]; then
     TYCHO_MEM_MAX=$(( MEMORY_GB * 1024 * 1024 * 1024 ))
 fi
 
+if { [ -n "$SEED_SPEC" ] || [ "$PROTOCOLS" != "exp" ]; } && [ -z "$MODELS_FILE" ]; then
+    echo "ОШИБКА: --ic-seeds и --protocols поддерживаются только вместе с --models=FILE" >&2
+    exit 2
+fi
+if [ -n "$SEED_SPEC" ]; then
+    SEED_MODE=1
+    SAVE_ORBLIB=0
+fi
+
 declare -a MODEL_ROWS=() M_INCL=() M_Q=() M_GH=() M_RH=() M_RHO0=() M_PEN=() M_UPS=() M_SRC=() M_SUFFIXES=() M_REPORTS=()
 NMODELS=0
 if [ -n "$MODELS_FILE" ]; then
@@ -186,6 +205,7 @@ if [ -n "$MODELS_FILE" ]; then
         for _cand in "${WORK_DIR}/${MODELS_FILE}" \
                      "${RESULTS_DIR}/${MODELS_FILE}" \
                      "${RESULTS_DIR}/logs/${MODELS_FILE}" \
+                     "${RESULTS_DIR}/logs/seed/${MODELS_FILE}" \
                      "${RESULTS_DIR}/logs/Q1d1_rh_bounds/${MODELS_FILE}" \
                      "${RESULTS_DIR}/Q1d1_rh_bounds/${MODELS_FILE}"; do
             if [ -f "$_cand" ]; then
@@ -203,8 +223,10 @@ if [ -n "$MODELS_FILE" ]; then
         echo "ОШИБКА: нет файла ${WORK_DIR}/run_single_model.py" >&2
         exit 2
     fi
-    if ! _rows="$(python3 "${WORK_DIR}/run_single_model.py" --list-models "$MODELS_FILE")"; then
-        echo "ОШИБКА: в ${MODELS_FILE} нет корректных строк моделей, есть повторы параметров или значения вне bounds_original" >&2
+    declare -a _LIST_ARGS=(--list-models "$MODELS_FILE" --protocols "$PROTOCOLS")
+    [ -n "$SEED_SPEC" ] && _LIST_ARGS+=(--ic-seeds "$SEED_SPEC")
+    if ! _rows="$(python3 "${WORK_DIR}/run_single_model.py" "${_LIST_ARGS[@]}")"; then
+        echo "ОШИБКА: в ${MODELS_FILE} нет корректных строк моделей, есть повторы параметров, значения вне bounds_original или неверны --protocols/--ic-seeds" >&2
         exit 2
     fi
     mapfile -t MODEL_ROWS <<< "$_rows"
@@ -231,7 +253,11 @@ EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
 [ "$Q1" -eq 1 ] && EXP_ID="Q1${EXP_ID}"
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 if [ -n "$MODELS_FILE" ]; then
-    RUN_TAG="multi_${EXP_ID}_n${NMODELS}"
+    if [ "$SEED_MODE" -eq 1 ]; then
+        RUN_TAG="seeds_multi_${EXP_ID}_n${NMODELS}"
+    else
+        RUN_TAG="multi_${EXP_ID}_n${NMODELS}"
+    fi
 else
     RUN_TAG="${EXP_ID}_i${INCL_FMT}"
 fi
@@ -297,7 +323,7 @@ preflight() {
         [ -f "${WORK_DIR}/${f}" ] || die "нет файла ${WORK_DIR}/${f}"
     done
     if [ -n "$MODELS_FILE" ]; then
-        log "  Режим --models: ${MODELS_FILE} (${NMODELS} моделей, последовательно по ${THREADS_PER_PROC} потоков)"
+        log "  Режим --models: ${MODELS_FILE} (${NMODELS} моделей, последовательно по ${THREADS_PER_PROC} потоков, protocols=${PROTOCOLS}${SEED_SPEC:+, ic_seeds=${SEED_SPEC}})"
         local i
         for ((i = 0; i < NMODELS; i++)); do
             log "    m${i}: incl=${M_INCL[i]} Q=${M_Q[i]} gh=${M_GH[i]} rh=${M_RH[i]} rho0=${M_RHO0[i]}" \
@@ -515,6 +541,7 @@ upload() {
         local fname
         fname="$(basename "$1")"
         local run_sub="logs/${RUN_TAG}_${TIMESTAMP}"
+        [ "$SEED_MODE" -eq 1 ] && run_sub="logs/seed/${RUN_TAG}_${TIMESTAMP}"
         mkdir -p "${RESULTS_DIR}/${run_sub}"
         cp -Lf "$1" "${RESULTS_DIR}/${run_sub}/${fname}" 2>>"$LOGFILE" || return 1
         log "  ✓ Сохранено в results/${run_sub}/${fname}"
@@ -584,6 +611,7 @@ monitor_loop() {
 
 declare -a SUFFIXES=() WPIDS=() WSTART=() WCODES=()
 SUMMARY=""
+SUMMARY_JSON=""
 
 STOP_REQUESTED=0
 KILLER_PID=""
@@ -607,9 +635,10 @@ sync_from_results_git
 if [ -n "$MODELS_FILE" ]; then
     rm -f "${ORBLIB_DIR}/.storage/STOP" 2>/dev/null || true
     SUMMARY="${WORK_DIR}/summary_multi_${TIMESTAMP}.txt"
+    SUMMARY_JSON="${WORK_DIR}/summary_multi_${TIMESTAMP}.json"
     monitor_loop &
     MONITOR_PID=$!
-    log "Последовательный запуск ${NMODELS} моделей из $(basename "$MODELS_FILE") (по ${THREADS_PER_PROC} потоков)"
+    log "Последовательный запуск ${NMODELS} моделей из $(basename "$MODELS_FILE") (по ${THREADS_PER_PROC} потоков, protocols=${PROTOCOLS}${SEED_SPEC:+, ic_seeds=${SEED_SPEC}})"
     declare -a SINGLE_EXTRA=()
     [ "$Q1" -eq 1 ] && SINGLE_EXTRA+=(--Q1)
     SINGLE_EXTRA+=(${POT_FLAGS[@]+"${POT_FLAGS[@]}"})
@@ -617,6 +646,10 @@ if [ -n "$MODELS_FILE" ]; then
         [ "$STOP_REQUESTED" -eq 1 ] && break
         sfx="${M_SUFFIXES[i]}"
         proc_log="${WORK_DIR}/runlog_m${i}_${RUN_TAG}_${TIMESTAMP}.log"
+        declare -a MODEL_EXTRA=()
+        if [ "$SEED_MODE" -eq 1 ]; then
+            MODEL_EXTRA+=(--ic-seeds "$SEED_SPEC" --seed-file "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.txt")
+        fi
         log "  m${i}: incl=${M_INCL[i]} Q=${M_Q[i]} gh=${M_GH[i]} rh=${M_RH[i]} rho0=${M_RHO0[i]} (${M_SRC[i]}) suffix=${sfx}"
         OMP_NUM_THREADS="$THREADS_PER_PROC" MKL_NUM_THREADS="$THREADS_PER_PROC" \
         OPENBLAS_NUM_THREADS="$THREADS_PER_PROC" NUMEXPR_NUM_THREADS="$THREADS_PER_PROC" \
@@ -626,12 +659,13 @@ if [ -n "$MODELS_FILE" ]; then
                 --Q "${M_Q[i]}" --gh "${M_GH[i]}" --rh "${M_RH[i]}" --rho0 "${M_RHO0[i]}" \
                 --ref-penalty "${M_PEN[i]}" --ref-upsilon "${M_UPS[i]}" \
                 --ref-source "${M_SRC[i]}" \
-                --protocols exp \
+                --protocols "$PROTOCOLS" \
                 --suffix "${sfx}" \
                 --orblib-dir "${ORBLIB_DIR}" \
                 --report "${WORK_DIR}/${M_REPORTS[i]}" \
                 --n_threads "$THREADS_PER_PROC" \
                 ${SINGLE_EXTRA[@]+"${SINGLE_EXTRA[@]}"} \
+                ${MODEL_EXTRA[@]+"${MODEL_EXTRA[@]}"} \
             > >(trap '' INT TERM; exec tee -a "$proc_log") 2>&1 &
         WPIDS=("$!")
         mstart=$(date +%s)
@@ -656,6 +690,10 @@ if [ -n "$MODELS_FILE" ]; then
     log "Итоги ресурсов scope: memory.peak=$(cat "${CG_DIR}/memory.peak" 2>/dev/null || echo n/a)," \
         "$(grep -E '^usage_usec' "${CG_DIR}/cpu.stat" 2>/dev/null || echo 'cpu.stat n/a')"
 
+    declare -a EXISTING_REPORTS=()
+    for ((i = 0; i < NMODELS; i++)); do
+        [ -f "${WORK_DIR}/${M_REPORTS[i]}" ] && EXISTING_REPORTS+=("${WORK_DIR}/${M_REPORTS[i]}")
+    done
     {
         echo "multi-model summary: ${NMODELS} models, ${TIMESTAMP}, models file $(basename "$MODELS_FILE")"
         for ((i = 0; i < NMODELS; i++)); do
@@ -663,24 +701,44 @@ if [ -n "$MODELS_FILE" ]; then
             echo "--- m${i} (код ${WCODES[i]:-skip})"
             if [ -f "$txt" ]; then cat "$txt"; else echo "  нет отчёта"; fi
         done
+        if [ "${#EXISTING_REPORTS[@]}" -gt 0 ]; then
+            echo "--- aggregate"
+            python3 "${WORK_DIR}/run_single_model.py" --summarize "${EXISTING_REPORTS[@]}" \
+                --summary-json "$SUMMARY_JSON" 2>>"$LOGFILE" || true
+        fi
     } > "$SUMMARY"
     tee -a "$LOGFILE" < "$SUMMARY"
 
     LOG_REMOTE="${REMOTE_DIR}/single_model/${RUN_TAG}_${TIMESTAMP}"
-    for ((i = 0; i < NMODELS; i++)); do
-        if [ "$GIT_RESULTS" -eq 1 ]; then
-            append_and_remove "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${M_SUFFIXES[i]}.txt" "$(host_file)" \
-                "RESULT(${WCODES[i]:-skip}): incl=${M_INCL[i]}, exp=${EXP_ID}, suffix=${M_SUFFIXES[i]}, host=${HOSTNAME_ENV}" || true
-        else
-            upload "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${M_SUFFIXES[i]}.txt" "$REMOTE_DIR"
-        fi
-    done
-    for f in "$SUMMARY" "$MONITOR_LOG" "$MODELS_FILE" \
+    [ "$SEED_MODE" -eq 1 ] && LOG_REMOTE="${REMOTE_DIR}/seed_scan/${RUN_TAG}_${TIMESTAMP}"
+    if [ "$SEED_MODE" -eq 0 ] && [ "$PROTOCOLS" = "exp" ]; then
+        for ((i = 0; i < NMODELS; i++)); do
+            if [ "$GIT_RESULTS" -eq 1 ]; then
+                append_and_remove "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${M_SUFFIXES[i]}.txt" "$(host_file)" \
+                    "RESULT(${WCODES[i]:-skip}): incl=${M_INCL[i]}, exp=${EXP_ID}, suffix=${M_SUFFIXES[i]}, host=${HOSTNAME_ENV}" || true
+            else
+                upload "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_${M_SUFFIXES[i]}.txt" "$REMOTE_DIR"
+            fi
+        done
+    fi
+    for f in "$SUMMARY" "$SUMMARY_JSON" "$MONITOR_LOG" "$MODELS_FILE" \
              "${WORK_DIR}/report_multi_${TIMESTAMP}_m"* \
              "${WORK_DIR}"/runlog_m*_"${RUN_TAG}_${TIMESTAMP}".log \
-             "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt; do
+             "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
+             "${WORK_DIR}/single_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
+             "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*; do
         upload "$f" "$LOG_REMOTE"
     done
+    if [ "$SEED_MODE" -eq 1 ] || [ "$PROTOCOLS" != "exp" ]; then
+        for f in "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt; do
+            upload "$f" "$LOG_REMOTE"
+            [ "$GIT_RESULTS" -eq 1 ] && rm -f "$f"
+        done
+        if [ "$GIT_RESULTS" -eq 1 ]; then
+            rm -f "${WORK_DIR}/single_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
+                  "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*
+        fi
+    fi
 else
     for ((i = 0; i < N_PROC; i++)); do SUFFIXES[i]="p${i}"; done
     declare -A PROC_FLAGS
@@ -790,7 +848,9 @@ if [ "$OFFLINE" -eq 1 ]; then
     declare -a CARRY=()
     if [ -n "$MODELS_FILE" ]; then
         for f in "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
-                 "$SUMMARY" "$LOGFILE" "$MONITOR_LOG" \
+                 "${WORK_DIR}/single_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
+                 "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"* \
+                 "$SUMMARY" "$SUMMARY_JSON" "$LOGFILE" "$MONITOR_LOG" \
                  "${WORK_DIR}/report_multi_${TIMESTAMP}_m"* \
                  "${WORK_DIR}"/runlog_m*_"${RUN_TAG}_${TIMESTAMP}".log \
                  "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt; do

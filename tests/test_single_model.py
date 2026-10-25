@@ -1276,3 +1276,57 @@ def test_runner_l24_and_q1_flags_propagate_to_module_argv(monkeypatch):
     assert '--Q1' in argv_q1
     cfg_q1 = script_configuration(monkeypatch, argv_q1)
     assert cfg_q1['EXP_ID'] == 'Q1d1_nb250_gh0_ser0'
+
+
+def test_paired_seed_scan_summary_and_list_models_validation(tmp_path):
+    r0 = tmp_path / 'report_m0.json'
+    r1 = tmp_path / 'report_m1.json'
+    r0.write_text(json.dumps(dict(
+        status='ok', suffix='m0', incl=90.0,
+        params=dict(Q=0.268, gh=0.0, rh=2.42, rho0=90.3),
+        reference=dict(penalty=1.44, upsilon=0.66, source='freeQ'),
+        protocols={}, deltas={}, started='2026-10-25T10:00:00', updated='2026-10-25T11:00:00',
+        ic_seeds=dict(requested=[1, 2, 3], results={
+            '1': dict(status='ok', penalty=1.45, upsilon=0.66, orbit_s=600.0, wall_s=620.0,
+                      peak_rss_mb=2200.0, omp_threads=4, resumed=False),
+            '2': dict(status='ok', penalty=1.50, upsilon=0.65, orbit_s=600.0, wall_s=620.0,
+                      peak_rss_mb=2250.0, omp_threads=4, resumed=False),
+            '3': dict(status='ok', penalty=1.49, upsilon=0.67, orbit_s=600.0, wall_s=620.0,
+                      peak_rss_mb=2210.0, omp_threads=4, resumed=False)}))))
+    r1.write_text(json.dumps(dict(
+        status='ok', suffix='m1', incl=90.0,
+        params=dict(Q=1.0, gh=0.0, rh=28.03, rho0=43.45),
+        reference=dict(penalty=1.53, upsilon=0.47, source='Q1'),
+        protocols={}, deltas={}, started='2026-10-25T11:00:00', updated='2026-10-25T12:00:00',
+        ic_seeds=dict(requested=[1, 2, 3], results={
+            '1': dict(status='ok', penalty=1.55, upsilon=0.46, orbit_s=610.0, wall_s=630.0,
+                      peak_rss_mb=2300.0, omp_threads=4, resumed=False),
+            '2': dict(status='ok', penalty=1.56, upsilon=0.47, orbit_s=610.0, wall_s=630.0,
+                      peak_rss_mb=2310.0, omp_threads=4, resumed=False),
+            '3': dict(status='ok', penalty=1.61, upsilon=0.47, orbit_s=610.0, wall_s=630.0,
+                      peak_rss_mb=2290.0, omp_threads=4, resumed=False)}))))
+    reports, summary = runner.summarize([str(r0), str(r1)])
+    scan = summary['seed_scan']
+    assert scan['missing'] == []
+    assert len(scan['by_model']) == 2
+    assert scan['by_model'][0]['suffix'] == 'm0' and scan['by_model'][0]['penalty']['mean'] == pytest.approx(1.48)
+    assert scan['by_model'][1]['suffix'] == 'm1' and scan['by_model'][1]['penalty']['mean'] == pytest.approx(1.5733333333333333)
+    assert len(scan['paired']) == 1
+    pair = scan['paired'][0]
+    assert (pair['base_suffix'], pair['other_suffix'], pair['n'], pair['seeds']) == ('m0', 'm1', 3, [1, 2, 3])
+    assert pair['dp']['mean'] == pytest.approx((0.10 + 0.06 + 0.12) / 3)
+    assert pair['ref_dp'] == pytest.approx(0.09)
+    assert pair['fraction_gt_zero'] == 1.0 and pair['fraction_lt_zero'] == 0.0
+    assert pair['sem'] == pytest.approx(pair['dp']['std'] / (3 ** 0.5))
+    assert pair['n_for_sem_0p01'] >= 2
+    text = runner.format_summary(reports, summary)
+    assert 'm0: status=ok  peak_rss=2250.0 MB' in text
+    assert 'model m0: 3/3 ok' in text and 'paired (m1 - m0): n=3' in text
+
+    models = tmp_path / 'models.txt'
+    models.write_text(MODELS_TEXT)
+    assert runner.main(['--list-models', str(models), '--protocols', 'exp,reuse,prod']) == 0
+    assert runner.main(['--list-models', str(models), '--ic-seeds', '1-20']) == 0
+    for bad in (['--ic-seeds', '0'], ['--ic-seeds', '1-20', '--protocols', 'exp,prod'], ['--protocols', 'prod']):
+        with pytest.raises(SystemExit):
+            runner.parse_args(['--list-models', str(models), *bad])

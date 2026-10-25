@@ -683,7 +683,7 @@ def summarize(paths):
                    grid_identical=sorted({r['grid']['identical'] for r in reports if r.get('grid')}),
                    orblib_names=sorted({r['orblib'].get('name') for r in reports if r.get('orblib')} - {None}))
     for protocol in PROTOCOLS:
-        summary[protocol] = _stats([r['protocols'].get(protocol, {}).get('penalty') for r in reports])
+        summary[protocol] = _stats([r.get('protocols', {}).get(protocol, {}).get('penalty') for r in reports])
     for key in ('reuse_minus_exp', 'prod_minus_exp', 'prod_minus_ref', 'exp_minus_ref'):
         summary[key] = _stats([r.get('deltas', {}).get(key) for r in reports])
     peaks = [v.get('peak_rss_mb') for r in reports for v in r.get('protocols', {}).values()]
@@ -691,7 +691,7 @@ def summarize(paths):
               for v in ((r.get('ic_seeds') or {}).get('results') or {}).values()]
     summary['peak_rss_mb'] = _stats(peaks)
     summary['seed_scan'] = summarize_seeds(reports, ref)
-    summary['save_s'] = _stats([r['protocols'].get('exp', {}).get('save_s') for r in reports])
+    summary['save_s'] = _stats([r.get('protocols', {}).get('exp', {}).get('save_s') for r in reports])
     exp, prod = summary['exp'], summary['prod']
     scatter = (prod or {}).get('std') or (exp or {}).get('std')
     if prod and ref is not None and scatter:
@@ -710,10 +710,14 @@ def _parse_time(text):
         return None
 
 
-def summarize_seeds(reports, ref):
-    scans = [r for r in reports if r.get('ic_seeds')]
-    if not scans:
+def _model_key(report):
+    params = report.get('params')
+    if not isinstance(params, dict) or not all(k in params for k in PARAM_KEYS):
         return None
+    return (report.get('incl'), *(params.get(k) for k in PARAM_KEYS))
+
+
+def _summarize_single_seed_scan(scans, ref):
     rows, owners = [], {}
     for r in scans:
         for key, value in r['ic_seeds'].get('results', {}).items():
@@ -757,6 +761,67 @@ def summarize_seeds(reports, ref):
     return scan
 
 
+def _summarize_paired_seeds(scans):
+    base = scans[0]
+    base_ok = {int(k): v for k, v in (base.get('ic_seeds') or {}).get('results', {}).items()
+               if v.get('status') == 'ok' and v.get('penalty') is not None}
+    ref_a = (base.get('reference') or {}).get('penalty')
+    paired = []
+    for other in scans[1:]:
+        other_ok = {int(k): v for k, v in (other.get('ic_seeds') or {}).get('results', {}).items()
+                    if v.get('status') == 'ok' and v.get('penalty') is not None}
+        common = sorted(set(base_ok) & set(other_ok))
+        pair_rows = []
+        for s in common:
+            pa, pb = base_ok[s]['penalty'], other_ok[s]['penalty']
+            ua, ub = base_ok[s].get('upsilon'), other_ok[s].get('upsilon')
+            dups = (ub - ua) if (ua is not None and ub is not None) else None
+            pair_rows.append(dict(seed=s, penalty_a=pa, penalty_b=pb, dp=pb - pa,
+                                  upsilon_a=ua, upsilon_b=ub, dups=dups))
+        dps = [row['dp'] for row in pair_rows]
+        dp_stats = _stats(dps)
+        ref_b = (other.get('reference') or {}).get('penalty')
+        ref_dp = (ref_b - ref_a) if (ref_a is not None and ref_b is not None) else None
+        entry = dict(base_suffix=base.get('suffix'), other_suffix=other.get('suffix'),
+                     base_source=(base.get('reference') or {}).get('source'),
+                     other_source=(other.get('reference') or {}).get('source'),
+                     n=len(common), seeds=common, dp=dp_stats,
+                     dups=_stats([row['dups'] for row in pair_rows]),
+                     ref_dp=ref_dp, rows=pair_rows)
+        if dp_stats:
+            entry['fraction_gt_zero'] = sum(d > 0 for d in dps) / len(dps)
+            entry['fraction_lt_zero'] = sum(d < 0 for d in dps) / len(dps)
+            if ref_dp is not None:
+                entry['mean_minus_ref_dp'] = dp_stats['mean'] - ref_dp
+            if dp_stats['std'] is not None:
+                entry['sem'] = dp_stats['std'] / math.sqrt(dp_stats['n'])
+                cuts = statistics.quantiles(dps, n=100, method='inclusive')
+                entry['quantiles'] = dict(q16=cuts[15], median=statistics.median(dps), q84=cuts[83])
+                entry['n_for_sem_0p01'] = max(2, math.ceil((dp_stats['std'] / 0.01) ** 2))
+        paired.append(entry)
+    return paired
+
+
+def summarize_seeds(reports, ref):
+    scans = [r for r in reports if r.get('ic_seeds')]
+    if not scans:
+        return None
+    scan = _summarize_single_seed_scan(scans, ref)
+    distinct_models = {k for k in (_model_key(r) for r in scans) if k is not None}
+    if len(distinct_models) >= 2:
+        by_model = []
+        for r in scans:
+            m_ref = (r.get('reference') or {}).get('penalty')
+            m_scan = _summarize_single_seed_scan([r], m_ref)
+            m_scan.update(suffix=r.get('suffix'), incl=r.get('incl'),
+                          params=r.get('params'), reference=r.get('reference'))
+            by_model.append(m_scan)
+        scan['by_model'] = by_model
+        scan['paired'] = _summarize_paired_seeds(scans)
+        scan['missing'] = [f"{m.get('suffix')}:{s}" for m in by_model for s in m['missing']]
+    return scan
+
+
 def format_seed_scan(scan):
     lines = [f"  seed scan: {scan['ok']}/{scan['requested']} ok, missing={scan['missing']}, "
              f"distinct penalties={scan['distinct_penalties']}, identical_realisations={scan['identical_realisations']}"]
@@ -768,6 +833,21 @@ def format_seed_scan(scan):
     for row in scan['rows']:
         lines.append('    ' + '\t'.join(str(row.get(k)) for k in
                                          ('seed', 'status', 'penalty', 'upsilon', 'orbit_s', 'wall_s', 'suffix')))
+    for m in scan.get('by_model', ()):
+        lines.append(f"  model {m.get('suffix')}: {m['ok']}/{m['requested']} ok, missing={m['missing']}, "
+                     f"penalty={m.get('penalty')}, sem={m.get('sem')}, quantiles={m.get('quantiles')}, "
+                     f"ref={m.get('reference_penalty')}, mean_minus_ref={m.get('mean_minus_ref')}, "
+                     f"upsilon={m.get('upsilon')}")
+    for p in scan.get('paired', ()):
+        lines.append(f"  paired ({p.get('other_suffix')} - {p.get('base_suffix')}): n={p['n']}, "
+                     f"dp={p.get('dp')}, sem={p.get('sem')}, quantiles={p.get('quantiles')}, "
+                     f"ref_dp={p.get('ref_dp')}, fraction_gt_zero={p.get('fraction_gt_zero')}, "
+                     f"n_for_sem_0p01={p.get('n_for_sem_0p01')}")
+        lines.append('    seed\tpenalty_a\tpenalty_b\tdp\tupsilon_a\tupsilon_b\tdups')
+        for row in p.get('rows', ()):
+            lines.append('    ' + '\t'.join(str(row.get(k)) for k in
+                                             ('seed', 'penalty_a', 'penalty_b', 'dp',
+                                              'upsilon_a', 'upsilon_b', 'dups')))
     return lines
 
 
@@ -777,6 +857,10 @@ def format_summary(reports, summary):
         p = r.get('protocols', {})
         cells = ' '.join(f"{name}={p[name]['penalty']:.6f}" for name in PROTOCOLS if name in p)
         peak = max((v.get('peak_rss_mb') or 0) for v in p.values()) if p else None
+        if peak is None and r.get('ic_seeds'):
+            s_peaks = [v.get('peak_rss_mb') for v in (r['ic_seeds'].get('results') or {}).values()
+                       if v.get('peak_rss_mb') is not None]
+            peak = max(s_peaks) if s_peaks else None
         lines.append(f"  {r.get('suffix')}: status={r.get('status')} {cells} peak_rss={peak} MB")
     for key in ('exp', 'prod', 'reuse', 'reuse_minus_exp', 'prod_minus_exp', 'prod_minus_ref',
                 'peak_rss_mb', 'save_s'):
@@ -839,19 +923,12 @@ def parse_args(argv=None):
         args.pot_lmax, args.pot_ngrid = 24, 184
     if args.pot_lmax < 0 or (args.pot_lmax % 2) != 0 or args.pot_ngrid < 4:
         parser.error('--pot-lmax must be an even integer >= 0 and --pot-ngrid >= 4')
-    if args.split_seeds is not None:
+    if args.ic_seeds is not None:
         try:
-            args.split_seeds = split_seeds(parse_seed_list(args.split_seeds), args.workers or 1)
+            args.ic_seeds = parse_seed_list(args.ic_seeds)
         except ValueError as error:
-            parser.error(f'--split-seeds: {error}')
-    elif args.summarize is None and args.list_models is None:
-        if not args.suffix or not args.orblib_dir:
-            parser.error('--suffix and --orblib-dir are required')
-        if args.ic_seeds is not None:
-            try:
-                args.ic_seeds = parse_seed_list(args.ic_seeds)
-            except ValueError as error:
-                parser.error(f'--ic-seeds: {error}')
+            parser.error(f'--ic-seeds: {error}')
+    if args.protocols is not None or (args.split_seeds is None and args.summarize is None and args.list_models is None):
         if args.protocols is None:
             args.protocols = 'exp' if args.ic_seeds else 'exp,reuse,prod'
         args.protocols = [p for p in args.protocols.split(',') if p]
@@ -860,6 +937,14 @@ def parse_args(argv=None):
             parser.error('--protocols: exp first, then any of reuse,prod (no repeats)')
         if args.ic_seeds and args.protocols != ['exp']:
             parser.error('--ic-seeds runs the exp protocol only (no library is kept for reuse/prod)')
+    if args.split_seeds is not None:
+        try:
+            args.split_seeds = split_seeds(parse_seed_list(args.split_seeds), args.workers or 1)
+        except ValueError as error:
+            parser.error(f'--split-seeds: {error}')
+    elif args.summarize is None and args.list_models is None:
+        if not args.suffix or not args.orblib_dir:
+            parser.error('--suffix and --orblib-dir are required')
         args.report = args.report or f'report_{args.suffix}.json'
     return args
 

@@ -395,6 +395,10 @@ Tests: `tests/test_single_model.py` (`*seed*`).
   `mean_minus_ref` (+ in std, fraction of seeds ≤ ref), `seed42_penalty`,
   `distinct_penalties`/`identical_realisations`, orbit/wall time,
   `omp_threads`, `models_per_hour` (layout throughput) and the per-seed table.
+  When reports come from ≥ 2 distinct models (e.g. a paired `--models=FILE --ic-seeds=SPEC`
+  batch on `tycho`), `seed_scan` also includes `by_model` (per-model statistics) and
+  `paired` (paired differences `dp = P(m_i) − P(m_0)` and `dups` across common `ok` seeds,
+  with `mean/std/SEM`, `q16/median/q84`, `ref_dp`, `fraction_gt_zero` and `n_for_sem_0p01`).
 - Upload: seed files (failure ⇒ exit code 1), reports, summary, logs →
   `galAgama/seed_scan/seeds_d1_nb250_gh0_ser0_i<incl>_<TS>/`; nothing to `galAgama/`
   (pool) or to the catalog. Memory protections, watchdogs, shutdown as §3b.
@@ -481,14 +485,24 @@ limit), `trajsize=1000`, no libraries, old bounds, canonical `4Ups*` pool.
 Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
 
 - `bash launch_tycho.sh --preflight`, then `bash launch_tycho.sh [--incl=90.0]
-  [--Q1] [--models=FILE] [--memory-gb=N] [--nproc=1] [--threads=N] [--resume]
-  [--orblib-dir=DIR] [--no-save-orblib] [--no-sync] [--offline]`. Run it in tmux
-  or with `loginctl enable-linger`: without linger the user scope dies at logout
-  (preflight warns). With `--models=FILE`, `run_single_model.py --protocols exp`
-  evaluates each row of `FILE` sequentially inside the single scope (default
-  `MemoryMax=8 GiB`, `threads=nproc/4`, libraries saved in `orblib/`), writes
-  `summary_multi_<TS>.txt` and `out_<host>_d1_nb250_gh0_ser0_multi<TS>m<i>.txt`
-  pool files, and with `--offline` bundles them into `tycho_results_*.tar.gz`.
+  [--Q1] [--l24] [--models=FILE] [--ic-seeds=SPEC] [--protocols=LIST] [--memory-gb=N]
+  [--nproc=1] [--threads=N] [--resume] [--orblib-dir=DIR] [--no-save-orblib]
+  [--no-sync] [--offline]`. Run it in tmux or with `loginctl enable-linger`:
+  without linger the user scope dies at logout (preflight warns). With
+  `--models=FILE`, `run_single_model.py` evaluates each row of `FILE`
+  sequentially inside the single scope (default `MemoryMax=8 GiB`,
+  `threads=nproc/4`, libraries saved in `orblib/`), writes
+  `summary_multi_<TS>.txt/.json` (including `run_single_model.py --summarize`)
+  and `out_<host>_<EXP_ID>_multi<TS>m<i>.txt` pool files, and with `--offline`
+  bundles them into `tycho_results_*.tar.gz`. Adding `--ic-seeds=SPEC` (e.g.
+  `--ic-seeds=1-20`) runs all seeds of each model in one Python process with
+  `SAVE_ORBLIB=0`, writes `seeds_*_multi<TS>m<i>.txt/.tsv` and paired `dP`
+  statistics to `results/logs/seed/seeds_multi_<EXP_ID>_n<N>_<TS>/` without
+  touching `results/out_<host>_*.txt`. Adding `--protocols=exp,reuse,prod`
+  checks full-library `Upsilon` (`prod`) against `exp` on existing `.npz`
+  libraries and archives `out_*_multi*` / `single_*_multi*` in
+  `results/logs/multi_<EXP_ID>_n<N>_<TS>/` without duplicating rows in
+  `results/out_<host>_*.txt`.
 - Budget: the launcher re-execs itself in ONE transient `systemd-run --user
   --scope` (`agama-tycho-<EXP_ID>_i<incl>-<TS>.scope`), so workers, merge and
   rclone share it: `CPUQuota = threads×100 %` (default threads `nproc/4`),

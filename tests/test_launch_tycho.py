@@ -29,16 +29,27 @@ exec "$@"
     'python': r'''#!/bin/bash
 if [ "$1" = "-c" ]; then exit "${PY_IMPORT_FAIL:-0}"; fi
 echo "python $* OMP=$OMP_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS" >> "$HOME/events"
-sfx=""; q1=""; pot=""; prev=""; rep=""
+sfx=""; q1=""; pot=""; prev=""; rep=""; seedf=""; prots=""
 for a in "$@"; do
     [ "$prev" = "--suffix" ] && sfx="$a"
     [ "$prev" = "--report" ] && rep="$a"
+    [ "$prev" = "--seed-file" ] && seedf="$a"
+    [ "$prev" = "--protocols" ] && prots="$a"
     [ "$a" = "--Q1" ] && q1="Q1"
     [ "$a" = "--l24" ] && pot="_l24n184"
     prev="$a"
 done
 exp="${q1}d1_nb250_gh0${pot}_ser0"
-echo "90.0 0.27 0 2.4 90 0.66 1.25${sfx} t" >> "out_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
+if [ -n "$seedf" ]; then
+    echo "# ic_seed: 1" >> "$seedf"
+    echo "90.0 0.27 0 2.4 90 0.66 1.25${sfx} t" >> "$seedf"
+    echo -e "seed\tstatus" > "${seedf%.txt}.tsv"
+else
+    echo "90.0 0.27 0 2.4 90 0.66 1.25${sfx} t" >> "out_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
+    if [ -n "$prots" ] && [ "$prots" != "exp" ]; then
+        echo "90.0 0.27 0 2.4 90 0.66 1.25${sfx} t" >> "single_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
+    fi
+fi
 echo "log" > "log_${HOSTNAME_SUFFIX}_${exp}_${sfx}.txt"
 if [ -n "$rep" ]; then
     echo "{\"status\": \"ok\", \"suffix\": \"$sfx\"}" > "$rep"
@@ -417,3 +428,86 @@ def test_l24_search_writes_isolated_history_in_git_results(tmp_path):
     assert '--l24' in argv and '--offline' in argv
     merged = results / 'out_testhost_d1_nb250_gh0_l24n184_ser0.txt'
     assert merged.exists() and '1.25p0' in merged.read_text()
+
+
+def test_models_ic_seeds_runs_paired_batch_and_routes_to_logs_seed(tmp_path):
+    models_text = (
+        '90.000 0.267579 0.0 2.415367 90.27929 0.66275 1.44362 2026-10-22 22:04:15  # m0_freeQ\n'
+        '90.000 1.000000 0.0 28.03331 43.45350 0.46579 1.52990 2026-10-16 04:19:35  # m1_Q1\n'
+    )
+    remote = tmp_path / 'remote.git'
+    results = tmp_path / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    mdir = results / 'logs/Q1d1_rh_bounds'
+    mdir.mkdir(parents=True)
+    (mdir / 'models_finalists.txt').write_text(models_text)
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+
+    result, events, work = run(tmp_path, '--threads=4', '--l24', '--models=models_finalists.txt',
+                               '--ic-seeds=1-20', TYCHO_MIN_FREE_GB='1000000000')
+    assert result.returncode == 0, output(result)
+    runs = pythons(events)
+    assert len(runs) == 2
+    for i, r in enumerate(runs):
+        assert '--l24' in r
+        assert r[r.index('--ic-seeds') + 1] == '1-20'
+        assert r[r.index('--protocols') + 1] == 'exp'
+        assert r[r.index('--seed-file') + 1].endswith(f'seeds_testhost_d1_nb250_gh0_l24n184_ser0_multi20261010_120000m{i}.txt')
+    assert not list(results.glob('out_testhost_*.txt'))
+    assert not list(work.glob('seeds_*')) and not list(work.glob('out_*'))
+    seed_dir = results / 'logs/seed/seeds_multi_d1_nb250_gh0_l24n184_ser0_n2_20261010_120000'
+    assert seed_dir.is_dir()
+    assert len(list(seed_dir.glob('seeds_testhost_*.txt'))) == 2
+    assert len(list(seed_dir.glob('seeds_testhost_*.tsv'))) == 2
+    assert (seed_dir / 'summary_multi_20261010_120000.json').exists()
+    assert (seed_dir / 'models_finalists.txt').exists()
+
+
+def test_models_protocols_check_keeps_pool_clean_and_archives_side_files(tmp_path):
+    models_text = (
+        '90.000 0.267579 0.0 2.415367 90.27929 0.66275 1.44362 2026-10-22 22:04:15  # m0_freeQ\n'
+        '90.000 1.000000 0.0 28.03331 43.45350 0.46579 1.52990 2026-10-16 04:19:35  # m1_Q1\n'
+    )
+    remote = tmp_path / 'remote.git'
+    results = tmp_path / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    (results / 'models_finalists.txt').write_text(models_text)
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+
+    result, events, work = run(tmp_path, '--threads=4', '--l24', '--models=models_finalists.txt',
+                               '--protocols=exp,reuse,prod')
+    assert result.returncode == 0, output(result)
+    runs = pythons(events)
+    assert len(runs) == 2
+    for r in runs:
+        assert '--l24' in r and r[r.index('--protocols') + 1] == 'exp,reuse,prod'
+    assert not list(results.glob('out_testhost_*.txt'))
+    assert not list(work.glob('out_*')) and not list(work.glob('single_*'))
+    log_dir = results / 'logs/multi_d1_nb250_gh0_l24n184_ser0_n2_20261010_120000'
+    assert len(list(log_dir.glob('out_testhost_*_multi*.txt'))) == 2
+    assert len(list(log_dir.glob('single_testhost_*_multi*.txt'))) == 2
+    assert (log_dir / 'summary_multi_20261010_120000.json').exists()
+
+
+@pytest.mark.parametrize('extra_args', [
+    ('--ic-seeds=1-20',),
+    ('--protocols=exp,prod',),
+    ('--models=models.txt', '--ic-seeds=0'),
+    ('--models=models.txt', '--ic-seeds=1-20', '--protocols=exp,prod'),
+])
+def test_ic_seeds_and_protocols_reject_invalid_combinations(tmp_path, extra_args):
+    def setup(work):
+        (work / 'models.txt').write_text(
+            '90.0 1.0 0.0 25.0 36.0 0.6003 1.7581 2026-10-06 14:42:52  # m0\n')
+    result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=setup)
+    assert result.returncode == 2 and not events
