@@ -476,3 +476,24 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   points (`Q != 1`) with orbits and penalties recomputed in `N=184, lmax=24`. For `Q == 1.0`,
   `orblib_key` omits `_l24n184` and `--Q1` reads `Q1d1` history, so existing `Q=1` penalties
   and `.npz` libraries remain reusable without recomputation.
+
+## 2026-10-26 — Finalist batch: library check fix and seed-scan isolation (agent, user request)
+
+- **Bug** (run `…_n2_20261025_225604`) | the runner's final store check compared a deeply
+  valid, pre-existing but never registered library with the `claim()` placeholder
+  (`state=building`, size/MD5 NULL) and failed both reports after all protocols completed.
+- **Fix** | a placeholder of a library only read in this run is reported as
+  `store_registered=false`, `store_consistent=null` and is not a failure. Still fatal:
+  deep metadata failure, a non-null size/MD5 mismatch, and a library saved by this run
+  without registration. The Store itself and its records are unchanged (no implicit
+  registration of old files).
+- **Control mode** | `launch_tycho.sh --models … --protocols≠exp` passes the new runner flag
+  `--require-library` (stop before work if the file is missing; fail if a protocol
+  integrated instead of reusing). Reports carry `requested_potential` /
+  `potential_provenance`; Q=1 names omit the potential tag, so a reused Q=1 library under
+  `--l24` is labelled `unknown_shared_q1_key`, not L24.
+- **Seed mode** | `--ic-seeds` uses an isolated `orblib_seed/<TS>_m<i>/` store directory
+  (fresh integrations, no save/reuse), so the working `orblib/.storage` gets no records.
+- **Summary** | `distinct_models` is reported; the std across different models is not used
+  as realisation scatter (`prod_minus_ref_in_scatter` omitted).
+- Mocked tests only; the seed scan itself is run by the user on tycho.

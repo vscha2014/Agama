@@ -387,6 +387,106 @@ def test_driver_routes_rows_and_reports_failures(tmp_path, monkeypatch, scenario
     assert mod.number_of_h_IC_lw == 0 and mod.best_overall_target == -float('inf')
 
 
+class RowStore(FakeStore):
+    def __init__(self, row):
+        super().__init__()
+        self._row = row
+
+    def row(self, name):
+        return self._row
+
+
+PLACEHOLDER = dict(state='building', size=None, md5=None)
+
+
+@pytest.mark.parametrize('scenario, row, exp_reused, require, expected', [
+    ('existing_unregistered', PLACEHOLDER, True, False, (0, 'ok', None)),
+    ('registered_match', dict(state='ready', size=1, md5='md5'), True, False, (0, 'ok', None)),
+    ('real_mismatch', dict(state='ready', size=1, md5='other'), True, False,
+     (1, 'failed', 'size/MD5 differ')),
+    ('saved_unregistered', PLACEHOLDER, False, False, (1, 'failed', 'not registered')),
+    ('require_integrated', PLACEHOLDER, False, True, (1, 'failed', 'integrated, not reused')),
+])
+def test_library_check_accepts_unregistered_reuse_and_keeps_real_failures(
+        tmp_path, monkeypatch, scenario, row, exp_reused, require, expected):
+    monkeypatch.chdir(tmp_path)
+    write_history(tmp_path)
+    store = RowStore(row)
+    mod, _ = stub_module(tmp_path, lambda call, mod: write_block(
+        mod, 1.2 + call * 0.01, reused=exp_reused or call > 1))
+    runner.prepare_module(mod, store)
+    argv = ['--suffix', 'singleTr0', '--orblib-dir', str(tmp_path / 'o'),
+            '--report', str(tmp_path / 'report.json')] + (['--require-library'] if require else [])
+    args = runner.parse_args(argv)
+    (tmp_path / 'lib.npz').write_bytes(b'x')
+    report = runner.base_report(args, runner.resolve_reference(args))
+    report['orblib'] = dict(name='lib.npz', path=str(tmp_path / 'lib.npz'))
+    checks = SimpleNamespace(StorageStop=storage.StorageStop, file_hash=lambda path: 'md5',
+                             metadata=lambda path, deep: dict(numOrbits=10))
+    code = runner.execute(mod, args, report, store, lambda seed: ('rng', seed), checks)
+    saved = json.loads(Path(args.report).read_text())
+    assert (code, saved['status']) == expected[:2], saved
+    if expected[2] is None:
+        assert saved['error'] is None
+    else:
+        assert expected[2] in saved['error']
+    library = saved['orblib']
+    assert library['store_registered'] is (row['size'] is not None)
+    if row is PLACEHOLDER:
+        assert library['store_consistent'] is None and library['store_state'] == 'building'
+
+
+def test_require_library_stops_before_any_work_and_reports_provenance(tmp_path, monkeypatch):
+    lib_dir = tmp_path / 'orblib'
+    lib_dir.mkdir()
+    script = tmp_path / 'script.py'
+    script.write_text(
+        "import os\n"
+        "bounds_original = dict(Q=(0.05, 2.5), gh=(0.0, 1.6), rh=(0.5, 30.0), rho0=(10.0, 120.0))\n"
+        f"ORBLIB_DIR = {str(lib_dir)!r}\n"
+        "POT_LMAX, POT_NGRID, POT_TAG = 24, 184, '_l24n184'\n"
+        "gridx_max, gridy_max, gridx_min, gridy_min, q_ap = 2.0, 1.4, 0.01, 0.02, 0.69\n"
+        "bound_circR = [[0.0], [1.99], [0.0], [2.0]]\n"
+        "EXP_ID, hostname_proc, GEOM_HASH, EVALUATION_CONTEXT = 'd1_nb250_gh0_l24n184_ser0', 'h', 'abcdef12', 'c'\n"
+        "sectAPP, DOUBLE, N_BIN, datasets = [0] * 25, True, 250, []\n"
+        "def orblib_key(Q, gh, rh, rho0):\n"
+        "    tag = '' if Q == 1.0 else POT_TAG\n"
+        "    name = f'orblib_i90.0_d1_nb250_ser0{tag}_geomabcdef12_0123456789.npz'\n"
+        "    return name, os.path.join(ORBLIB_DIR, name)\n")
+    monkeypatch.setattr(runner, 'EXP_SCRIPT', str(script))
+    monkeypatch.setattr(sys, 'argv', list(sys.argv))
+    monkeypatch.syspath_prepend(str(ROOT / 'py'))
+    monkeypatch.chdir(tmp_path)
+    args = runner.parse_args(['--suffix', 's', '--orblib-dir', str(lib_dir), '--report',
+                              str(tmp_path / 'report.json'), '--Q', '1.0', '--gh', '0', '--rh', '28.0',
+                              '--rho0', '43.45', '--ref-penalty', '1.53', '--require-library'])
+    assert runner.run(args) == 2
+    report = json.loads((tmp_path / 'report.json').read_text())
+    assert report['status'] == 'failed' and '--require-library' in report['error']
+    assert report['orblib']['potential_provenance'] == 'unknown_shared_q1_key'
+    assert report['orblib']['requested_potential'] == 'l24n184'
+    assert not (lib_dir / '.storage').exists()
+    assert 'library provenance=unknown_shared_q1_key' in (tmp_path / 'report.txt').read_text()
+    with pytest.raises(SystemExit):
+        runner.parse_args(['--suffix', 's', '--orblib-dir', 'o', '--ic-seeds', '1-3', '--require-library'])
+    assert runner.potential_provenance(SimpleNamespace(POT_LMAX=24, POT_NGRID=184, POT_TAG='_l24n184'),
+                                       'orblib_x_l24n184_geom_y.npz')['potential_provenance'] == 'matches_requested'
+    assert runner.potential_provenance(SimpleNamespace(), 'orblib_x.npz')['potential_provenance'] == 'baseline'
+
+
+def test_summary_does_not_turn_model_differences_into_scatter(tmp_path):
+    paths = []
+    for i, (q, rh) in enumerate(((0.27, 2.4), (1.0, 28.0))):
+        path = fake_report(tmp_path / f'r{i}.json', f'm{i}', 1.44 + 0.09 * i, 1.44 + 0.09 * i, 3400)
+        data = json.loads(path.read_text())
+        data.update(incl=90.0, params=dict(Q=q, gh=0.0, rh=rh, rho0=50.0))
+        path.write_text(json.dumps(data))
+        paths.append(path)
+    reports, summary = runner.summarize(paths)
+    assert summary['distinct_models'] == 2 and summary.get('prod_minus_ref_in_scatter') is None
+    assert 'distinct_models: 2' in runner.format_summary(reports, summary)
+
+
 def test_block_parser_reads_the_last_block_of_the_server(tmp_path):
     path = tmp_path / 'out.txt'
     path.write_text('# Server: other\n90 1 0 2 9 0.5 9.9 d t\n# End of history\n'

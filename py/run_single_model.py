@@ -422,10 +422,45 @@ def check_library(storage, store, name, path):
     except Exception as error:
         info['metadata_ok'], info['metadata_error'] = False, repr(error)
     row = store.row(name) if store is not None else None
+    info['store_registered'] = False
     if row is not None:
         info['store_state'], info['store_size'], info['store_md5'] = row['state'], row['size'], row['md5']
-        info['store_consistent'] = (row['size'] == info['size'] and row['md5'] == info['md5'])
+        if row['size'] is None and row['md5'] is None:
+            # claim() placeholder of a library that was only read in this run:
+            # nothing recorded to compare with, which is not a mismatch.
+            info['store_consistent'] = None
+        else:
+            info['store_registered'] = True
+            info['store_consistent'] = (row['size'] == info['size'] and row['md5'] == info['md5'])
     return info
+
+
+def library_failure(report):
+    """Reason the library check fails the run, or None. A real size/MD5 mismatch
+    and a library saved by this run without registration stay fatal; a
+    pre-existing library that the store never registered is not."""
+    library = report['orblib']
+    if not library.get('metadata_ok'):
+        return 'library failed the metadata check'
+    if library.get('store_consistent') is False:
+        return 'library size/MD5 differ from the store record'
+    if (report['protocols'].get('exp', {}).get('saved') and 'store_state' in library
+            and not library.get('store_registered')):
+        return 'library saved by this run is not registered in the store'
+    return None
+
+
+def potential_provenance(mod, name):
+    """Requested potential vs what the library name proves about the matrices."""
+    requested = f"l{int(getattr(mod, 'POT_LMAX', 4))}n{int(getattr(mod, 'POT_NGRID', 23))}"
+    tag = getattr(mod, 'POT_TAG', '')
+    if not tag:
+        state = 'baseline'
+    elif tag in name:
+        state = 'matches_requested'
+    else:
+        state = 'unknown_shared_q1_key'
+    return dict(requested_potential=requested, potential_provenance=state)
 
 
 def write_report(report, path):
@@ -476,7 +511,11 @@ def format_report(report):
     if library and not scan:
         lines.append(f"  orblib {library.get('name')} exists={library.get('exists')} "
                      f"size={library.get('size')} md5={library.get('md5')} "
-                     f"metadata_ok={library.get('metadata_ok')} store_consistent={library.get('store_consistent')}")
+                     f"metadata_ok={library.get('metadata_ok')} store_consistent={library.get('store_consistent')} "
+                     f"store_registered={library.get('store_registered')}")
+        if library.get('potential_provenance'):
+            lines.append(f"  potential: requested={library.get('requested_potential')} "
+                         f"library provenance={library['potential_provenance']}")
     if report.get('error'):
         lines.append(f"  error: {report['error']}")
     return '\n'.join(lines) + '\n'
@@ -495,6 +534,8 @@ def execute(mod, args, report, store, rng_factory, storage):
             print(f'[single] protocol {protocol}', flush=True)
             report['protocols'][protocol] = run_protocol(
                 mod, protocol, params, files, args.subsample_seed, rng_factory)
+            if getattr(args, 'require_library', False) and not report['protocols'][protocol]['reused']:
+                raise ProtocolError(f'{protocol}: --require-library, but library {name} was integrated, not reused')
             report['deltas'] = compute_deltas(report)
             write_report(report, args.report)
             if store.stopped():
@@ -506,10 +547,10 @@ def execute(mod, args, report, store, rng_factory, storage):
         traceback.print_exc()
         report['status'], report['error'], code = 'failed', repr(error), 1
     report['orblib'].update(check_library(storage, store, name, path))
-    if report['status'] == 'ok' and not (report['orblib'].get('metadata_ok')
-                                         and report['orblib'].get('store_consistent', True)):
+    failure = library_failure(report) if report['status'] == 'ok' else None
+    if failure:
         report['status'], code = 'failed', 1
-        report['error'] = 'saved library failed the metadata/store check'
+        report['error'] = failure
     report['deltas'] = compute_deltas(report)
     write_report(report, args.report)
     print(format_report(report), end='', flush=True)
@@ -647,6 +688,14 @@ def run(args):
     report['orblib'] = dict(name=name, path=path, exists=os.path.exists(path))
     if args.ic_seeds:
         report['orblib'].update(stored=False)
+    else:
+        report['orblib'].update(potential_provenance(mod, name))
+    if args.require_library and not report['orblib']['exists']:
+        report['status'] = 'failed'
+        report['error'] = f'--require-library: {name} is not in {mod.ORBLIB_DIR}'
+        write_report(report, args.report)
+        print(format_report(report), end='', flush=True)
+        return 2
     if args.preflight:
         report['status'] = 'preflight'
         write_report(report, args.report)
@@ -694,6 +743,10 @@ def summarize(paths):
     summary['save_s'] = _stats([r.get('protocols', {}).get('exp', {}).get('save_s') for r in reports])
     exp, prod = summary['exp'], summary['prod']
     scatter = (prod or {}).get('std') or (exp or {}).get('std')
+    summary['distinct_models'] = len({k for k in (_model_key(r) for r in reports) if k is not None})
+    if summary['distinct_models'] > 1:
+        # The std across different models is not the realisation scatter of one model.
+        scatter = None
     if prod and ref is not None and scatter:
         summary['prod_minus_ref_in_scatter'] = (prod['mean'] - ref) / scatter
     worst = (summary['peak_rss_mb'] or {}).get('max')
@@ -865,7 +918,7 @@ def format_summary(reports, summary):
     for key in ('exp', 'prod', 'reuse', 'reuse_minus_exp', 'prod_minus_exp', 'prod_minus_ref',
                 'peak_rss_mb', 'save_s'):
         lines.append(f"  {key}: {summary.get(key)}")
-    for key in ('prod_minus_ref_in_scatter', 'grid_identical', 'orblib_names', 'memory_verdict'):
+    for key in ('distinct_models', 'prod_minus_ref_in_scatter', 'grid_identical', 'orblib_names', 'memory_verdict'):
         lines.append(f"  {key}: {summary.get(key)}")
     if summary.get('seed_scan'):
         lines += format_seed_scan(summary['seed_scan'])
@@ -912,6 +965,9 @@ def parse_args(argv=None):
                         help='Refined multipole potential N=184, lmax=24 (--pot-lmax=24 --pot-ngrid=184)')
     parser.add_argument('--preflight', action='store_true',
                         help='Import, report geometry and library name; no integration')
+    parser.add_argument('--require-library', action='store_true',
+                        help='Only evaluate an existing local library: stop before any work if it is '
+                             'missing, fail if a protocol integrated instead of reusing it')
     parser.add_argument('--summarize', nargs='+', default=None, metavar='REPORT',
                         help='Aggregate JSON reports (standard library only) and exit')
     parser.add_argument('--summary-json', default=None)
@@ -937,6 +993,8 @@ def parse_args(argv=None):
             parser.error('--protocols: exp first, then any of reuse,prod (no repeats)')
         if args.ic_seeds and args.protocols != ['exp']:
             parser.error('--ic-seeds runs the exp protocol only (no library is kept for reuse/prod)')
+    if args.require_library and args.ic_seeds:
+        parser.error('--require-library contradicts --ic-seeds (every seed is a fresh integration)')
     if args.split_seeds is not None:
         try:
             args.split_seeds = split_seeds(parse_seed_list(args.split_seeds), args.workers or 1)

@@ -458,6 +458,8 @@ def test_models_ic_seeds_runs_paired_batch_and_routes_to_logs_seed(tmp_path):
         assert r[r.index('--ic-seeds') + 1] == '1-20'
         assert r[r.index('--protocols') + 1] == 'exp'
         assert r[r.index('--seed-file') + 1].endswith(f'seeds_testhost_d1_nb250_gh0_l24n184_ser0_multi20261010_120000m{i}.txt')
+        assert r[r.index('--orblib-dir') + 1] == str(work / f'orblib_seed/20261010_120000_m{i}')
+        assert '--require-library' not in r
     assert not list(results.glob('out_testhost_*.txt'))
     assert not list(work.glob('seeds_*')) and not list(work.glob('out_*'))
     seed_dir = results / 'logs/seed/seeds_multi_d1_nb250_gh0_l24n184_ser0_n2_20261010_120000'
@@ -491,6 +493,7 @@ def test_models_protocols_check_keeps_pool_clean_and_archives_side_files(tmp_pat
     assert len(runs) == 2
     for r in runs:
         assert '--l24' in r and r[r.index('--protocols') + 1] == 'exp,reuse,prod'
+        assert '--require-library' in r and r[r.index('--orblib-dir') + 1] == str(work / 'orblib')
     assert not list(results.glob('out_testhost_*.txt'))
     assert not list(work.glob('out_*')) and not list(work.glob('single_*'))
     log_dir = results / 'logs/multi_d1_nb250_gh0_l24n184_ser0_n2_20261010_120000'

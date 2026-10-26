@@ -647,8 +647,14 @@ if [ -n "$MODELS_FILE" ]; then
         sfx="${M_SUFFIXES[i]}"
         proc_log="${WORK_DIR}/runlog_m${i}_${RUN_TAG}_${TIMESTAMP}.log"
         declare -a MODEL_EXTRA=()
+        model_orblib="$ORBLIB_DIR"
         if [ "$SEED_MODE" -eq 1 ]; then
+            # Свежие интеграции без сохранения: отдельный каталог, чтобы claim()
+            # не оставлял записей в хранилище рабочих библиотек orblib/.
+            model_orblib="${WORK_DIR}/orblib_seed/${TIMESTAMP}_m${i}"
             MODEL_EXTRA+=(--ic-seeds "$SEED_SPEC" --seed-file "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_${sfx}.txt")
+        elif [ "$PROTOCOLS" != "exp" ]; then
+            MODEL_EXTRA+=(--require-library)
         fi
         log "  m${i}: incl=${M_INCL[i]} Q=${M_Q[i]} gh=${M_GH[i]} rh=${M_RH[i]} rho0=${M_RHO0[i]} (${M_SRC[i]}) suffix=${sfx}"
         OMP_NUM_THREADS="$THREADS_PER_PROC" MKL_NUM_THREADS="$THREADS_PER_PROC" \
@@ -661,7 +667,7 @@ if [ -n "$MODELS_FILE" ]; then
                 --ref-source "${M_SRC[i]}" \
                 --protocols "$PROTOCOLS" \
                 --suffix "${sfx}" \
-                --orblib-dir "${ORBLIB_DIR}" \
+                --orblib-dir "${model_orblib}" \
                 --report "${WORK_DIR}/${M_REPORTS[i]}" \
                 --n_threads "$THREADS_PER_PROC" \
                 ${SINGLE_EXTRA[@]+"${SINGLE_EXTRA[@]}"} \

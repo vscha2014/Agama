@@ -498,11 +498,25 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
   `--ic-seeds=1-20`) runs all seeds of each model in one Python process with
   `SAVE_ORBLIB=0`, writes `seeds_*_multi<TS>m<i>.txt/.tsv` and paired `dP`
   statistics to `results/logs/seed/seeds_multi_<EXP_ID>_n<N>_<TS>/` without
-  touching `results/out_<host>_*.txt`. Adding `--protocols=exp,reuse,prod`
+  touching `results/out_<host>_*.txt`. Seed mode uses an isolated
+  `orblib_seed/<TS>_m<i>/` store directory, so its claims never add records
+  to the working `orblib/.storage`. Adding `--protocols=exp,reuse,prod`
   checks full-library `Upsilon` (`prod`) against `exp` on existing `.npz`
-  libraries and archives `out_*_multi*` / `single_*_multi*` in
-  `results/logs/multi_<EXP_ID>_n<N>_<TS>/` without duplicating rows in
-  `results/out_<host>_*.txt`.
+  libraries (runner `--require-library`: stop before any work if the file is
+  missing, fail if a protocol integrated instead of reusing) and archives
+  `out_*_multi*` / `single_*_multi*` in `results/logs/multi_<EXP_ID>_n<N>_<TS>/`
+  without duplicating rows in `results/out_<host>_*.txt`.
+- Runner library check (`check_library` / `library_failure`): deep metadata
+  failure and a non-null size/MD5 mismatch are fatal; so is a library saved by
+  this run whose store record is still a `claim()` placeholder. A pre-existing
+  library that was only read leaves a `state=building`, size/MD5 NULL
+  placeholder: reported as `store_registered=false`, `store_consistent=null`,
+  not a failure (bug of run 2026-10-25). The report also records
+  `requested_potential` and `potential_provenance` (`matches_requested`,
+  `baseline`, `unknown_shared_q1_key`): Q=1 library names omit the potential
+  tag, so a reused Q=1 library under `--l24` may hold N23/l4 matrices.
+  `--summarize` sets `distinct_models` and drops `prod_minus_ref_in_scatter`
+  when reports come from different models.
 - Budget: the launcher re-execs itself in ONE transient `systemd-run --user
   --scope` (`agama-tycho-<EXP_ID>_i<incl>-<TS>.scope`), so workers, merge and
   rclone share it: `CPUQuota = threads×100 %` (default threads `nproc/4`),
