@@ -42,6 +42,14 @@ MODELS_FILE=""
 SEED_SPEC=""
 SEED_MODE=0
 PROTOCOLS="exp"
+QPROFILE=0
+QP_GRID=""
+QP_ENDPOINTS="models_finalists_q1_freeq.txt"
+QP_PRIORS=""
+QP_NO_PRIORS=0
+QP_RESUME=""
+QP_SAVE_BELOW="3.5"
+QP_OPTS_SET=0
 MEMORY_GB=""
 RESULTS_DIR="${RESULTS_DIR:-}"
 GIT_RESULTS_MODE="${GIT_RESULTS:-auto}"
@@ -65,8 +73,15 @@ for arg in "$@"; do
                 '                      библиотеки .npz не сохраняются, результаты → results/logs/seed/.' \
                 '  --protocols=LIST    Протоколы для --models=FILE (по умолчанию exp; например exp,reuse,prod' \
                 '                      для проверки полного поиска Upsilon на готовых .npz без записи в пул out_*).' \
+                '  --q-profile         Профиль penalty по Q (run_q_profile.py, всегда --l24, seed AGAMA 42,' \
+                '                      строки в qprofile_*, .npz с penalty <= --save-below в общий orblib/).' \
+                '    --endpoints=FILE  Финалисты (Q<1 и Q=1; по умолчанию models_finalists_q1_freeq.txt).' \
+                '    --prior-points=F  Известные seed-42 оценки (по умолчанию qprofile_prior_points.txt, если найден);' \
+                '    --no-prior-points без них.  --q-grid=LIST  Сетка Q (по умолчанию low,0.30,…,1.0).' \
+                '    --resume-profile=DIR  Продолжить профиль (имя каталога в results/logs/qprofile/ или путь).' \
+                '    --save-below=P    Порог penalty для сохранения .npz (по умолчанию 3.5).' \
                 '  --memory-gb=N       Явный лимит MemoryMax в GiB (по умолчанию MemTotal/4' \
-                '                      для поиска и 8 GiB для --models=FILE).' \
+                '                      для поиска и 8 GiB для --models=FILE и --q-profile).' \
                 '  --results-dir=D     Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
                 '  --git-results       Синхронизировать историю и логи через git-репозиторий results (без rclone).' \
                 '  --no-git-results    Отключить автопереключение на ../results и использовать rclone.' \
@@ -96,6 +111,13 @@ for arg in "$@"; do
         --models=*)        MODELS_FILE="${arg#*=}" ;;
         --ic-seeds=*)      SEED_SPEC="${arg#*=}" ;;
         --protocols=*)     PROTOCOLS="${arg#*=}" ;;
+        --q-profile)       QPROFILE=1 ;;
+        --q-grid=*)        QP_GRID="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --endpoints=*)     QP_ENDPOINTS="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --prior-points=*)  QP_PRIORS="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --no-prior-points) QP_NO_PRIORS=1; QP_OPTS_SET=1 ;;
+        --resume-profile=*) QP_RESUME="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --save-below=*)    QP_SAVE_BELOW="${arg#*=}"; QP_OPTS_SET=1 ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)     GIT_RESULTS_MODE=1 ;;
@@ -153,6 +175,14 @@ TIMESTAMP="${TYCHO_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 [ -n "$ORBLIB_DIR" ] || ORBLIB_DIR="${WORK_DIR}/orblib"
 case "$ORBLIB_DIR" in /*) ;; *) ORBLIB_DIR="${WORK_DIR}/${ORBLIB_DIR}" ;; esac
 
+if [ "$QPROFILE" -eq 1 ]; then
+    if { [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; } && { [ "$POT_LMAX" -ne 24 ] || [ "$POT_NGRID" -ne 184 ]; }; then
+        echo "ОШИБКА: --q-profile считается только с --l24 (N=184, lmax=24)" >&2
+        exit 2
+    fi
+    L24=1; POT_LMAX=24; POT_NGRID=184
+fi
+
 # --- Валидация ---
 for _v in N_PROC THREADS TYCHO_MIN_FREE_GB TYCHO_STOP_GRACE TYCHO_MONITOR_INTERVAL POT_LMAX POT_NGRID; do
     if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
@@ -198,6 +228,71 @@ if [ -n "$SEED_SPEC" ]; then
     SAVE_ORBLIB=0
 fi
 
+# Поиск входного файла: как есть, в py/, в results/ и его logs-подкаталогах.
+resolve_input() {
+    local name="$1" cand
+    if [ -f "$name" ]; then
+        printf '%s/%s' "$(cd "$(dirname "$name")" && pwd)" "$(basename "$name")"
+        return 0
+    fi
+    for cand in "${WORK_DIR}/${name}" "${RESULTS_DIR}/${name}" "${RESULTS_DIR}/logs/${name}" \
+                "${RESULTS_DIR}/logs/qprofile/${name}" "${RESULTS_DIR}/logs/seed/${name}" \
+                "${RESULTS_DIR}/logs/Q1d1_rh_bounds/${name}" "${RESULTS_DIR}/Q1d1_rh_bounds/${name}"; do
+        if [ -f "$cand" ]; then
+            printf '%s/%s' "$(cd "$(dirname "$cand")" && pwd)" "$(basename "$cand")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+QP_IS_RESUME=0
+PROFILE_DIR=""
+PROFILE_NAME=""
+QP_STORE=""
+QP_PLAN=""
+if [ "$QPROFILE" -eq 0 ] && [ "$QP_OPTS_SET" -eq 1 ]; then
+    echo "ОШИБКА: --q-grid, --endpoints, --prior-points, --no-prior-points, --resume-profile и --save-below — только с --q-profile" >&2
+    exit 2
+fi
+if [ "$QPROFILE" -eq 1 ]; then
+    if [ -n "$MODELS_FILE" ] || [ -n "$SEED_SPEC" ] || [ "$PROTOCOLS" != "exp" ] || [ "$Q1" -eq 1 ] \
+            || [ "$RESUME" -eq 1 ] || [ "$N_PROC" -ne 1 ]; then
+        echo "ОШИБКА: --q-profile несовместим с --models, --ic-seeds, --protocols, --Q1, --resume (есть --resume-profile) и --nproc>1" >&2
+        exit 2
+    fi
+    if ! [[ "$QP_SAVE_BELOW" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+        echo "ОШИБКА: --save-below должно быть числом (получено: '${QP_SAVE_BELOW}')" >&2
+        exit 2
+    fi
+    [ "$SAVE_ORBLIB" -eq 0 ] && QP_SAVE_BELOW="-1"
+    if [ ! -f "${WORK_DIR}/run_q_profile.py" ] || [ ! -f "${WORK_DIR}/run_single_model.py" ]; then
+        echo "ОШИБКА: нужны ${WORK_DIR}/run_q_profile.py и run_single_model.py" >&2
+        exit 2
+    fi
+    if ! QP_ENDPOINTS="$(resolve_input "$QP_ENDPOINTS")"; then
+        echo "ОШИБКА: не найден файл финалистов --endpoints" >&2
+        exit 2
+    fi
+    if [ "$QP_NO_PRIORS" -eq 1 ]; then
+        QP_PRIORS=""
+    elif [ -n "$QP_PRIORS" ]; then
+        if ! QP_PRIORS="$(resolve_input "$QP_PRIORS")"; then
+            echo "ОШИБКА: не найден файл --prior-points" >&2
+            exit 2
+        fi
+    else
+        QP_PRIORS="$(resolve_input qprofile_prior_points.txt || true)"
+    fi
+    declare -a QP_INPUT_ARGS=(--incl "$INCL" --endpoints "$QP_ENDPOINTS")
+    [ -n "$QP_PRIORS" ] && QP_INPUT_ARGS+=(--prior-points "$QP_PRIORS")
+    [ -n "$QP_GRID" ] && QP_INPUT_ARGS+=(--q-grid "$QP_GRID")
+    if ! QP_PLAN="$(python3 "${WORK_DIR}/run_q_profile.py" --dry-run "${QP_INPUT_ARGS[@]}")"; then
+        echo "ОШИБКА: run_q_profile.py --dry-run отверг входные данные (финалисты, prior-точки или сетка Q)" >&2
+        exit 2
+    fi
+fi
+
 declare -a MODEL_ROWS=() M_INCL=() M_Q=() M_GH=() M_RH=() M_RHO0=() M_PEN=() M_UPS=() M_SRC=() M_SUFFIXES=() M_REPORTS=()
 NMODELS=0
 if [ -n "$MODELS_FILE" ]; then
@@ -241,7 +336,7 @@ fi
 
 _MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' "$TYCHO_MEMINFO" 2>/dev/null || echo 0)
 _DEFAULT_MEM_MAX=$(( _MEM_TOTAL_KB * 1024 / 4 ))
-[ -n "$MODELS_FILE" ] && _DEFAULT_MEM_MAX=$(( 8 * 1024 * 1024 * 1024 ))
+{ [ -n "$MODELS_FILE" ] || [ "$QPROFILE" -eq 1 ]; } && _DEFAULT_MEM_MAX=$(( 8 * 1024 * 1024 * 1024 ))
 MEM_MAX="${TYCHO_MEM_MAX:-$_DEFAULT_MEM_MAX}"
 if ! [[ "$MEM_MAX" =~ ^[0-9]+$ ]] || [ "$MEM_MAX" -lt $((1024 * 1024 * 1024)) ]; then
     echo "ОШИБКА: лимит памяти TYCHO_MEM_MAX='$MEM_MAX' байт (< 1 GiB или не число)" >&2
@@ -252,7 +347,9 @@ MEM_HIGH=$(( MEM_MAX / 10 * 9 ))
 EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
 [ "$Q1" -eq 1 ] && EXP_ID="Q1${EXP_ID}"
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
-if [ -n "$MODELS_FILE" ]; then
+if [ "$QPROFILE" -eq 1 ]; then
+    RUN_TAG="qprofile_${EXP_ID}_i${INCL_FMT}"
+elif [ -n "$MODELS_FILE" ]; then
     if [ "$SEED_MODE" -eq 1 ]; then
         RUN_TAG="seeds_multi_${EXP_ID}_n${NMODELS}"
     else
@@ -260,6 +357,31 @@ if [ -n "$MODELS_FILE" ]; then
     fi
 else
     RUN_TAG="${EXP_ID}_i${INCL_FMT}"
+fi
+if [ "$QPROFILE" -eq 1 ]; then
+    # Состояние профиля живёт сразу в results (git) или в py/qprofile (offline);
+    # --resume-profile продолжает тот же каталог новым запуском.
+    QP_BASE="${WORK_DIR}/qprofile"
+    [ "$GIT_RESULTS" -eq 1 ] && QP_BASE="${RESULTS_DIR}/logs/qprofile"
+    if [ -n "$QP_RESUME" ]; then
+        if [ -d "$QP_RESUME" ]; then
+            PROFILE_DIR="$(cd "$QP_RESUME" && pwd)"
+        elif [ -d "${QP_BASE}/${QP_RESUME}" ]; then
+            PROFILE_DIR="${QP_BASE}/${QP_RESUME}"
+        else
+            echo "ОШИБКА: --resume-profile: нет каталога '${QP_RESUME}' (ни как путь, ни в ${QP_BASE})" >&2
+            exit 2
+        fi
+        if [ ! -f "${PROFILE_DIR}/profile_state.json" ]; then
+            echo "ОШИБКА: --resume-profile: нет ${PROFILE_DIR}/profile_state.json" >&2
+            exit 2
+        fi
+        QP_IS_RESUME=1
+    else
+        PROFILE_DIR="${QP_BASE}/${RUN_TAG}_${TIMESTAMP}"
+    fi
+    PROFILE_NAME="$(basename "$PROFILE_DIR")"
+    QP_STORE="${WORK_DIR}/orblib_qprofile/${PROFILE_NAME}"
 fi
 UNIT="agama-tycho-${RUN_TAG//./p}-${TIMESTAMP}"
 LOGFILE="${WORK_DIR}/launch_tycho_${RUN_TAG}_${TIMESTAMP}.log"
@@ -329,6 +451,12 @@ preflight() {
             log "    m${i}: incl=${M_INCL[i]} Q=${M_Q[i]} gh=${M_GH[i]} rh=${M_RH[i]} rho0=${M_RHO0[i]}" \
                 "| ref penalty=${M_PEN[i]} Upsilon=${M_UPS[i]} (${M_SRC[i]})"
         done
+    fi
+    if [ "$QPROFILE" -eq 1 ]; then
+        log "  Режим --q-profile: каталог ${PROFILE_DIR} (resume=${QP_IS_RESUME}), store ${QP_STORE}," \
+            "общие .npz → ${ORBLIB_DIR} при penalty <= ${QP_SAVE_BELOW}"
+        log "    finalists: ${QP_ENDPOINTS}; priors: ${QP_PRIORS:-нет}"
+        while IFS= read -r _line; do log "    ${_line}"; done <<< "$QP_PLAN"
     fi
     activate_conda
     command -v "$PYTHON" > /dev/null 2>&1 || die "не найден $PYTHON"
@@ -542,6 +670,7 @@ upload() {
         fname="$(basename "$1")"
         local run_sub="logs/${RUN_TAG}_${TIMESTAMP}"
         [ "$SEED_MODE" -eq 1 ] && run_sub="logs/seed/${RUN_TAG}_${TIMESTAMP}"
+        [ "$QPROFILE" -eq 1 ] && run_sub="logs/qprofile/${PROFILE_NAME}"
         mkdir -p "${RESULTS_DIR}/${run_sub}"
         cp -Lf "$1" "${RESULTS_DIR}/${run_sub}/${fname}" 2>>"$LOGFILE" || return 1
         log "  ✓ Сохранено в results/${run_sub}/${fname}"
@@ -632,7 +761,51 @@ trap on_signal TERM INT
 export HOSTNAME_SUFFIX="$HOSTNAME_ENV" RCLONE_REMOTE NTFY_TOPIC NTFY_SERVER
 sync_from_results_git
 
-if [ -n "$MODELS_FILE" ]; then
+if [ "$QPROFILE" -eq 1 ]; then
+    mkdir -p "$PROFILE_DIR" "$ORBLIB_DIR"
+    monitor_loop &
+    MONITOR_PID=$!
+    QP_LOG="${WORK_DIR}/runlog_qprofile_${RUN_TAG}_${TIMESTAMP}.log"
+    log "Профиль по Q: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
+    declare -a QP_ARGS=("${QP_INPUT_ARGS[@]}" --state-dir "$PROFILE_DIR" --suffix "qprofile${TIMESTAMP}"
+                        --orblib-dir "$QP_STORE" --shared-orblib "$ORBLIB_DIR"
+                        --n_threads "$THREADS_PER_PROC" --save-below "$QP_SAVE_BELOW"
+                        --min-free-gb "$TYCHO_MIN_FREE_GB")
+    [ "$QP_IS_RESUME" -eq 1 ] && QP_ARGS+=(--resume)
+    OMP_NUM_THREADS="$THREADS_PER_PROC" MKL_NUM_THREADS="$THREADS_PER_PROC" \
+    OPENBLAS_NUM_THREADS="$THREADS_PER_PROC" NUMEXPR_NUM_THREADS="$THREADS_PER_PROC" \
+    OMP_PROC_BIND=close OMP_PLACES=cores \
+        nice -n 19 ionice -c 3 "$PYTHON" -u "${WORK_DIR}/run_q_profile.py" "${QP_ARGS[@]}" \
+        > >(trap '' INT TERM; exec tee -a "$QP_LOG") 2>&1 &
+    WPIDS=("$!")
+    qstart=$(date +%s)
+    while true; do
+        code=0
+        wait "${WPIDS[0]}" || code=$?
+        kill -0 "${WPIDS[0]}" 2>/dev/null || break
+    done
+    WCODES[0]=$code
+    elapsed=$(( $(date +%s) - qstart ))
+    case "$code" in
+        0)   log "  ✓ профиль завершён (wall ${elapsed} с)" ;;
+        75)  log "  ~ профиль остановлен штатно, состояние сохранено (wall ${elapsed} с); продолжить: --q-profile --resume-profile=${PROFILE_NAME}" ;;
+        137) log "  ✗ профиль убит (код 137: OOM по MemoryMax или KILL, wall ${elapsed} с); состояние на момент последней оценки — продолжить через --resume-profile=${PROFILE_NAME}" ;;
+        *)   log "  ✗ профиль завершён с кодом $code (wall ${elapsed} с)" ;;
+    esac
+    [ -n "$KILLER_PID" ] && kill "$KILLER_PID" 2>/dev/null || true
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+    log "Итоги ресурсов scope: memory.peak=$(cat "${CG_DIR}/memory.peak" 2>/dev/null || echo n/a)," \
+        "$(grep -E '^usage_usec' "${CG_DIR}/cpu.stat" 2>/dev/null || echo 'cpu.stat n/a')"
+    LOG_REMOTE="${REMOTE_DIR}/qprofile/${PROFILE_NAME}"
+    declare -a QP_FILES=("$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_qprofile${TIMESTAMP}.txt")
+    if [ "$GIT_RESULTS" -eq 0 ]; then
+        for f in "$PROFILE_DIR"/*; do QP_FILES+=("$f"); done
+    fi
+    for f in "${QP_FILES[@]}"; do
+        upload "$f" "$LOG_REMOTE"
+    done
+elif [ -n "$MODELS_FILE" ]; then
     rm -f "${ORBLIB_DIR}/.storage/STOP" 2>/dev/null || true
     SUMMARY="${WORK_DIR}/summary_multi_${TIMESTAMP}.txt"
     SUMMARY_JSON="${WORK_DIR}/summary_multi_${TIMESTAMP}.json"
@@ -852,7 +1025,14 @@ commit_and_push_results "Results ${RUN_TAG}_${TIMESTAMP} on ${HOSTNAME_ENV}" || 
 if [ "$OFFLINE" -eq 1 ]; then
     BUNDLE="${WORK_DIR}/tycho_results_${RUN_TAG}_${TIMESTAMP}.tar.gz"
     declare -a CARRY=()
-    if [ -n "$MODELS_FILE" ]; then
+    if [ "$QPROFILE" -eq 1 ]; then
+        for f in "$LOGFILE" "$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_qprofile${TIMESTAMP}.txt"; do
+            [ -f "$f" ] && CARRY+=("$(basename "$f")")
+        done
+        case "$PROFILE_DIR" in
+            "${WORK_DIR}"/*) CARRY+=("${PROFILE_DIR#"${WORK_DIR}"/}") ;;
+        esac
+    elif [ -n "$MODELS_FILE" ]; then
         for f in "${WORK_DIR}/out_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
                  "${WORK_DIR}/single_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"*.txt \
                  "${WORK_DIR}/seeds_${HOSTNAME_ENV}_${EXP_ID}_multi${TIMESTAMP}m"* \

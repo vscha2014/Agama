@@ -2,7 +2,7 @@
 
 Files: `py/Fornax_P21_PCA_w3Sersic_orblib_exp.py`, `py/launch_orblib_exp.sh`,
 `py/orblib_storage.py`, single-model check `py/run_single_model.py` +
-`py/launch_single_model.sh` (§3b), tests in `tests/test_orblib_q1.py`,
+`py/launch_single_model.sh` (§3b), Q profile `py/run_q_profile.py` (§3i), tests in `tests/test_orblib_q1.py`,
 `tests/test_orblib_storage.py`, `tests/test_single_model.py`. Production scripts are **not** part of this and
 must not be touched (see `../CONTRACT.md`, `production.md`).
 
@@ -485,7 +485,7 @@ limit), `trajsize=1000`, no libraries, old bounds, canonical `4Ups*` pool.
 Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
 
 - `bash launch_tycho.sh --preflight`, then `bash launch_tycho.sh [--incl=90.0]
-  [--Q1] [--l24] [--models=FILE] [--ic-seeds=SPEC] [--protocols=LIST] [--memory-gb=N]
+  [--Q1] [--l24] [--models=FILE] [--ic-seeds=SPEC] [--protocols=LIST] [--q-profile …, §3i] [--memory-gb=N]
   [--nproc=1] [--threads=N] [--resume] [--orblib-dir=DIR] [--no-save-orblib]
   [--no-sync] [--offline]`. Run it in tmux or with `loginctl enable-linger`:
   without linger the user scope dies at logout (preflight warns). With
@@ -583,6 +583,62 @@ When `${WORK_DIR}/../results/.git` is present (or `--git-results` / `--results-d
 - **Orbit libraries (`.npz`)**: kept locally on the VM/host (`DO_UPLOAD=0` in single/multi; `--offline` + `ORBLIB_LOCAL_STORE=1` in `launch_orblib_exp.sh` so local `Store` save slots, disk reserve and `STOP` markers still work without `rclone`). `.npz` and `.tar` are excluded by `results/.gitignore`.
 - **Merged per-host history (`out_<host>_<EXP_ID>.txt`, no symlinks) and run logs**: each worker writes its temporary `out_<host>_<EXP_ID>_<sfx>.txt` in `py/`; at finish (and on emergency) all per-worker files are merged via `append_and_remove` (`HASH:`) into the end of the regular file `RESULTS_DIR/out_<host>_<EXP_ID>.txt` (materialising any legacy symlink at that path first). Logs, reports, summaries and `MODELS_FILE` go directly to `RESULTS_DIR/logs/<RUN_TAG>_<TS>/` (for `--ic-seeds` — `RESULTS_DIR/logs/seed/<RUN_TAG>_<TS>/`), followed by `git add -A`, `git commit`, and `git push` (with up to 3 `git pull --rebase --autostash` retries).
 
+## 3i. Q profile (`run_q_profile.py`, `launch_tycho.sh --q-profile`)
+
+Profile of the penalty along the halo flattening Q (plan item 2 after the finalist seed
+scan; DECISIONS 2026-10-28). Diagnostic only: production and the search are unchanged.
+Tests: `tests/test_q_profile.py`, `tests/test_launch_tycho.py` (`*q_profile*`).
+
+- `bash launch_tycho.sh --q-profile [--endpoints=FILE] [--prior-points=FILE|--no-prior-points]
+  [--q-grid=LIST] [--save-below=3.5] [--resume-profile=DIR] [--preflight]`. Always `--l24`; refuses
+  `--models/--ic-seeds/--protocols/--Q1/--resume/--nproc>1`. Defaults: endpoints
+  `models_finalists_q1_freeq.txt`, priors `qprofile_prior_points.txt` (both looked up in `py/`,
+  `results/`, `results/logs/{qprofile,seed,Q1d1_rh_bounds}/`), MemoryMax 8 GiB, threads nproc/4.
+  Preflight and the start print `run_q_profile.py --dry-run` (grid, starts, priors, budget).
+- Grid (default) `low, 0.30, 0.35, 0.50, 0.65, 0.80, 0.90, 1.0`; must end at 1. `low` = the
+  lowest Q < 1 of the `pot=l24` priors (the Q29 seed-42 L24 point, which thus enters as data),
+  else the Q of the Q<1 finalist.
+- Evaluation: the harness is imported once (`--l24 --orblib-dir orblib_qprofile/<name>
+  --no-resume`, **no** `--save-orblib/--reuse-orblib`): an existing `.npz` of the same name
+  (another realisation) must not replace the seeded one, and the harness would save before
+  the penalty is known. Every evaluation: `agama.setRandomSeed(42)` + `exp` protocol of
+  `run_single_model.run_protocol` (CRN: all points share one IC realisation; seed 42 = the
+  default stream of a fresh process). Isolated store as in seed mode.
+- Search per Q in the unit cube (gh linear, rh and rho0 logarithmic over `bounds_original`,
+  no PCA): trust-region BO (GP on −log P of all points at that Q, qLogNEI with the branch's
+  points as baseline; TR 0.4, min 0.05, max 0.8, ×2 after 2 successes > 0.002, /2 after 3
+  failures; duplicate proposals count as failures without an evaluation).
+  Order: `compact@Q_low` (start = Q<1 finalist's gh, rh, rho0; first 4 extra points
+  rho0×{0.97, 0.985, 1.015, 1.03} → quadratic-residual smoothness check, logged only),
+  Sobol@Q_low, `extended@1` (Q=1 finalist), Sobol@1, then Sobol + `compact` for Q = 0.30 → 1
+  (start = compact best at the previous Q), then `extended` for Q = 0.90 → Q_low. Budget
+  (variant A): 10 evaluations per branch per Q, 6 Sobol per Q ⇒ 208 evaluations (~31 h at
+  540 s); a Sobol point farther than 0.25 from both branch bests and below 1.5 × their best
+  spawns `global@Q` (+10, max 288). Two branches closer than 0.05 with |ΔP| ≤ 0.01 ⇒ the later
+  one is `merged` and is not continued.
+- Priors (`--prior-points`, any history layout, label tokens `pot=l24|l4 protocol=… src=…`):
+  GP observations at their Q, no recomputation, no budget; a branch start equal to a prior
+  reuses it. Rows with Q off the grid are skipped; duplicates keep `pot=l24`.
+- Output (`results/logs/qprofile/<name>/` with git results, else `py/qprofile/<name>/`):
+  `profile_state.json` (atomic after every evaluation; config hash, runs with harness/driver
+  SHA256), `profile.tsv`, `qprofile_<hostname_proc>.txt` (standard blocks preceded by
+  `# qprofile: …` and `# ic_seed: 42`; no pool glob reads `qprofile_*`), `report_qprofile.json/.txt`
+  (`run_q_profile.py --summarize DIR`, stdlib), launcher/runlog/monitor logs.
+- Libraries: after the penalty is known, evaluations with penalty ≤ `--save-below` and Q ≠ 1
+  (Q=1 names carry no potential tag) are written by the driver (captured `agama.orbit`
+  inputs/outputs, `write_orblib_npz` + `HashingWriter`, metadata check, `os.link` → never
+  overwrites) into the shared `orblib/` under the standard L24 name; skipped if the name or
+  `.building` exists or free disk < `TYCHO_MIN_FREE_GB`. A later `--l24 --reuse-orblib` search
+  reuses them (penalty recomputed in ~1 min; the realisation is the seed-42 one).
+- Resume: `--q-profile --resume-profile=<name>` (same inputs; a changed grid/starts/priors/budget
+  is refused). An interrupted evaluation is recomputed deterministically. Exit 75 = stopped with
+  state saved, 1 = 5 consecutive failed evaluations or error.
+- Reading: profile = min over all points at Q; `barrier` = max interior profile − max of the
+  ends; `hysteresis` = both branches present and > 0.1 apart; `branch_switch_Q`. One seed:
+  shapes between neighbouring points are reliable, differences between distant parameters
+  carry the scatter of two independent realisations (√2 × the seed-scan sd) — decide on
+  re-evaluation with other seeds only after the run.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -593,10 +649,10 @@ When `${WORK_DIR}/../results/.git` is present (or `--git-results` / `--results-d
 
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
-    test_orblib_storage.py test_single_model.py test_launch_tycho.py \
+    test_orblib_storage.py test_single_model.py test_launch_tycho.py test_q_profile.py \
     --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
-    py/orblib_storage.py py/run_single_model.py tests/test_orblib_q1.py
+    py/orblib_storage.py py/run_single_model.py py/run_q_profile.py tests/test_orblib_q1.py
 bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
     && bash -n py/launch_multi_model.sh && bash -n py/launch_tycho.sh && git diff --check
 ```

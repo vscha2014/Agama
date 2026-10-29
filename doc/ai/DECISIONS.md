@@ -497,3 +497,34 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Summary** | `distinct_models` is reported; the std across different models is not used
   as realisation scatter (`prod_minus_ref_in_scatter` omitted).
 - Mocked tests only; the seed scan itself is run by the user on tycho.
+
+## 2026-10-28 — Q profile with common random numbers (user acting for the PI; plan item 2)
+
+- **Goal** | test whether the flattened (free-Q) and spherical (Q=1) solutions are connected:
+  profile of the penalty over Q with (gh, rh, rho0) re-optimised in the whole `bounds_original`
+  box (the narrow PCA box of the free-Q search is not used). New driver `py/run_q_profile.py`,
+  `launch_tycho.sh --q-profile`; harness, storage, production and CONTRACT unchanged.
+- **CRN** | Q22 extended to this diagnostic driver only: `agama.setRandomSeed(42)` before every
+  evaluation (42 = AGAMA's start seed = the default stream of a fresh process, so earlier
+  single/multi-model rows are seed-42 realisations). Justification: Q29 showed `A_repeat ≡ A` and
+  only small B_native−B shifts at a fixed seed; the seed-42 rho0 sweeps of the Q=1 probe rounds are
+  smooth far below the realisation scatter. The smoothness cut at the lowest Q is only logged.
+- **Grid** | lowest Q = Q of the Q29 seed-42 L24 free-Q point (taken from the priors), then
+  0.30, 0.35, 0.50, 0.65, 0.80, 0.90, 1.0 (0.30 added: the compact branch is narrow in Q in the old
+  L4 rows). Whole grid in one run.
+- **Starts / budget (variant A)** | two continuation branches over the whole grid (`compact` up
+  from the lowest Q, `extended` down from Q=1, each starting from the neighbour's best), 10
+  evaluations per branch per Q, 6 Sobol points per Q, a `global` branch (+10) only for a far good
+  Sobol point ⇒ 208 evaluations (max 288), ~31 h on tycho. Not the search's "40 iterations": that
+  budget would leave 2–3 steps per branch per Q.
+- **Priors** | known seed-42 rows enter the GP without recomputation: the Q29 B_native L24
+  points and the Q=1 probe rounds 1–4 (N23/l4; at Q=1 the l4→l24 shift is small); duplicates keep
+  l24. File: private `results/logs/qprofile/qprofile_prior_points.txt`.
+- **Storage** | rows only in `qprofile_*` files (no pool glob) — they do not enter the PCA. Orbit
+  libraries of evaluations with penalty ≤ 3.5 and Q ≠ 1 are saved after the evaluation into the
+  shared `orblib/` under the standard name (never overwriting), so a later `--reuse-orblib` search
+  hitting such a point does not integrate it again (its row then is the seed-42 realisation).
+  Q=1 libraries are not saved (untagged names would mix L24 with N23/l4).
+- **Re-evaluation with other seeds** | not planned now; decided after the run from the size of
+  any barrier/branch crossing relative to the known two-realisation scatter.
+- Mocked tests only (`tests/test_q_profile.py`, `test_launch_tycho.py`); the run is done by the user.

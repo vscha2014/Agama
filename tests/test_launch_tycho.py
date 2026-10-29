@@ -29,6 +29,15 @@ exec "$@"
     'python': r'''#!/bin/bash
 if [ "$1" = "-c" ]; then exit "${PY_IMPORT_FAIL:-0}"; fi
 echo "python $* OMP=$OMP_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS" >> "$HOME/events"
+case " $* " in
+    *run_q_profile.py*)
+        state=""; prev=""
+        for a in "$@"; do [ "$prev" = "--state-dir" ] && state="$a"; prev="$a"; done
+        mkdir -p "$state"
+        echo '{"status": "done"}' > "$state/profile_state.json"
+        echo "qprofile done"
+        exit "${PY_EXIT:-0}" ;;
+esac
 sfx=""; q1=""; pot=""; prev=""; rep=""; seedf=""; prots=""
 for a in "$@"; do
     [ "$prev" = "--suffix" ] && sfx="$a"
@@ -514,3 +523,104 @@ def test_ic_seeds_and_protocols_reject_invalid_combinations(tmp_path, extra_args
             '90.0 1.0 0.0 25.0 36.0 0.6003 1.7581 2026-10-06 14:42:52  # m0\n')
     result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=setup)
     assert result.returncode == 2 and not events
+
+
+FINALISTS = (
+    '90.000 0.27 0.0 2.4 90.0 0.66 1.40 2026-10-22 22:04:15  # m0_freeQ\n'
+    '90.000 1.0 0.0 28.0 43.0 0.47 1.50 2026-10-16 04:19:35  # m1_Q1\n')
+PRIORS = ('90.000 1.0 0.0 25.0 35.0 0.6 1.80 2026-10-14 00:00:00  # pot=l24 protocol=strict src=q29\n'
+          '90.000 1.0 0.0 7.0 40.0 0.5 2.20 2026-10-06 14:37:47  # pot=l4 protocol=exp src=r2\n')
+
+
+def results_repo(tmp_path, files):
+    remote = tmp_path / 'remote.git'
+    results = tmp_path / 'results'
+    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', str(remote), str(results)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run(['git', '-C', str(results), 'config', 'user.email', 'test@example.com'], check=True)
+    for name, text in files.items():
+        (results / name).parent.mkdir(parents=True, exist_ok=True)
+        (results / name).write_text(text)
+    subprocess.run(['git', '-C', str(results), 'add', '-A'], check=True)
+    subprocess.run(['git', '-C', str(results), 'commit', '-m', 'init'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(results), 'push', '-u', 'origin', 'HEAD'], check=True, capture_output=True)
+    return remote, results
+
+
+def copy_driver(work):
+    (work / 'run_q_profile.py').write_text((ROOT / 'py/run_q_profile.py').read_text())
+
+
+def test_q_profile_runs_the_driver_in_one_8gb_scope_and_commits_the_state(tmp_path):
+    remote, results = results_repo(tmp_path, {
+        'logs/Q1d1_rh_bounds/models_finalists_q1_freeq.txt': FINALISTS,
+        'logs/qprofile/qprofile_prior_points.txt': PRIORS})
+    result, events, work = run(tmp_path, '--threads=4', '--q-profile', setup=copy_driver)
+    assert result.returncode == 0, output(result)
+    scope = next(e for e in events if e.startswith('systemd-run') and '--unit=' in e)
+    assert 'MemoryMax=8589934592' in scope.split() and 'CPUQuota=400%' in scope.split()
+    assert '--unit=agama-tycho-qprofile_d1_nb250_gh0_l24n184_ser0_i90p0-20261010_120000' in scope
+    (argv,) = pythons(events)
+    name = 'qprofile_d1_nb250_gh0_l24n184_ser0_i90.0_20261010_120000'
+    state = results / 'logs/qprofile' / name
+    assert argv[argv.index('--state-dir') + 1] == str(state)
+    assert argv[argv.index('--orblib-dir') + 1] == str(work / 'orblib_qprofile' / name)
+    assert argv[argv.index('--shared-orblib') + 1] == str(work / 'orblib')
+    assert argv[argv.index('--endpoints') + 1] == str(results / 'logs/Q1d1_rh_bounds/models_finalists_q1_freeq.txt')
+    assert argv[argv.index('--prior-points') + 1] == str(results / 'logs/qprofile/qprofile_prior_points.txt')
+    assert argv[argv.index('--save-below') + 1] == '3.5' and argv[argv.index('--n_threads') + 1] == '4'
+    assert argv[argv.index('--suffix') + 1] == 'qprofile20261010_120000'
+    assert '--resume' not in argv and '--Q1' not in argv and 'OMP=4' in argv
+    assert not list(results.glob('out_testhost_*.txt')) and not list(work.glob('out_*'))
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    committed = verify / 'logs/qprofile' / name
+    assert (committed / 'profile_state.json').exists()
+    assert list(committed.glob('runlog_qprofile_*.log')) and list(committed.glob('launch_tycho_qprofile_*.log'))
+    log = next(work.glob('launch_tycho_qprofile_*.log')).read_text()
+    assert 'evaluations: 208 (max 288)' in log and 'priors at Q=1: 2' in log
+
+
+def test_q_profile_resume_reuses_the_directory_and_offline_bundles_it(tmp_path):
+    name = 'qprofile_d1_nb250_gh0_l24n184_ser0_i90.0_20261001_000000'
+
+    def setup(work):
+        copy_driver(work)
+        (work / 'finalists.txt').write_text(FINALISTS)
+        (work / 'qprofile' / name).mkdir(parents=True)
+        (work / 'qprofile' / name / 'profile_state.json').write_text('{}')
+
+    result, events, work = run(tmp_path, '--threads=4', '--q-profile', '--offline', '--endpoints=finalists.txt',
+                               f'--resume-profile={name}', '--no-save-orblib', setup=setup)
+    assert result.returncode == 0, output(result)
+    (argv,) = pythons(events)
+    assert '--resume' in argv and argv[argv.index('--state-dir') + 1] == str(work / 'qprofile' / name)
+    assert argv[argv.index('--orblib-dir') + 1] == str(work / 'orblib_qprofile' / name)
+    assert argv[argv.index('--save-below') + 1] == '-1' and '--prior-points' not in argv
+    assert not any(e.startswith('rclone ') for e in events)
+    bundle = next(work.glob('tycho_results_qprofile_*.tar.gz'))
+    listing = subprocess.run(['tar', '-tzf', str(bundle)], capture_output=True, text=True, check=True).stdout
+    assert f'qprofile/{name}/profile_state.json' in listing and 'runlog_qprofile_' in listing
+
+
+@pytest.mark.parametrize('extra_args', [
+    ('--q-profile', '--models=finalists.txt'),
+    ('--q-profile', '--Q1'),
+    ('--q-profile', '--resume'),
+    ('--q-profile', '--nproc=2'),
+    ('--q-profile', '--pot-lmax=8'),
+    ('--q-profile', '--resume-profile=missing'),
+    ('--q-profile', '--endpoints=nope.txt'),
+    ('--q-profile', '--q-grid=0.3,0.5'),
+    ('--q-profile', '--save-below=abc'),
+    ('--q-grid=0.3,1',),
+    ('--endpoints=finalists.txt',),
+])
+def test_q_profile_rejects_invalid_combinations(tmp_path, extra_args):
+    def setup(work):
+        copy_driver(work)
+        (work / 'finalists.txt').write_text(FINALISTS)
+        (work / 'models_finalists_q1_freeq.txt').write_text(FINALISTS)
+    result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=setup)
+    assert result.returncode == 2 and not events, output(result)
