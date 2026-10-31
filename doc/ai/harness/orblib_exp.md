@@ -590,14 +590,17 @@ scan; DECISIONS 2026-10-28). Diagnostic only: production and the search are unch
 Tests: `tests/test_q_profile.py`, `tests/test_launch_tycho.py` (`*q_profile*`).
 
 - `bash launch_tycho.sh --q-profile [--endpoints=FILE] [--prior-points=FILE|--no-prior-points]
-  [--q-grid=LIST] [--save-below=3.5] [--resume-profile=DIR] [--preflight]`. Always `--l24`; refuses
+  [--q-grid=LIST] [--save-below=3.5] [--resume-profile=DIR] [--local-budget=N] [--global-budget=N]
+  [--no-smooth-check] [--preflight]`. Always `--l24`; refuses
   `--models/--ic-seeds/--protocols/--Q1/--resume/--nproc>1`. Defaults: endpoints
   `models_finalists_q1_freeq.txt`, priors `qprofile_prior_points.txt` (both looked up in `py/`,
   `results/`, `results/logs/{qprofile,seed,Q1d1_rh_bounds}/`), MemoryMax 8 GiB, threads nproc/4.
   Preflight and the start print `run_q_profile.py --dry-run` (grid, starts, priors, budget).
-- Grid (default) `low, 0.30, 0.35, 0.50, 0.65, 0.80, 0.90, 1.0`; must end at 1. `low` = the
-  lowest Q < 1 of the `pot=l24` priors (the Q29 seed-42 L24 point, which thus enters as data),
-  else the Q of the Q<1 finalist.
+- Grid (default) `low, 0.30, 0.35, 0.50, 0.65, 0.80, 0.90, 1.0`; any strictly increasing list
+  inside `bounds_original` Q (Q = 1 need not be present, Q > 1 allowed). `low` = the lowest Q < 1
+  of the `pot=l24` priors (the Q29 seed-42 L24 point, which thus enters as data), else the Q of
+  the Q<1 finalist. The extended branch starts at the **anchor** = grid Q closest to 1 (lower one
+  on a tie; the last Q for the default grid).
 - Evaluation: the harness is imported once (`--l24 --orblib-dir orblib_qprofile/<name>
   --no-resume`, **no** `--save-orblib/--reuse-orblib`): an existing `.npz` of the same name
   (another realisation) must not replace the seeded one, and the harness would save before
@@ -609,13 +612,24 @@ Tests: `tests/test_q_profile.py`, `tests/test_launch_tycho.py` (`*q_profile*`).
   points as baseline; TR 0.4, min 0.05, max 0.8, ×2 after 2 successes > 0.002, /2 after 3
   failures; duplicate proposals count as failures without an evaluation).
   Order: `compact@Q_low` (start = Q<1 finalist's gh, rh, rho0; first 4 extra points
-  rho0×{0.97, 0.985, 1.015, 1.03} → quadratic-residual smoothness check, logged only),
-  Sobol@Q_low, `extended@1` (Q=1 finalist), Sobol@1, then Sobol + `compact` for Q = 0.30 → 1
-  (start = compact best at the previous Q), then `extended` for Q = 0.90 → Q_low. Budget
-  (variant A): 10 evaluations per branch per Q, 6 Sobol per Q ⇒ 208 evaluations (~31 h at
-  540 s); a Sobol point farther than 0.25 from both branch bests and below 1.5 × their best
-  spawns `global@Q` (+10, max 288). Two branches closer than 0.05 with |ΔP| ≤ 0.01 ⇒ the later
-  one is `merged` and is not continued.
+  rho0×{0.97, 0.985, 1.015, 1.03} from the branch budget → quadratic-residual smoothness check,
+  logged only; `--no-smooth-check` skips it, `smooth_check.verdict='disabled'`),
+  Sobol@Q_low, `extended@anchor` (Q=1 finalist's gh, rh, rho0), Sobol@anchor, then Sobol +
+  `compact` for every higher Q (start = compact best at the previous Q), then `extended` from
+  the anchor downwards to Q_low and afterwards upwards to the last Q (start = extended best at
+  the neighbour towards the anchor). Budget (variant A): 10 evaluations per branch per Q, 6 Sobol
+  per Q ⇒ 26 per Q, 208 for the default grid (~31 h at 540 s); a Sobol point farther than 0.25
+  from both branch bests and below 1.5 × their best spawns `global@Q` (+10, max 288). Two
+  branches closer than 0.05 with |ΔP| ≤ 0.01 ⇒ the later one is `merged` and is not continued
+  beyond that Q on the same side of its origin (compact: Q_low; extended: the anchor).
+- Status of an evaluation: `ok`; `rejected` = finite penalty ≥ `FAILED_PENALTY` (1e5, cusp
+  halos give 1e7–1e11; `run_single_model.ProtocolError.penalty`), except the harness sentinel
+  1e6; `failed` = crash/NaN/sentinel/no history block. Rejected points enter the GP at their Q
+  with penalty capped at 1e5 (y = −log 1e5, within the range of `ok` points), are never a
+  branch best, a qLogNEI baseline or a global candidate, count as "no improvement" for the TR,
+  and reset (not increment) the consecutive-failure counter. Legacy `failed` records of older
+  states whose error reads `evaluation failed (penalty=X)` with such an X are treated the same.
+  The report lists `failed` and `rejected` separately.
 - Priors (`--prior-points`, any history layout, label tokens `pot=l24|l4 protocol=… src=…`):
   GP observations at their Q, no recomputation, no budget; a branch start equal to a prior
   reuses it. Rows with Q off the grid are skipped; duplicates keep `pot=l24`.
@@ -630,9 +644,15 @@ Tests: `tests/test_q_profile.py`, `tests/test_launch_tycho.py` (`*q_profile*`).
   overwrites) into the shared `orblib/` under the standard L24 name; skipped if the name or
   `.building` exists or free disk < `TYCHO_MIN_FREE_GB`. A later `--l24 --reuse-orblib` search
   reuses them (penalty recomputed in ~1 min; the realisation is the seed-42 one).
-- Resume: `--q-profile --resume-profile=<name>` (same inputs; a changed grid/starts/priors/budget
-  is refused). An interrupted evaluation is recomputed deterministically. Exit 75 = stopped with
-  state saved, 1 = 5 consecutive failed evaluations or error.
+- Resume: `--q-profile --resume-profile=<name>` with the same inputs (grid, endpoints, priors,
+  `--no-smooth-check`, seeds); a difference is refused with the names of the differing config
+  keys (e.g. resuming the 2026-10-29 run, which had no priors, needs `--no-prior-points` once
+  `qprofile_prior_points.txt` is findable). Budgets are not part of the identity: omitted ⇒ the
+  stored ones; larger `--local-budget`/`--global-budget` ⇒ every branch with `status=budget`
+  (not merged) gets the new budget and continues with its trust region as it was; converged,
+  skipped and failed branches stay; smaller ⇒ refused. The extension is recorded in
+  `runs[-1].extended`. An interrupted evaluation is recomputed deterministically. Exit 75 =
+  stopped with state saved, 1 = 5 consecutive failed evaluations or error.
 - Reading: profile = min over all points at Q; `barrier` = max interior profile − max of the
   ends; `hysteresis` = both branches present and > 0.1 apart; `branch_switch_Q`. One seed:
   shapes between neighbouring points are reliable, differences between distant parameters

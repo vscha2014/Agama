@@ -5,9 +5,11 @@ For every Q of a fixed grid the halo parameters (gh, rh, rho0) are optimised in
 the whole bounds_original box (no PCA) by a trust-region Bayesian optimiser
 with common random numbers: agama.setRandomSeed(42) before every evaluation,
 so all points share one orbit-IC realisation (DECISIONS 2026-10-28). Branches:
-`compact` is continued upwards from the lowest Q, `extended` downwards from
-Q=1; Sobol points at every Q may spawn a third, `global`, branch. Known seed-42
-evaluations (--prior-points) enter the GP at their Q without recomputation.
+`compact` is continued upwards from the lowest Q, `extended` outwards (down,
+then up) from the grid Q closest to 1; Sobol points at every Q may spawn a
+third, `global`, branch. Known seed-42 evaluations (--prior-points) enter the GP
+at their Q without recomputation; finite penalties >= FAILED_PENALTY are
+`rejected` and enter the GP capped at FAILED_PENALTY.
 
 Rows go to qprofile_* history files that no pool glob reads. Orbit libraries of
 evaluations with penalty <= --save-below (Q != 1) are written afterwards into
@@ -15,7 +17,8 @@ the shared library directory under their standard names, so a later
 --reuse-orblib search does not integrate those points again.
 
 profile_state.json is rewritten after every evaluation; --resume continues an
-interrupted run. --dry-run and --summarize need only the standard library.
+interrupted run, larger --local-budget/--global-budget extend the branches that
+stopped by budget. --dry-run and --summarize need only the standard library.
 See doc/ai/harness/orblib_exp.md, section "Q profile".
 """
 import argparse
@@ -26,6 +29,7 @@ import json
 import math
 import os
 import random
+import re
 import socket
 import sys
 import time
@@ -52,6 +56,9 @@ REPORT_NAME = 'report_qprofile'
 TABLE_COLUMNS = ('id', 'Q', 'branch', 'kind', 'gh', 'rh', 'rho0', 'seed', 'status', 'penalty',
                  'upsilon', 'wall_s', 'orbit_s', 'library', 'source', 'finished')
 POT_RANK = {'l24': 0, 'l4': 1}
+EXTENDABLE = ('local_budget', 'global_budget')
+SENTINEL_PENALTY = 1e6
+LEGACY_PENALTY = re.compile(r'evaluation failed \(penalty=([^)]+)\)')
 
 
 class ConfigError(ValueError):
@@ -102,11 +109,39 @@ def same_params(a, b):
     return all(math.isclose(a[k], b[k], rel_tol=1e-12, abs_tol=1e-12) for k in PARAMS)
 
 
+def is_rejected_value(penalty):
+    """A completed evaluation with a huge finite penalty (not the harness's 1e6 sentinel)."""
+    return (isinstance(penalty, (int, float)) and math.isfinite(penalty)
+            and penalty >= rsm.FAILED_PENALTY and penalty != SENTINEL_PENALTY)
+
+
+def classify_protocol_error(error):
+    penalty = getattr(error, 'penalty', None)
+    if is_rejected_value(penalty):
+        return dict(status='rejected', penalty=float(penalty), error=repr(error))
+    return dict(status='failed', error=repr(error))
+
+
+def rejected_penalty(record):
+    """Penalty of a rejected evaluation; legacy `failed` records carry it in the error text."""
+    if record['status'] == 'rejected':
+        return record['penalty']
+    if record['status'] == 'failed':
+        match = LEGACY_PENALTY.search(record.get('error') or '')
+        if match:
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                return None
+            return value if is_rejected_value(value) else None
+    return None
+
+
 # --------------------------------------------------------------------------
 # Inputs
 # --------------------------------------------------------------------------
 def parse_q_grid(spec, bounds, low):
-    """Comma list ending at 1; the token `low` stands for `low` (see build_config)."""
+    """Increasing comma list; the token `low` stands for `low` (see build_config)."""
     tokens = [t.strip() for t in str(spec).split(',') if t.strip()] if spec else list(DEFAULT_Q_GRID)
     try:
         grid = [float(low) if str(t) == 'low' else float(t) for t in tokens]
@@ -117,9 +152,12 @@ def parse_q_grid(spec, bounds, low):
         raise ConfigError('--q-grid needs >= 2 distinct increasing values')
     if not all(lo <= q <= hi for q in grid):
         raise ConfigError(f'--q-grid outside bounds_original Q {bounds["Q"]}')
-    if abs(grid[-1] - 1.0) > 1e-12:
-        raise ConfigError('--q-grid must end at Q=1 (start of the extended branch)')
     return grid
+
+
+def anchor_index(grid):
+    """Start of the extended branch: the grid Q closest to 1 (the lower one on a tie)."""
+    return min(range(len(grid)), key=lambda i: (abs(grid[i] - 1.0), grid[i]))
 
 
 def read_endpoints(path, bounds, incl):
@@ -181,8 +219,9 @@ def assign_priors(rows, grid):
 
 
 def build_config(args, bounds):
+    """Budgets left at None take DEFAULTS (resume_config restores the stored ones)."""
     for name in ('opt_seed', 'local_budget', 'global_budget'):
-        if getattr(args, name) < 1:
+        if getattr(args, name) is not None and getattr(args, name) < 1:
             raise ConfigError(f'--{name.replace("_", "-")} must be >= 1')
     if args.n_global < 0:
         raise ConfigError('--n-global must be >= 0')
@@ -194,12 +233,28 @@ def build_config(args, bounds):
     return dict(DEFAULTS, incl=float(args.incl), q_grid=grid, pot='l24',
                 bounds={k: list(v) for k, v in bounds.items()}, starts=starts,
                 priors=priors, prior_skipped=skipped + off_grid, opt_seed=args.opt_seed,
-                n_global=args.n_global, local_budget=args.local_budget,
-                global_budget=args.global_budget)
+                n_global=args.n_global,
+                local_budget=DEFAULTS['local_budget'] if args.local_budget is None else args.local_budget,
+                global_budget=DEFAULTS['global_budget'] if args.global_budget is None else args.global_budget,
+                smooth_offsets=[] if args.no_smooth_check else list(DEFAULTS['smooth_offsets']))
+
+
+def resume_config(config, stored, explicit):
+    """On resume, budgets not given on the command line keep their stored values."""
+    config = dict(config)
+    for key in EXTENDABLE:
+        if key not in explicit and key in stored:
+            config[key] = stored[key]
+    return config
 
 
 def config_hash(config):
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+
+def identity(config):
+    """Settings that define a profile; budgets may grow on resume."""
+    return {k: v for k, v in config.items() if k not in EXTENDABLE}
 
 
 def budget(config):
@@ -318,17 +373,18 @@ class Profile:
         self.failures = 0
         self.state = None
         self.last = len(config['q_grid']) - 1
+        self.anchor = anchor_index(config['q_grid'])
 
     # ---- state -----------------------------------------------------------
     def open(self, resume, run_info=None):
         os.makedirs(self.state_dir, exist_ok=True)
+        extended = None
         if os.path.exists(self.path):
             if not resume:
                 raise ConfigError(f'{self.path} exists: pass --resume or choose another --state-dir')
             with open(self.path) as stream:
                 self.state = json.load(stream)
-            if self.state['config_hash'] != config_hash(self.cfg):
-                raise ConfigError('configuration differs from the state file (grid/starts/priors/budgets)')
+            extended = self._extend(self.state['config'])
         else:
             if resume:
                 raise ConfigError(f'--resume: no {self.path}')
@@ -340,8 +396,33 @@ class Profile:
                                   u=to_unit(prior['params'], self.cfg['bounds']), finished=None))
         if run_info:
             self.state['runs'].append(dict(run_info, started=now()))
+        if extended and run_info:
+            self.state['runs'][-1]['extended'] = extended
         self.state['status'] = 'running'
         self.save()
+
+    def _extend(self, stored):
+        """Check the identity against the state; reactivate budget-stopped branches
+        when a budget grew. Returns {branch: [old, new]}."""
+        mine, theirs = identity(self.cfg), identity(stored)
+        differ = sorted(k for k in set(mine) | set(theirs)
+                        if json.dumps(mine.get(k), sort_keys=True) != json.dumps(theirs.get(k), sort_keys=True))
+        if differ:
+            raise ConfigError(f'configuration differs from the state file: {", ".join(differ)}')
+        for key in EXTENDABLE:
+            if self.cfg[key] < stored[key]:
+                raise ConfigError(f'--{key.replace("_", "-")} {self.cfg[key]} < stored {stored[key]}: '
+                                  'budgets can only grow on resume')
+        extended = {}
+        for key, branch in self.state['branches'].items():
+            new = self.cfg['global_budget' if branch['name'] == 'global' else 'local_budget']
+            if branch['status'] == 'budget' and branch['budget'] < new and not branch.get('merged_into'):
+                extended[key] = [branch['budget'], new]
+                branch['budget'], branch['status'] = new, 'active'
+        self.state['config'], self.state['config_hash'] = self.cfg, config_hash(self.cfg)
+        if extended:
+            self.log(f'[qprofile] budget extended: {extended}')
+        return extended
 
     def save(self):
         self.state['updated'] = now()
@@ -390,7 +471,9 @@ class Profile:
                       source='qprofile', finished=now(), **(extra or {}))
         if record['status'] == 'ok' and not (record['penalty'] and record['penalty'] > 0):
             record['status'] = 'failed'
-        self.failures = 0 if record['status'] == 'ok' else self.failures + 1
+        if record['status'] == 'rejected' and not is_rejected_value(record['penalty']):
+            record['status'] = 'failed'
+        self.failures = 0 if record['status'] in ('ok', 'rejected') else self.failures + 1
         return record
 
     def _record(self, record, branch=None):
@@ -409,12 +492,12 @@ class Profile:
     def stages(self):
         yield functools.partial(self.branch_stage, 'compact', 0)
         yield functools.partial(self.sobol_stage, 0)
-        yield functools.partial(self.branch_stage, 'extended', self.last)
-        yield functools.partial(self.sobol_stage, self.last)
+        yield functools.partial(self.branch_stage, 'extended', self.anchor)
+        yield functools.partial(self.sobol_stage, self.anchor)
         for qi in range(1, self.last + 1):
             yield functools.partial(self.sobol_stage, qi)
             yield functools.partial(self.branch_stage, 'compact', qi)
-        for qi in range(self.last - 1, -1, -1):
+        for qi in list(range(self.anchor - 1, -1, -1)) + list(range(self.anchor + 1, self.last + 1)):
             yield functools.partial(self.branch_stage, 'extended', qi)
         yield self.global_stage
 
@@ -432,12 +515,23 @@ class Profile:
             self._record(self.evaluate(qi, from_unit(u, self.cfg['bounds']), 'sobol',
                                        extra=dict(sobol_index=j)))
 
+    def origin(self, name):
+        return 0 if name == 'compact' else self.anchor
+
     def start_params(self, name, qi):
-        origin = 0 if name == 'compact' else self.last
+        origin = self.origin(name)
         if qi == origin:
             return dict(self.cfg['starts'][name]['params'])
-        best = self.branch_best(name, qi - 1 if name == 'compact' else qi + 1)
+        best = self.branch_best(name, qi - 1 if qi > origin else qi + 1)
         return dict(best['params']) if best else None
+
+    def blocked_by_merge(self, name, qi):
+        """A merge stops the branch beyond the merged Q on the same side of its origin."""
+        merged = self.state['merged'].get(name)
+        if merged is None:
+            return False
+        origin = self.origin(name)
+        return abs(qi - origin) > abs(merged - origin) and (merged == origin or (merged - origin) * (qi - origin) > 0)
 
     def new_branch(self, name, qi, start, budget_, members=(), status='active', reason=None):
         branch = dict(name=name, qi=qi, Q=self.cfg['q_grid'][qi], start=start, budget=budget_,
@@ -450,7 +544,7 @@ class Profile:
     def branch_stage(self, name, qi):
         branch = self.state['branches'].get(f'{name}@{qi}')
         if branch is None:
-            if name in self.state['merged']:
+            if self.blocked_by_merge(name, qi):
                 self.new_branch(name, qi, None, 0, status='skipped',
                                 reason=f'merged at Q={self.cfg["q_grid"][self.state["merged"][name]]}')
                 return
@@ -488,6 +582,10 @@ class Profile:
 
     def diagnostic(self, branch):
         start, bounds = branch['start'], self.cfg['bounds']
+        if not self.cfg['smooth_offsets']:
+            self.state['smooth_check'] = dict(verdict='disabled')
+            self.save()
+            return
         for factor in self.cfg['smooth_offsets']:
             params = dict(start, rho0=min(bounds['rho0'][1], max(bounds['rho0'][0], start['rho0'] * factor)))
             if self.find(0, params) is None and branch['n_evals'] < branch['budget']:
@@ -506,7 +604,10 @@ class Profile:
         baseline = [index[i] for i in branch['members'] if i in index]
         seed = (self.cfg['sobol_seed'] + 1000 * qi + 17 * branch['n_evals'] + branch['duplicates']
                 + zlib.crc32(name.encode())) % (2 ** 31)
-        u = self.proposer([r['u'] for r in points], [r['penalty'] for r in points], baseline,
+        capped = [(r['u'], min(p, rsm.FAILED_PENALTY)) for r in self.records(qi, ok=False)
+                  for p in [rejected_penalty(r)] if p is not None]
+        u = self.proposer([r['u'] for r in points] + [c[0] for c in capped],
+                          [r['penalty'] for r in points] + [c[1] for c in capped], baseline,
                           best['u'], branch['length'], seed)
         params = from_unit(u, self.cfg['bounds'])
         u = to_unit(params, self.cfg['bounds'])
@@ -631,7 +732,8 @@ def summarize(state):
                 and rows[i]['lower_branch'] != rows[i - 1]['lower_branch']]
     return dict(status=state.get('status'), updated=state.get('updated'), opt_seed=cfg['opt_seed'],
                 n_evaluations=sum(1 for r in evaluations if r['kind'] != 'prior'),
-                n_failed=sum(1 for r in evaluations if r['status'] != 'ok'),
+                n_failed=sum(1 for r in evaluations if r['status'] != 'ok' and rejected_penalty(r) is None),
+                n_rejected=sum(1 for r in evaluations if rejected_penalty(r) is not None),
                 libraries_saved=sum(1 for r in evaluations if (r.get('library') or {}).get('name')),
                 smooth_check=state.get('smooth_check'), merged=state.get('merged'),
                 rows=rows, barrier=barrier, branch_switch_Q=switches,
@@ -642,11 +744,13 @@ def summarize(state):
 
 def format_summary(summary):
     lines = [f"Q profile: status={summary['status']} evaluations={summary['n_evaluations']} "
-             f"failed={summary['n_failed']} libraries saved={summary['libraries_saved']} "
+             f"failed={summary['n_failed']} rejected={summary.get('n_rejected', 0)} "
+             f"libraries saved={summary['libraries_saved']} "
              f"(seed {summary['opt_seed']}, updated {summary['updated']})"]
     smooth = summary.get('smooth_check')
     if smooth:
-        lines.append(f"  smoothness check (logged): n={smooth.get('n')} rms={smooth.get('rms')} max={smooth.get('max')}")
+        lines.append(f"  smoothness check ({smooth.get('verdict')}): n={smooth.get('n')} rms={smooth.get('rms')} "
+                     f"max={smooth.get('max')}")
     lines.append(f"  {'Q':>8} {'P_prof':>9} {'kind':>7} {'branch':>8}  compact (P, status)        extended (P, status)       sobol P   notes")
     for row in summary['rows']:
         prof = row['profile'] or {}
@@ -698,6 +802,9 @@ def format_dry_run(config):
         p = start['params']
         lines.append(f"  start {name}: gh={p['gh']:.6g} rh={p['rh']:.6g} rho0={p['rho0']:.6g} "
                      f"(row Q={start['Q']:.6g}, penalty={start['penalty']:.6g}, {start['source']})")
+    lines.append(f"  compact starts at Q={config['q_grid'][0]:.6g} (upwards); extended starts at "
+                 f"Q={config['q_grid'][anchor_index(config['q_grid'])]:.6g} (downwards, then upwards); "
+                 f"smoothness check: {'off' if not config['smooth_offsets'] else 'on'}")
     for qi, Q in enumerate(config['q_grid']):
         priors = [p for p in config['priors'] if p['qi'] == qi]
         if priors:
@@ -831,7 +938,7 @@ def build_evaluator(args, state_dir):
                 raise
             except Exception as error:
                 traceback.print_exc()
-                return dict(status='failed', error=repr(error))
+                return classify_protocol_error(error)
             result = dict(status='ok', penalty=run['penalty'], upsilon=run['upsilon'],
                           wall_s=run['wall_s'], orbit_s=run['orbit_s'])
             result['library'] = save_library(mod, storage, capture, Q, params, run['penalty'],
@@ -851,9 +958,9 @@ def build_evaluator(args, state_dir):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0], allow_abbrev=False)
     parser.add_argument('--incl', type=float, default=90.0)
-    parser.add_argument('--q-grid', default=None, help='Comma list ending at 1 (default: '
-                        + ','.join(str(q) for q in DEFAULT_Q_GRID) + '; low = lowest Q<1 of the pot=l24 '
-                        'priors, else the Q<1 finalist)')
+    parser.add_argument('--q-grid', default=None, help='Increasing comma list; the extended branch starts at '
+                        'the Q closest to 1 (default: ' + ','.join(str(q) for q in DEFAULT_Q_GRID)
+                        + '; low = lowest Q<1 of the pot=l24 priors, else the Q<1 finalist)')
     parser.add_argument('--endpoints', default=None, help='Rows of the two finalists (Q<1 and Q=1)')
     parser.add_argument('--prior-points', default=None, help='Known seed-42 evaluations (label pot=l24|l4)')
     parser.add_argument('--state-dir', default=None)
@@ -866,8 +973,13 @@ def parse_args(argv=None):
     parser.add_argument('--min-free-gb', type=float, default=40.0)
     parser.add_argument('--opt-seed', type=int, default=DEFAULTS['opt_seed'])
     parser.add_argument('--n-global', type=int, default=DEFAULTS['n_global'])
-    parser.add_argument('--local-budget', type=int, default=DEFAULTS['local_budget'])
-    parser.add_argument('--global-budget', type=int, default=DEFAULTS['global_budget'])
+    parser.add_argument('--local-budget', type=int, default=None,
+                        help=f"Evaluations per compact/extended branch (default {DEFAULTS['local_budget']}; "
+                        'on --resume: stored value, a larger one extends budget-stopped branches)')
+    parser.add_argument('--global-budget', type=int, default=None,
+                        help=f"Evaluations per global branch (default {DEFAULTS['global_budget']}; as above)")
+    parser.add_argument('--no-smooth-check', action='store_true',
+                        help='Skip the rho0 smoothness diagnostic at the lowest Q')
     parser.add_argument('--subsample-seed', type=int, default=DEFAULTS['subsample_seed'])
     parser.add_argument('--max-failures', type=int, default=5)
     parser.add_argument('--dry-run', action='store_true', help='Print the plan (standard library only)')
@@ -896,6 +1008,11 @@ def main(argv=None):
         print(format_dry_run(config), end='')
         return 0
     os.makedirs(args.state_dir, exist_ok=True)
+    state_path = os.path.join(args.state_dir, STATE_NAME)
+    if args.resume and os.path.exists(state_path):
+        with open(state_path) as stream:
+            stored = json.load(stream)['config']
+        config = resume_config(config, stored, {k for k in EXTENDABLE if getattr(args, k) is not None})
     stop_marker = os.path.join(args.orblib_dir, '.storage', 'STOP')
     if os.path.exists(stop_marker):
         os.remove(stop_marker)

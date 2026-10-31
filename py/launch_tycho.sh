@@ -49,6 +49,9 @@ QP_PRIORS=""
 QP_NO_PRIORS=0
 QP_RESUME=""
 QP_SAVE_BELOW="3.5"
+QP_LOCAL_BUDGET=""
+QP_GLOBAL_BUDGET=""
+QP_NO_SMOOTH=0
 QP_OPTS_SET=0
 MEMORY_GB=""
 RESULTS_DIR="${RESULTS_DIR:-}"
@@ -77,8 +80,12 @@ for arg in "$@"; do
                 '                      строки в qprofile_*, .npz с penalty <= --save-below в общий orblib/).' \
                 '    --endpoints=FILE  Финалисты (Q<1 и Q=1; по умолчанию models_finalists_q1_freeq.txt).' \
                 '    --prior-points=F  Известные seed-42 оценки (по умолчанию qprofile_prior_points.txt, если найден);' \
-                '    --no-prior-points без них.  --q-grid=LIST  Сетка Q (по умолчанию low,0.30,…,1.0).' \
+                '    --no-prior-points без них.  --q-grid=LIST  Сетка Q (по умолчанию low,0.30,…,1.0;' \
+                '                      extended стартует в Q, ближайшем к 1, и идёт вниз, затем вверх).' \
                 '    --resume-profile=DIR  Продолжить профиль (имя каталога в results/logs/qprofile/ или путь).' \
+                '    --local-budget=N / --global-budget=N  Оценок на ветвь (по умолчанию 10/10; при' \
+                '                      --resume-profile больше сохранённого — продление ветвей, остановленных по бюджету).' \
+                '    --no-smooth-check Без диагностики гладкости по rho0 на нижнем Q.' \
                 '    --save-below=P    Порог penalty для сохранения .npz (по умолчанию 3.5).' \
                 '  --memory-gb=N       Явный лимит MemoryMax в GiB (по умолчанию MemTotal/4' \
                 '                      для поиска и 8 GiB для --models=FILE и --q-profile).' \
@@ -118,6 +125,9 @@ for arg in "$@"; do
         --no-prior-points) QP_NO_PRIORS=1; QP_OPTS_SET=1 ;;
         --resume-profile=*) QP_RESUME="${arg#*=}"; QP_OPTS_SET=1 ;;
         --save-below=*)    QP_SAVE_BELOW="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --local-budget=*)  QP_LOCAL_BUDGET="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --global-budget=*) QP_GLOBAL_BUDGET="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --no-smooth-check) QP_NO_SMOOTH=1; QP_OPTS_SET=1 ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)     GIT_RESULTS_MODE=1 ;;
@@ -252,7 +262,8 @@ PROFILE_NAME=""
 QP_STORE=""
 QP_PLAN=""
 if [ "$QPROFILE" -eq 0 ] && [ "$QP_OPTS_SET" -eq 1 ]; then
-    echo "ОШИБКА: --q-grid, --endpoints, --prior-points, --no-prior-points, --resume-profile и --save-below — только с --q-profile" >&2
+    echo "ОШИБКА: --q-grid, --endpoints, --prior-points, --no-prior-points, --resume-profile, --save-below," \
+         "--local-budget, --global-budget и --no-smooth-check — только с --q-profile" >&2
     exit 2
 fi
 if [ "$QPROFILE" -eq 1 ]; then
@@ -265,6 +276,12 @@ if [ "$QPROFILE" -eq 1 ]; then
         echo "ОШИБКА: --save-below должно быть числом (получено: '${QP_SAVE_BELOW}')" >&2
         exit 2
     fi
+    for _budget in "$QP_LOCAL_BUDGET" "$QP_GLOBAL_BUDGET"; do
+        if [ -n "$_budget" ] && ! [[ "$_budget" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ОШИБКА: --local-budget/--global-budget должны быть целыми >= 1 (получено: '${_budget}')" >&2
+            exit 2
+        fi
+    done
     [ "$SAVE_ORBLIB" -eq 0 ] && QP_SAVE_BELOW="-1"
     if [ ! -f "${WORK_DIR}/run_q_profile.py" ] || [ ! -f "${WORK_DIR}/run_single_model.py" ]; then
         echo "ОШИБКА: нужны ${WORK_DIR}/run_q_profile.py и run_single_model.py" >&2
@@ -287,6 +304,9 @@ if [ "$QPROFILE" -eq 1 ]; then
     declare -a QP_INPUT_ARGS=(--incl "$INCL" --endpoints "$QP_ENDPOINTS")
     [ -n "$QP_PRIORS" ] && QP_INPUT_ARGS+=(--prior-points "$QP_PRIORS")
     [ -n "$QP_GRID" ] && QP_INPUT_ARGS+=(--q-grid "$QP_GRID")
+    [ -n "$QP_LOCAL_BUDGET" ] && QP_INPUT_ARGS+=(--local-budget "$QP_LOCAL_BUDGET")
+    [ -n "$QP_GLOBAL_BUDGET" ] && QP_INPUT_ARGS+=(--global-budget "$QP_GLOBAL_BUDGET")
+    [ "$QP_NO_SMOOTH" -eq 1 ] && QP_INPUT_ARGS+=(--no-smooth-check)
     if ! QP_PLAN="$(python3 "${WORK_DIR}/run_q_profile.py" --dry-run "${QP_INPUT_ARGS[@]}")"; then
         echo "ОШИБКА: run_q_profile.py --dry-run отверг входные данные (финалисты, prior-точки или сетка Q)" >&2
         exit 2

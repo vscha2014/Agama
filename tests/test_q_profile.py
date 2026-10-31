@@ -37,6 +37,7 @@ rqp = load('run_q_profile', DRIVER)
 storage = load('orblib_storage', ROOT / 'py/orblib_storage.py')
 BOUNDS = {k: list(v) for k, v in rqp.rsm.script_bounds().items()}
 GRID = [0.27, 0.30, 0.35, 0.50, 0.65, 0.80, 0.90, 1.0]
+DENSE = [0.28, 0.29, 0.95, 1.1, 1.2]
 COMPACT = dict(gh=0.0, rh=2.4, rho0=90.0)
 EXTENDED = dict(gh=0.0, rh=28.0, rho0=43.0)
 
@@ -116,9 +117,19 @@ def test_q_grid_defaults_and_validation():
     assert rqp.parse_q_grid(None, BOUNDS, 0.27) == GRID
     assert rqp.parse_q_grid('low,0.6,1', BOUNDS, 0.2) == [0.2, 0.6, 1.0]
     assert rqp.parse_q_grid('0.3,0.6,1', BOUNDS, 0.27) == [0.3, 0.6, 1.0]
-    for bad in ('0.3,0.6', '0.6,0.3,1', '1', '0.01,1', '0.3,0.3,1', 'x,1'):
+    assert rqp.parse_q_grid('0.28,0.29,0.95,1.1,1.2', BOUNDS, 0.27) == DENSE
+    assert rqp.parse_q_grid('0.3,0.6', BOUNDS, 0.27) == [0.3, 0.6]
+    for bad in ('0.6,0.3,1', '1', '0.01,1', '0.3,0.3,1', 'x,1', '0.3,2.6'):
         with pytest.raises(rqp.ConfigError):
             rqp.parse_q_grid(bad, BOUNDS, 0.27)
+
+
+def test_anchor_is_the_grid_q_closest_to_one():
+    assert rqp.anchor_index(GRID) == len(GRID) - 1
+    assert rqp.anchor_index(DENSE) == 2
+    assert rqp.anchor_index([0.5, 1.1, 1.3]) == 1
+    assert rqp.anchor_index([0.3, 0.6]) == 1
+    assert rqp.anchor_index([0.75, 1.25]) == 0
 
 
 def test_endpoints_pick_compact_and_extended_rows(tmp_path):
@@ -323,6 +334,172 @@ def test_consecutive_failures_abort(tmp_path):
     assert len(run.state['evaluations']) == 3
 
 
+# --------------------------------------------------------------------------
+# Grid with the extended start off the end (Q=1 absent, Q>1 present)
+# --------------------------------------------------------------------------
+def test_dense_grid_starts_extended_at_the_q_closest_to_one_and_goes_both_ways(tmp_path):
+    recorder = Recorder()
+    config = make_config(q_grid=list(DENSE), smooth_offsets=[])
+    run = profile(tmp_path, config=config, evaluator=recorder)
+    run.open(resume=False)
+    run.run()
+    state = run.state
+    assert state['status'] == 'done' and state['smooth_check'] == dict(verdict='disabled')
+    assert not any(c['kind'] == 'diag' for c in recorder.calls)
+    blocks = []
+    for call in recorder.calls:
+        key = (call['qi'], call['branch'] if call['kind'] != 'sobol' else 'sobol')
+        if not blocks or blocks[-1] != key:
+            blocks.append(key)
+    expected = [(0, 'compact'), (0, 'sobol'), (2, 'extended'), (2, 'sobol'), (1, 'sobol'), (1, 'compact'),
+                (2, 'compact'), (3, 'sobol'), (3, 'compact'), (4, 'sobol'), (4, 'compact'),
+                (1, 'extended'), (0, 'extended'), (3, 'extended'), (4, 'extended')]
+    assert [b for b in blocks if b[1] != 'global'][:len(expected)] == expected
+    branches = state['branches']
+    assert all(branches[f'{n}@{qi}']['status'] != 'skipped' for n in ('compact', 'extended') for qi in range(5))
+    assert branches['compact@0']['start'] == COMPACT and branches['extended@2']['start'] == EXTENDED
+    assert branches['compact@2']['start'] == run.branch_best('compact', 1)['params']
+    assert branches['extended@1']['start'] == run.branch_best('extended', 2)['params']
+    assert branches['extended@0']['start'] == run.branch_best('extended', 1)['params']
+    assert branches['extended@3']['start'] == run.branch_best('extended', 2)['params']
+    assert branches['extended@4']['start'] == run.branch_best('extended', 3)['params']
+    assert branches['compact@0']['n_evals'] == config['local_budget']
+    assert sum(1 for c in recorder.calls if c['kind'] == 'sobol') == 6 * len(DENSE)
+
+
+def test_a_merge_stops_a_branch_only_beyond_it_on_the_same_side(tmp_path):
+    run = profile(tmp_path, config=make_config(q_grid=list(DENSE)))
+    run.open(resume=False)
+    run.state['merged'] = {'extended': 1, 'compact': 2}
+    assert run.blocked_by_merge('extended', 0) and not run.blocked_by_merge('extended', 1)
+    assert not run.blocked_by_merge('extended', 3) and not run.blocked_by_merge('extended', 4)
+    assert run.blocked_by_merge('compact', 3) and not run.blocked_by_merge('compact', 1)
+    run.state['merged'] = {'extended': 2, 'compact': 0}
+    assert all(run.blocked_by_merge('extended', qi) for qi in (0, 1, 3, 4))
+    assert all(run.blocked_by_merge('compact', qi) for qi in (1, 2, 3, 4))
+    default = profile(tmp_path / 'default')
+    default.open(resume=False)
+    default.state['merged'] = {'extended': 6}
+    assert [qi for qi in range(8) if default.blocked_by_merge('extended', qi)] == [0, 1, 2, 3, 4, 5]
+
+
+# --------------------------------------------------------------------------
+# Rejected (finite penalty >= FAILED_PENALTY) evaluations enter the GP capped
+# --------------------------------------------------------------------------
+class CuspRecorder(Recorder):
+    def __init__(self, legacy=False):
+        super().__init__()
+        self.legacy = legacy
+
+    def __call__(self, Q, params, seed, meta):
+        if params['gh'] <= 0.4:
+            return super().__call__(Q, params, seed, meta)
+        self.calls.append(dict(meta, params=dict(params), seed=seed))
+        error = "ProtocolError('exp: evaluation failed (penalty=123456789.5)')"
+        return dict(status='failed', error=error) if self.legacy else dict(status='rejected', penalty=123456789.5,
+                                                                           error=error)
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_rejected_points_enter_the_gp_capped_and_do_not_abort(tmp_path, legacy):
+    seen = []
+
+    def spy(points, values, baseline, center, length, seed):
+        seen.append((list(values), list(baseline)))
+        return local_proposer(points, values, baseline, center, length, seed)
+
+    def cusp_sobol(n, seed):
+        return [[0.9, 0.2 + 0.1 * j, 0.5] for j in range(n)]
+
+    config = make_config(q_grid=[GRID[0], 0.5, 1.0], n_global=4, local_budget=4)
+    run = profile(tmp_path, config=config, evaluator=CuspRecorder(legacy), proposer=spy, sobol=cusp_sobol,
+                  max_failures=100 if legacy else 3)
+    run.open(resume=False)
+    run.run()
+    assert run.state['status'] == 'done'
+    cusps = [r for r in run.state['evaluations'] if r['params']['gh'] > 0.4]
+    assert len(cusps) == 4 * 3 and all(rqp.rejected_penalty(r) == 123456789.5 for r in cusps)
+    assert all(r['status'] == ('failed' if legacy else 'rejected') for r in cusps)
+    late = [s for s in seen if rqp.rsm.FAILED_PENALTY in s[0]]
+    assert late, 'the GP never saw the capped rejected points'
+    for values, baseline in seen:
+        assert max(values) <= rqp.rsm.FAILED_PENALTY
+        assert all(values[i] < rqp.rsm.FAILED_PENALTY for i in baseline)
+    for key, branch in run.state['branches'].items():
+        best = run.branch_best(branch['name'], branch['qi'])
+        assert best is None or best['status'] == 'ok', key
+    summary = rqp.summarize(run.state)
+    assert summary['n_rejected'] == 12 and summary['n_failed'] == 0
+    assert 'rejected=12' in rqp.format_summary(summary)
+
+
+def test_rejected_classification_and_legacy_errors():
+    error = rqp.rsm.ProtocolError('exp: evaluation failed (penalty=3e7)', penalty=3e7)
+    assert rqp.classify_protocol_error(error) == dict(status='rejected', penalty=3e7, error=repr(error))
+    for penalty in (None, float('nan'), float('inf'), 1e6, 5.0, 9.9e4):
+        assert rqp.classify_protocol_error(rqp.rsm.ProtocolError('x', penalty=penalty))['status'] == 'failed'
+    assert rqp.classify_protocol_error(ValueError('boom'))['status'] == 'failed'
+    record = dict(status='failed', error="ProtocolError('exp: evaluation failed (penalty=110063685.53)')")
+    assert rqp.rejected_penalty(record) == 110063685.53
+    for text in ('exp: evaluation failed (penalty=1000000.0)', 'exp: evaluation failed (penalty=nan)', 'boom', None):
+        assert rqp.rejected_penalty(dict(status='failed', error=text)) is None
+    assert rqp.rejected_penalty(dict(status='ok', penalty=2e5)) is None
+    assert rqp.rejected_penalty(dict(status='rejected', penalty=2e5)) == 2e5
+
+
+def test_a_rejected_status_without_a_huge_penalty_counts_as_failed(tmp_path):
+    run = profile(tmp_path, evaluator=lambda Q, p, s, m: dict(status='rejected', penalty=5.0))
+    run.open(resume=False)
+    assert run.evaluate(0, dict(COMPACT), 'start', 'compact')['status'] == 'failed' and run.failures == 1
+
+
+# --------------------------------------------------------------------------
+# Budget extension on resume
+# --------------------------------------------------------------------------
+def test_resume_with_a_larger_budget_extends_only_budget_stopped_branches(tmp_path):
+    grid = [GRID[0], 0.5, 1.0]
+    first = profile(tmp_path, config=make_config(q_grid=grid, n_global=1, local_budget=3), evaluator=Recorder())
+    first.open(resume=False)
+    first.run()
+    before = {k: (b['status'], b['n_evals']) for k, b in first.state['branches'].items()}
+    expected = {k: [3, 5] for k, b in first.state['branches'].items()
+                if b['status'] == 'budget' and b['name'] != 'global' and not b.get('merged_into')}
+    assert expected
+
+    same = profile(tmp_path, config=make_config(q_grid=grid, n_global=1, local_budget=3), evaluator=Recorder())
+    same.open(resume=True, run_info=dict(suffix='r1'))
+    same.run()
+    assert same.evaluator.calls == [] and 'extended' not in same.state['runs'][-1]
+
+    recorder = Recorder()
+    second = profile(tmp_path, config=make_config(q_grid=grid, n_global=1, local_budget=5), evaluator=recorder)
+    second.open(resume=True, run_info=dict(suffix='r2'))
+    assert second.state['runs'][-1]['extended'] == expected
+    assert all(second.state['branches'][k]['status'] == 'active' for k in expected)
+    second.run()
+    assert second.state['status'] == 'done' and second.state['config']['local_budget'] == 5
+    assert recorder.calls and all(c['kind'] == 'bo' and f"{c['branch']}@{c['qi']}" in expected for c in recorder.calls)
+    for key, branch in second.state['branches'].items():
+        if key in expected:
+            assert 3 <= branch['n_evals'] <= 5 and branch['status'] != 'active'
+        else:
+            assert (branch['status'], branch['n_evals']) == before[key]
+    saved = json.loads((tmp_path / 'state/profile_state.json').read_text())
+    assert saved['config_hash'] == rqp.config_hash(saved['config'])
+
+    with pytest.raises(rqp.ConfigError, match='only grow'):
+        profile(tmp_path, config=make_config(q_grid=grid, n_global=1, local_budget=4)).open(resume=True)
+    with pytest.raises(rqp.ConfigError, match='opt_seed'):
+        profile(tmp_path, config=make_config(q_grid=grid, n_global=1, local_budget=5, opt_seed=7)).open(resume=True)
+
+
+def test_resume_keeps_stored_budgets_unless_given():
+    stored = dict(local_budget=15, global_budget=12)
+    config = rqp.resume_config(make_config(), stored, {'global_budget'})
+    assert config['local_budget'] == 15 and config['global_budget'] == 10
+    assert rqp.identity(config) == rqp.identity(make_config())
+
+
 def test_smooth_check_measures_the_quadratic_residual():
     records = [dict(params=dict(rho0=r), penalty=1.5 + 0.3 * math.log(r / 90) ** 2) for r in (87, 88.6, 90, 91.4, 93)]
     check = rqp.smooth_check(records)
@@ -370,9 +547,19 @@ def test_dry_run_and_summarize_need_only_the_standard_library(tmp_path):
                             capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     assert 'evaluations: 208 (max 288)' in result.stdout and 'start extended: gh=0 rh=28 rho0=43' in result.stdout
-    bad = subprocess.run([python, '-S', str(DRIVER), '--dry-run', '--endpoints', str(finalists), '--q-grid', '0.3,0.5'],
+    assert 'extended starts at Q=1 ' in result.stdout and 'smoothness check: on' in result.stdout
+    dense = subprocess.run([python, '-S', str(DRIVER), '--dry-run', '--endpoints', str(finalists),
+                            '--q-grid', '0.28,0.29,0.95,1.1,1.2', '--no-smooth-check', '--local-budget', '12'],
+                           capture_output=True, text=True, env=env)
+    assert dense.returncode == 0, dense.stderr
+    assert 'extended starts at Q=0.95 ' in dense.stdout and 'smoothness check: off' in dense.stdout
+    assert 'evaluations: 150 (max 200)' in dense.stdout
+    bad = subprocess.run([python, '-S', str(DRIVER), '--dry-run', '--endpoints', str(finalists), '--q-grid', '0.5,0.3,1'],
                          capture_output=True, text=True, env=env)
-    assert bad.returncode == 2 and 'end at Q=1' in bad.stderr
+    assert bad.returncode == 2 and 'increasing' in bad.stderr
+    bad = subprocess.run([python, '-S', str(DRIVER), '--dry-run', '--endpoints', str(finalists), '--local-budget', '0'],
+                         capture_output=True, text=True, env=env)
+    assert bad.returncode == 2 and '--local-budget must be >= 1' in bad.stderr
 
     run = profile(tmp_path, config=make_config(q_grid=[GRID[0], 0.5, 1.0], n_global=1, local_budget=2))
     run.open(resume=False)

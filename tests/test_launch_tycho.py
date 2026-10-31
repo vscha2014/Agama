@@ -604,6 +604,24 @@ def test_q_profile_resume_reuses_the_directory_and_offline_bundles_it(tmp_path):
     assert f'qprofile/{name}/profile_state.json' in listing and 'runlog_qprofile_' in listing
 
 
+def test_q_profile_forwards_grid_budgets_and_smooth_switch(tmp_path):
+    def setup(work):
+        copy_driver(work)
+        (work / 'finalists.txt').write_text(FINALISTS)
+
+    result, events, work = run(tmp_path, '--threads=4', '--q-profile', '--offline', '--endpoints=finalists.txt',
+                               '--q-grid=0.28,0.29,0.95,1.1,1.2', '--local-budget=12', '--global-budget=8',
+                               '--no-smooth-check', setup=setup)
+    assert result.returncode == 0, output(result)
+    (argv,) = pythons(events)
+    assert argv[argv.index('--q-grid') + 1] == '0.28,0.29,0.95,1.1,1.2'
+    assert argv[argv.index('--local-budget') + 1] == '12' and argv[argv.index('--global-budget') + 1] == '8'
+    assert '--no-smooth-check' in argv
+    log = next(work.glob('launch_tycho_qprofile_*.log')).read_text()
+    assert 'extended starts at Q=0.95' in log and 'smoothness check: off' in log
+    assert 'evaluations: 150 (max 190)' in log
+
+
 @pytest.mark.parametrize('extra_args', [
     ('--q-profile', '--models=finalists.txt'),
     ('--q-profile', '--Q1'),
@@ -612,10 +630,14 @@ def test_q_profile_resume_reuses_the_directory_and_offline_bundles_it(tmp_path):
     ('--q-profile', '--pot-lmax=8'),
     ('--q-profile', '--resume-profile=missing'),
     ('--q-profile', '--endpoints=nope.txt'),
-    ('--q-profile', '--q-grid=0.3,0.5'),
+    ('--q-profile', '--q-grid=0.5,0.3,1'),
     ('--q-profile', '--save-below=abc'),
+    ('--q-profile', '--local-budget=0'),
+    ('--q-profile', '--global-budget=abc'),
     ('--q-grid=0.3,1',),
     ('--endpoints=finalists.txt',),
+    ('--local-budget=12',),
+    ('--no-smooth-check',),
 ])
 def test_q_profile_rejects_invalid_combinations(tmp_path, extra_args):
     def setup(work):

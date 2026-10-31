@@ -59,7 +59,9 @@ SEED_TABLE_COLUMNS = ('seed', 'status', 'penalty', 'upsilon', 'probes', 'sample_
 
 
 class ProtocolError(RuntimeError):
-    pass
+    def __init__(self, message, penalty=None):
+        super().__init__(message)
+        self.penalty = penalty
 
 
 # --------------------------------------------------------------------------
@@ -379,7 +381,8 @@ def run_protocol(mod, name, params, files, seed, rng_factory, ic_seed=None):
     penalty = -float(value)
     block = parse_last_block(target, mod.hostname_proc)
     if not math.isfinite(penalty) or penalty >= FAILED_PENALTY or block is None:
-        raise ProtocolError(f'{name}: evaluation failed (penalty={penalty})')
+        raise ProtocolError(f'{name}: evaluation failed (penalty={penalty})',
+                            penalty=penalty if block is not None else None)
     orbitlib = block.get('orbitlib', {})
     result = dict(
         penalty=penalty, upsilon=block['row'][5], probes=mod.number_of_find_w_U - probes,

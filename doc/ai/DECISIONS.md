@@ -528,3 +528,22 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Re-evaluation with other seeds** | not planned now; decided after the run from the size of
   any barrier/branch crossing relative to the known two-realisation scatter.
 - Mocked tests only (`tests/test_q_profile.py`, `test_launch_tycho.py`); the run is done by the user.
+
+## 2026-10-31 — Q profile: dense grid beyond Q=1, rejected points in the GP, budget extension (user)
+
+- **Grid** | next profile at Q = 0.28, 0.29 (compact wall), 0.95 (spherical wall), 1.1, 1.2
+  (prolate side) with the same starts. `--q-grid` no longer has to end at 1: the extended branch
+  starts at the grid Q closest to 1 (here 0.95) and is continued down, then up; compact goes up
+  from the lowest Q as before (at 0.95 it starts from the best at 0.29 — accepted; a warm start
+  from the previous profile was declined). Default grid behaviour is unchanged.
+- **Smoothness check** | off for this run (`--no-smooth-check`): CRN smoothness is already
+  measured; the 4 points would take 40 % of the compact budget at the wall.
+- **Rejected points** | a completed evaluation with a finite penalty ≥ `FAILED_PENALTY` (1e5;
+  not the 1e6 sentinel) is `rejected`: it enters the GP at its Q capped at 1e5 so cusp regions
+  are not proposed again (the 2026-10-29 run repeated gh = 0.64 at Q=1), is never a branch best
+  or baseline, and does not count towards `--max-failures`. Legacy `failed` records with such a
+  penalty in the error text are treated alike. The penalty threshold itself is unchanged.
+- **Budget extension** | on resume larger `--local-budget/--global-budget` continue every branch
+  stopped by budget (trust region kept); budgets omitted ⇒ stored; smaller ⇒ refused. A
+  per-Q filter was declined.
+- Mocked tests only; the run is started by the user on tycho.

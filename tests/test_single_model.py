@@ -387,6 +387,19 @@ def test_driver_routes_rows_and_reports_failures(tmp_path, monkeypatch, scenario
     assert mod.number_of_h_IC_lw == 0 and mod.best_overall_target == -float('inf')
 
 
+def test_protocol_error_carries_the_penalty_only_with_a_history_block(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mod, _ = stub_module(tmp_path, lambda call, mod: write_block(mod, 3.9e7, reused=False) if call == 1 else -2e8)
+    runner.prepare_module(mod, FakeStore())
+    params = dict(Q=0.3, gh=0.0, rh=2.0, rho0=90.0)
+    with pytest.raises(runner.ProtocolError) as caught:
+        runner.run_protocol(mod, 'exp', params, dict(pool='out_h_a.txt', side='single_a.txt'), 7, lambda s: s)
+    assert caught.value.penalty == pytest.approx(3.9e7) and 'penalty=39000000.0' in str(caught.value)
+    with pytest.raises(runner.ProtocolError) as caught:
+        runner.run_protocol(mod, 'exp', params, dict(pool='out_h_b.txt', side='single_b.txt'), 7, lambda s: s)
+    assert caught.value.penalty is None
+
+
 class RowStore(FakeStore):
     def __init__(self, row):
         super().__init__()
