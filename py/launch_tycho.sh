@@ -53,6 +53,14 @@ QP_LOCAL_BUDGET=""
 QP_GLOBAL_BUDGET=""
 QP_NO_SMOOTH=0
 QP_OPTS_SET=0
+LOCALPCA=0
+LP_BOX=""
+LP_BUDGET=""
+LP_NSOBOL=""
+LP_PRIORS=""
+LP_RESUME=""
+LP_OPTS_SET=0
+SAVE_BELOW_SET=0
 MEMORY_GB=""
 RESULTS_DIR="${RESULTS_DIR:-}"
 GIT_RESULTS_MODE="${GIT_RESULTS:-auto}"
@@ -86,9 +94,17 @@ for arg in "$@"; do
                 '    --local-budget=N / --global-budget=N  Оценок на ветвь (по умолчанию 10/10; при' \
                 '                      --resume-profile больше сохранённого — продление ветвей, остановленных по бюджету).' \
                 '    --no-smooth-check Без диагностики гладкости по rho0 на нижнем Q.' \
-                '    --save-below=P    Порог penalty для сохранения .npz (по умолчанию 3.5).' \
+                '  --local-pca         Локальный поиск TuRBO в полном 4D PCA-базисе (run_local_pca.py, всегда --l24,' \
+                '                      seed AGAMA 42 перед каждой оценкой, строки в localpca_*).' \
+                '    --box=SPEC        Обязательно: Q=a:b,gh=a:b,rh=a:b,rho0=a:b внутри bounds_original.' \
+                '    --budget=N        Новых оценок (по умолчанию 60; при --resume-search больше — продление).' \
+                '    --n-sobol=N       Из них точек Sobol в боксе до TuRBO (по умолчанию 8).' \
+                '    --prior-states=LIST  Каталоги Q-профилей через запятую (имена в results/logs/qprofile/ или' \
+                '                      пути; по умолчанию все qprofile_*; none — без них): seed-42 точки в боксе.' \
+                '    --resume-search=DIR  Продолжить поиск (имя каталога в results/logs/localpca/ или путь).' \
+                '  --save-below=P      Порог penalty для сохранения .npz (--q-profile, --local-pca; по умолчанию 3.5).' \
                 '  --memory-gb=N       Явный лимит MemoryMax в GiB (по умолчанию MemTotal/4' \
-                '                      для поиска и 8 GiB для --models=FILE и --q-profile).' \
+                '                      для поиска и 8 GiB для --models=FILE, --q-profile и --local-pca).' \
                 '  --results-dir=D     Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
                 '  --git-results       Синхронизировать историю и логи через git-репозиторий results (без rclone).' \
                 '  --no-git-results    Отключить автопереключение на ../results и использовать rclone.' \
@@ -124,10 +140,16 @@ for arg in "$@"; do
         --prior-points=*)  QP_PRIORS="${arg#*=}"; QP_OPTS_SET=1 ;;
         --no-prior-points) QP_NO_PRIORS=1; QP_OPTS_SET=1 ;;
         --resume-profile=*) QP_RESUME="${arg#*=}"; QP_OPTS_SET=1 ;;
-        --save-below=*)    QP_SAVE_BELOW="${arg#*=}"; QP_OPTS_SET=1 ;;
+        --save-below=*)    QP_SAVE_BELOW="${arg#*=}"; SAVE_BELOW_SET=1 ;;
         --local-budget=*)  QP_LOCAL_BUDGET="${arg#*=}"; QP_OPTS_SET=1 ;;
         --global-budget=*) QP_GLOBAL_BUDGET="${arg#*=}"; QP_OPTS_SET=1 ;;
         --no-smooth-check) QP_NO_SMOOTH=1; QP_OPTS_SET=1 ;;
+        --local-pca)       LOCALPCA=1 ;;
+        --box=*)           LP_BOX="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --budget=*)        LP_BUDGET="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --n-sobol=*)       LP_NSOBOL="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --prior-states=*)  LP_PRIORS="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --resume-search=*) LP_RESUME="${arg#*=}"; LP_OPTS_SET=1 ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)     GIT_RESULTS_MODE=1 ;;
@@ -185,9 +207,28 @@ TIMESTAMP="${TYCHO_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 [ -n "$ORBLIB_DIR" ] || ORBLIB_DIR="${WORK_DIR}/orblib"
 case "$ORBLIB_DIR" in /*) ;; *) ORBLIB_DIR="${WORK_DIR}/${ORBLIB_DIR}" ;; esac
 
+# Диагностические драйверы (seed AGAMA 42, L24): профиль по Q и локальный PCA-поиск.
+DRIVER=0
+DRV=""
+DRV_SCRIPT=""
+DRV_FLAG=""
+DRV_RESUME=""
+DRV_RESUME_FLAG=""
+DRV_STATE=""
+if [ "$QPROFILE" -eq 1 ] && [ "$LOCALPCA" -eq 1 ]; then
+    echo "ОШИБКА: --q-profile и --local-pca взаимоисключающие" >&2
+    exit 2
+fi
 if [ "$QPROFILE" -eq 1 ]; then
+    DRIVER=1; DRV="qprofile"; DRV_SCRIPT="run_q_profile.py"; DRV_FLAG="--q-profile"
+    DRV_RESUME="$QP_RESUME"; DRV_RESUME_FLAG="--resume-profile"; DRV_STATE="profile_state.json"
+elif [ "$LOCALPCA" -eq 1 ]; then
+    DRIVER=1; DRV="localpca"; DRV_SCRIPT="run_local_pca.py"; DRV_FLAG="--local-pca"
+    DRV_RESUME="$LP_RESUME"; DRV_RESUME_FLAG="--resume-search"; DRV_STATE="search_state.json"
+fi
+if [ "$DRIVER" -eq 1 ]; then
     if { [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; } && { [ "$POT_LMAX" -ne 24 ] || [ "$POT_NGRID" -ne 184 ]; }; then
-        echo "ОШИБКА: --q-profile считается только с --l24 (N=184, lmax=24)" >&2
+        echo "ОШИБКА: ${DRV_FLAG} считается только с --l24 (N=184, lmax=24)" >&2
         exit 2
     fi
     L24=1; POT_LMAX=24; POT_NGRID=184
@@ -262,31 +303,88 @@ PROFILE_NAME=""
 QP_STORE=""
 QP_PLAN=""
 if [ "$QPROFILE" -eq 0 ] && [ "$QP_OPTS_SET" -eq 1 ]; then
-    echo "ОШИБКА: --q-grid, --endpoints, --prior-points, --no-prior-points, --resume-profile, --save-below," \
+    echo "ОШИБКА: --q-grid, --endpoints, --prior-points, --no-prior-points, --resume-profile," \
          "--local-budget, --global-budget и --no-smooth-check — только с --q-profile" >&2
     exit 2
 fi
-if [ "$QPROFILE" -eq 1 ]; then
+if [ "$LOCALPCA" -eq 0 ] && [ "$LP_OPTS_SET" -eq 1 ]; then
+    echo "ОШИБКА: --box, --budget, --n-sobol, --prior-states и --resume-search — только с --local-pca" >&2
+    exit 2
+fi
+if [ "$DRIVER" -eq 0 ] && [ "$SAVE_BELOW_SET" -eq 1 ]; then
+    echo "ОШИБКА: --save-below — только с --q-profile или --local-pca" >&2
+    exit 2
+fi
+if [ "$DRIVER" -eq 1 ]; then
     if [ -n "$MODELS_FILE" ] || [ -n "$SEED_SPEC" ] || [ "$PROTOCOLS" != "exp" ] || [ "$Q1" -eq 1 ] \
             || [ "$RESUME" -eq 1 ] || [ "$N_PROC" -ne 1 ]; then
-        echo "ОШИБКА: --q-profile несовместим с --models, --ic-seeds, --protocols, --Q1, --resume (есть --resume-profile) и --nproc>1" >&2
+        echo "ОШИБКА: ${DRV_FLAG} несовместим с --models, --ic-seeds, --protocols, --Q1, --resume (есть ${DRV_RESUME_FLAG}) и --nproc>1" >&2
         exit 2
     fi
     if ! [[ "$QP_SAVE_BELOW" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
         echo "ОШИБКА: --save-below должно быть числом (получено: '${QP_SAVE_BELOW}')" >&2
         exit 2
     fi
+    [ "$SAVE_ORBLIB" -eq 0 ] && QP_SAVE_BELOW="-1"
+    for f in "$DRV_SCRIPT" run_q_profile.py run_single_model.py; do
+        if [ ! -f "${WORK_DIR}/${f}" ]; then
+            echo "ОШИБКА: нужны ${WORK_DIR}/${DRV_SCRIPT}, run_q_profile.py и run_single_model.py" >&2
+            exit 2
+        fi
+    done
+fi
+if [ "$LOCALPCA" -eq 1 ]; then
+    if [ -z "$LP_BOX" ]; then
+        echo "ОШИБКА: --local-pca требует --box=Q=a:b,gh=a:b,rh=a:b,rho0=a:b" >&2
+        exit 2
+    fi
+    if { [ -n "$LP_BUDGET" ] && ! [[ "$LP_BUDGET" =~ ^[1-9][0-9]*$ ]]; } \
+            || { [ -n "$LP_NSOBOL" ] && ! [[ "$LP_NSOBOL" =~ ^[0-9]+$ ]]; }; then
+        echo "ОШИБКА: --budget — целое >= 1, --n-sobol — целое >= 0 (получено: '${LP_BUDGET}', '${LP_NSOBOL}')" >&2
+        exit 2
+    fi
+    # Состояния Q-профилей: имена в results/logs/qprofile/ или пути; по умолчанию все qprofile_*.
+    declare -a LP_PRIOR_DIRS=()
+    if [ "$LP_PRIORS" = "none" ]; then
+        :
+    elif [ -n "$LP_PRIORS" ]; then
+        IFS=',' read -r -a _prior_list <<< "$LP_PRIORS"
+        for _p in "${_prior_list[@]}"; do
+            [ -n "$_p" ] || continue
+            _found=""
+            for _cand in "$_p" "${RESULTS_DIR}/logs/qprofile/${_p}" "${WORK_DIR}/qprofile/${_p}"; do
+                if [ -f "${_cand}/profile_state.json" ]; then
+                    _found="$(cd "$_cand" && pwd)"
+                    break
+                fi
+            done
+            if [ -z "$_found" ]; then
+                echo "ОШИБКА: --prior-states: нет profile_state.json для '${_p}'" >&2
+                exit 2
+            fi
+            LP_PRIOR_DIRS+=("$_found")
+        done
+    else
+        for _cand in "${RESULTS_DIR}"/logs/qprofile/qprofile_*/profile_state.json; do
+            [ -f "$_cand" ] && LP_PRIOR_DIRS+=("$(dirname "$_cand")")
+        done
+    fi
+    declare -a QP_INPUT_ARGS=(--incl "$INCL" --box "$LP_BOX")
+    [ -n "$LP_BUDGET" ] && QP_INPUT_ARGS+=(--budget "$LP_BUDGET")
+    [ -n "$LP_NSOBOL" ] && QP_INPUT_ARGS+=(--n-sobol "$LP_NSOBOL")
+    [ "${#LP_PRIOR_DIRS[@]}" -gt 0 ] && QP_INPUT_ARGS+=(--prior-states "${LP_PRIOR_DIRS[@]}")
+    if ! QP_PLAN="$(python3 "${WORK_DIR}/run_local_pca.py" --dry-run "${QP_INPUT_ARGS[@]}")"; then
+        echo "ОШИБКА: run_local_pca.py --dry-run отверг входные данные (бокс, бюджет или состояния Q-профилей)" >&2
+        exit 2
+    fi
+fi
+if [ "$QPROFILE" -eq 1 ]; then
     for _budget in "$QP_LOCAL_BUDGET" "$QP_GLOBAL_BUDGET"; do
         if [ -n "$_budget" ] && ! [[ "$_budget" =~ ^[1-9][0-9]*$ ]]; then
             echo "ОШИБКА: --local-budget/--global-budget должны быть целыми >= 1 (получено: '${_budget}')" >&2
             exit 2
         fi
     done
-    [ "$SAVE_ORBLIB" -eq 0 ] && QP_SAVE_BELOW="-1"
-    if [ ! -f "${WORK_DIR}/run_q_profile.py" ] || [ ! -f "${WORK_DIR}/run_single_model.py" ]; then
-        echo "ОШИБКА: нужны ${WORK_DIR}/run_q_profile.py и run_single_model.py" >&2
-        exit 2
-    fi
     if ! QP_ENDPOINTS="$(resolve_input "$QP_ENDPOINTS")"; then
         echo "ОШИБКА: не найден файл финалистов --endpoints" >&2
         exit 2
@@ -356,7 +454,7 @@ fi
 
 _MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' "$TYCHO_MEMINFO" 2>/dev/null || echo 0)
 _DEFAULT_MEM_MAX=$(( _MEM_TOTAL_KB * 1024 / 4 ))
-{ [ -n "$MODELS_FILE" ] || [ "$QPROFILE" -eq 1 ]; } && _DEFAULT_MEM_MAX=$(( 8 * 1024 * 1024 * 1024 ))
+{ [ -n "$MODELS_FILE" ] || [ "$DRIVER" -eq 1 ]; } && _DEFAULT_MEM_MAX=$(( 8 * 1024 * 1024 * 1024 ))
 MEM_MAX="${TYCHO_MEM_MAX:-$_DEFAULT_MEM_MAX}"
 if ! [[ "$MEM_MAX" =~ ^[0-9]+$ ]] || [ "$MEM_MAX" -lt $((1024 * 1024 * 1024)) ]; then
     echo "ОШИБКА: лимит памяти TYCHO_MEM_MAX='$MEM_MAX' байт (< 1 GiB или не число)" >&2
@@ -367,8 +465,8 @@ MEM_HIGH=$(( MEM_MAX / 10 * 9 ))
 EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
 [ "$Q1" -eq 1 ] && EXP_ID="Q1${EXP_ID}"
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
-if [ "$QPROFILE" -eq 1 ]; then
-    RUN_TAG="qprofile_${EXP_ID}_i${INCL_FMT}"
+if [ "$DRIVER" -eq 1 ]; then
+    RUN_TAG="${DRV}_${EXP_ID}_i${INCL_FMT}"
 elif [ -n "$MODELS_FILE" ]; then
     if [ "$SEED_MODE" -eq 1 ]; then
         RUN_TAG="seeds_multi_${EXP_ID}_n${NMODELS}"
@@ -378,22 +476,22 @@ elif [ -n "$MODELS_FILE" ]; then
 else
     RUN_TAG="${EXP_ID}_i${INCL_FMT}"
 fi
-if [ "$QPROFILE" -eq 1 ]; then
-    # Состояние профиля живёт сразу в results (git) или в py/qprofile (offline);
-    # --resume-profile продолжает тот же каталог новым запуском.
-    QP_BASE="${WORK_DIR}/qprofile"
-    [ "$GIT_RESULTS" -eq 1 ] && QP_BASE="${RESULTS_DIR}/logs/qprofile"
-    if [ -n "$QP_RESUME" ]; then
-        if [ -d "$QP_RESUME" ]; then
-            PROFILE_DIR="$(cd "$QP_RESUME" && pwd)"
-        elif [ -d "${QP_BASE}/${QP_RESUME}" ]; then
-            PROFILE_DIR="${QP_BASE}/${QP_RESUME}"
+if [ "$DRIVER" -eq 1 ]; then
+    # Состояние драйвера живёт сразу в results/logs/<qprofile|localpca> (git) или в
+    # py/<qprofile|localpca> (offline); --resume-profile/--resume-search продолжает тот же каталог.
+    QP_BASE="${WORK_DIR}/${DRV}"
+    [ "$GIT_RESULTS" -eq 1 ] && QP_BASE="${RESULTS_DIR}/logs/${DRV}"
+    if [ -n "$DRV_RESUME" ]; then
+        if [ -d "$DRV_RESUME" ]; then
+            PROFILE_DIR="$(cd "$DRV_RESUME" && pwd)"
+        elif [ -d "${QP_BASE}/${DRV_RESUME}" ]; then
+            PROFILE_DIR="${QP_BASE}/${DRV_RESUME}"
         else
-            echo "ОШИБКА: --resume-profile: нет каталога '${QP_RESUME}' (ни как путь, ни в ${QP_BASE})" >&2
+            echo "ОШИБКА: ${DRV_RESUME_FLAG}: нет каталога '${DRV_RESUME}' (ни как путь, ни в ${QP_BASE})" >&2
             exit 2
         fi
-        if [ ! -f "${PROFILE_DIR}/profile_state.json" ]; then
-            echo "ОШИБКА: --resume-profile: нет ${PROFILE_DIR}/profile_state.json" >&2
+        if [ ! -f "${PROFILE_DIR}/${DRV_STATE}" ]; then
+            echo "ОШИБКА: ${DRV_RESUME_FLAG}: нет ${PROFILE_DIR}/${DRV_STATE}" >&2
             exit 2
         fi
         QP_IS_RESUME=1
@@ -401,7 +499,7 @@ if [ "$QPROFILE" -eq 1 ]; then
         PROFILE_DIR="${QP_BASE}/${RUN_TAG}_${TIMESTAMP}"
     fi
     PROFILE_NAME="$(basename "$PROFILE_DIR")"
-    QP_STORE="${WORK_DIR}/orblib_qprofile/${PROFILE_NAME}"
+    QP_STORE="${WORK_DIR}/orblib_${DRV}/${PROFILE_NAME}"
 fi
 UNIT="agama-tycho-${RUN_TAG//./p}-${TIMESTAMP}"
 LOGFILE="${WORK_DIR}/launch_tycho_${RUN_TAG}_${TIMESTAMP}.log"
@@ -472,10 +570,14 @@ preflight() {
                 "| ref penalty=${M_PEN[i]} Upsilon=${M_UPS[i]} (${M_SRC[i]})"
         done
     fi
-    if [ "$QPROFILE" -eq 1 ]; then
-        log "  Режим --q-profile: каталог ${PROFILE_DIR} (resume=${QP_IS_RESUME}), store ${QP_STORE}," \
+    if [ "$DRIVER" -eq 1 ]; then
+        log "  Режим ${DRV_FLAG}: каталог ${PROFILE_DIR} (resume=${QP_IS_RESUME}), store ${QP_STORE}," \
             "общие .npz → ${ORBLIB_DIR} при penalty <= ${QP_SAVE_BELOW}"
-        log "    finalists: ${QP_ENDPOINTS}; priors: ${QP_PRIORS:-нет}"
+        if [ "$QPROFILE" -eq 1 ]; then
+            log "    finalists: ${QP_ENDPOINTS}; priors: ${QP_PRIORS:-нет}"
+        else
+            log "    box: ${LP_BOX}; prior states: ${LP_PRIOR_DIRS[*]:-нет}"
+        fi
         while IFS= read -r _line; do log "    ${_line}"; done <<< "$QP_PLAN"
     fi
     activate_conda
@@ -485,6 +587,12 @@ preflight() {
         die "окружение $PYTHON неполное: нужны agama (с setNumThreads), torch, botorch, gpytorch, sklearn, scipy, requests"
     fi
     log "  ✓ Python: $(command -v "$PYTHON")"
+    if [ "$LOCALPCA" -eq 1 ]; then
+        if ! "$PYTHON" "${WORK_DIR}/run_local_pca.py" --self-test --box "$LP_BOX" >>"$LOGFILE" 2>&1; then
+            die "самопроверка BoTorch-предложения с линейными ограничениями не прошла (см. ${LOGFILE})"
+        fi
+        log "  ✓ BoTorch: предложение qLogNEI с ограничениями бокса"
+    fi
 
     if [ "$USE_SCOPE" -eq 1 ]; then
         command -v systemd-run > /dev/null 2>&1 || die "нет systemd-run (или используйте --no-scope)"
@@ -690,7 +798,7 @@ upload() {
         fname="$(basename "$1")"
         local run_sub="logs/${RUN_TAG}_${TIMESTAMP}"
         [ "$SEED_MODE" -eq 1 ] && run_sub="logs/seed/${RUN_TAG}_${TIMESTAMP}"
-        [ "$QPROFILE" -eq 1 ] && run_sub="logs/qprofile/${PROFILE_NAME}"
+        [ "$DRIVER" -eq 1 ] && run_sub="logs/${DRV}/${PROFILE_NAME}"
         mkdir -p "${RESULTS_DIR}/${run_sub}"
         cp -Lf "$1" "${RESULTS_DIR}/${run_sub}/${fname}" 2>>"$LOGFILE" || return 1
         log "  ✓ Сохранено в results/${run_sub}/${fname}"
@@ -781,13 +889,17 @@ trap on_signal TERM INT
 export HOSTNAME_SUFFIX="$HOSTNAME_ENV" RCLONE_REMOTE NTFY_TOPIC NTFY_SERVER
 sync_from_results_git
 
-if [ "$QPROFILE" -eq 1 ]; then
+if [ "$DRIVER" -eq 1 ]; then
     mkdir -p "$PROFILE_DIR" "$ORBLIB_DIR"
     monitor_loop &
     MONITOR_PID=$!
-    QP_LOG="${WORK_DIR}/runlog_qprofile_${RUN_TAG}_${TIMESTAMP}.log"
-    log "Профиль по Q: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
-    declare -a QP_ARGS=("${QP_INPUT_ARGS[@]}" --state-dir "$PROFILE_DIR" --suffix "qprofile${TIMESTAMP}"
+    QP_LOG="${WORK_DIR}/runlog_${DRV}_${RUN_TAG}_${TIMESTAMP}.log"
+    if [ "$QPROFILE" -eq 1 ]; then
+        log "Профиль по Q: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
+    else
+        log "Локальный PCA-поиск: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
+    fi
+    declare -a QP_ARGS=("${QP_INPUT_ARGS[@]}" --state-dir "$PROFILE_DIR" --suffix "${DRV}${TIMESTAMP}"
                         --orblib-dir "$QP_STORE" --shared-orblib "$ORBLIB_DIR"
                         --n_threads "$THREADS_PER_PROC" --save-below "$QP_SAVE_BELOW"
                         --min-free-gb "$TYCHO_MIN_FREE_GB")
@@ -795,7 +907,7 @@ if [ "$QPROFILE" -eq 1 ]; then
     OMP_NUM_THREADS="$THREADS_PER_PROC" MKL_NUM_THREADS="$THREADS_PER_PROC" \
     OPENBLAS_NUM_THREADS="$THREADS_PER_PROC" NUMEXPR_NUM_THREADS="$THREADS_PER_PROC" \
     OMP_PROC_BIND=close OMP_PLACES=cores \
-        nice -n 19 ionice -c 3 "$PYTHON" -u "${WORK_DIR}/run_q_profile.py" "${QP_ARGS[@]}" \
+        nice -n 19 ionice -c 3 "$PYTHON" -u "${WORK_DIR}/${DRV_SCRIPT}" "${QP_ARGS[@]}" \
         > >(trap '' INT TERM; exec tee -a "$QP_LOG") 2>&1 &
     WPIDS=("$!")
     qstart=$(date +%s)
@@ -807,18 +919,18 @@ if [ "$QPROFILE" -eq 1 ]; then
     WCODES[0]=$code
     elapsed=$(( $(date +%s) - qstart ))
     case "$code" in
-        0)   log "  ✓ профиль завершён (wall ${elapsed} с)" ;;
-        75)  log "  ~ профиль остановлен штатно, состояние сохранено (wall ${elapsed} с); продолжить: --q-profile --resume-profile=${PROFILE_NAME}" ;;
-        137) log "  ✗ профиль убит (код 137: OOM по MemoryMax или KILL, wall ${elapsed} с); состояние на момент последней оценки — продолжить через --resume-profile=${PROFILE_NAME}" ;;
-        *)   log "  ✗ профиль завершён с кодом $code (wall ${elapsed} с)" ;;
+        0)   log "  ✓ ${DRV} завершён (wall ${elapsed} с)" ;;
+        75)  log "  ~ ${DRV} остановлен штатно, состояние сохранено (wall ${elapsed} с); продолжить: ${DRV_FLAG} ${DRV_RESUME_FLAG}=${PROFILE_NAME}" ;;
+        137) log "  ✗ ${DRV} убит (код 137: OOM по MemoryMax или KILL, wall ${elapsed} с); состояние на момент последней оценки — продолжить через ${DRV_RESUME_FLAG}=${PROFILE_NAME}" ;;
+        *)   log "  ✗ ${DRV} завершён с кодом $code (wall ${elapsed} с)" ;;
     esac
     [ -n "$KILLER_PID" ] && kill "$KILLER_PID" 2>/dev/null || true
     kill "$MONITOR_PID" 2>/dev/null || true
     wait "$MONITOR_PID" 2>/dev/null || true
     log "Итоги ресурсов scope: memory.peak=$(cat "${CG_DIR}/memory.peak" 2>/dev/null || echo n/a)," \
         "$(grep -E '^usage_usec' "${CG_DIR}/cpu.stat" 2>/dev/null || echo 'cpu.stat n/a')"
-    LOG_REMOTE="${REMOTE_DIR}/qprofile/${PROFILE_NAME}"
-    declare -a QP_FILES=("$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_qprofile${TIMESTAMP}.txt")
+    LOG_REMOTE="${REMOTE_DIR}/${DRV}/${PROFILE_NAME}"
+    declare -a QP_FILES=("$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_${DRV}${TIMESTAMP}.txt")
     if [ "$GIT_RESULTS" -eq 0 ]; then
         for f in "$PROFILE_DIR"/*; do QP_FILES+=("$f"); done
     fi
@@ -1045,8 +1157,8 @@ commit_and_push_results "Results ${RUN_TAG}_${TIMESTAMP} on ${HOSTNAME_ENV}" || 
 if [ "$OFFLINE" -eq 1 ]; then
     BUNDLE="${WORK_DIR}/tycho_results_${RUN_TAG}_${TIMESTAMP}.tar.gz"
     declare -a CARRY=()
-    if [ "$QPROFILE" -eq 1 ]; then
-        for f in "$LOGFILE" "$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_qprofile${TIMESTAMP}.txt"; do
+    if [ "$DRIVER" -eq 1 ]; then
+        for f in "$LOGFILE" "$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_${DRV}${TIMESTAMP}.txt"; do
             [ -f "$f" ] && CARRY+=("$(basename "$f")")
         done
         case "$PROFILE_DIR" in

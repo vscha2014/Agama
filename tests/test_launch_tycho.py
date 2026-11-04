@@ -28,14 +28,22 @@ exec "$@"
 ''',
     'python': r'''#!/bin/bash
 if [ "$1" = "-c" ]; then exit "${PY_IMPORT_FAIL:-0}"; fi
+case " $* " in
+    *--self-test*)
+        echo "selftest $*" >> "$HOME/events"
+        exit "${PY_SELFTEST:-0}" ;;
+esac
 echo "python $* OMP=$OMP_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS" >> "$HOME/events"
 case " $* " in
-    *run_q_profile.py*)
+    *run_q_profile.py*|*run_local_pca.py*)
         state=""; prev=""
         for a in "$@"; do [ "$prev" = "--state-dir" ] && state="$a"; prev="$a"; done
         mkdir -p "$state"
-        echo '{"status": "done"}' > "$state/profile_state.json"
-        echo "qprofile done"
+        case " $* " in
+            *run_q_profile.py*) echo '{"status": "done"}' > "$state/profile_state.json" ;;
+            *) echo '{"status": "done"}' > "$state/search_state.json" ;;
+        esac
+        echo "driver done"
         exit "${PY_EXIT:-0}" ;;
 esac
 sfx=""; q1=""; pot=""; prev=""; rep=""; seedf=""; prots=""
@@ -644,5 +652,131 @@ def test_q_profile_rejects_invalid_combinations(tmp_path, extra_args):
         copy_driver(work)
         (work / 'finalists.txt').write_text(FINALISTS)
         (work / 'models_finalists_q1_freeq.txt').write_text(FINALISTS)
+    result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=setup)
+    assert result.returncode == 2 and not events, output(result)
+
+
+# --------------------------------------------------------------------------
+# --local-pca
+# --------------------------------------------------------------------------
+LP_BOX = '--box=Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60'
+QSTATE = 'qprofile_d1_nb250_gh0_l24n184_ser0_i90.0_20261102_145506'
+
+
+def copy_local_pca(work):
+    copy_driver(work)
+    (work / 'run_local_pca.py').write_text((ROOT / 'py/run_local_pca.py').read_text())
+
+
+def qprofile_state(harness_text):
+    import hashlib
+    import json
+    context = dict(exp_id='d1_nb250_gh0_l24n184_ser0', geom_hash='b99b4c93', evaluation_context='ctx',
+                   harness_sha256=hashlib.sha256(harness_text.encode()).hexdigest())
+    bounds = {'Q': [0.05, 2.5], 'gh': [0.0, 1.6], 'rh': [0.5, 30.0], 'rho0': [10.0, 120.0], 'Upsilon': [0.1, 1.6]}
+    record = dict(id=24, Q=0.95, params=dict(gh=0.0, rh=29.26, rho0=26.84), penalty=1.4793, status='ok',
+                  kind='bo', source='qprofile', upsilon=0.76)
+    return json.dumps(dict(config=dict(opt_seed=42, pot='l24', incl=90.0, bounds=bounds), runs=[context],
+                           evaluations=[record]))
+
+
+def fake_harness_text(tmp_path):
+    (tmp_path / 'probe').mkdir()
+    work = workdir(tmp_path / 'probe')
+    return (work / SCRIPT).read_text()
+
+
+def test_local_pca_runs_the_driver_in_one_8gb_scope_and_commits_the_state(tmp_path):
+    state_text = qprofile_state(fake_harness_text(tmp_path))
+    remote, results = results_repo(tmp_path, {f'logs/qprofile/{QSTATE}/profile_state.json': state_text})
+    result, events, work = run(tmp_path, '--threads=4', '--local-pca', LP_BOX, setup=copy_local_pca)
+    assert result.returncode == 0, output(result)
+    scope = next(e for e in events if e.startswith('systemd-run') and '--unit=' in e)
+    assert 'MemoryMax=8589934592' in scope.split() and 'CPUQuota=400%' in scope.split()
+    assert '--unit=agama-tycho-localpca_d1_nb250_gh0_l24n184_ser0_i90p0-20261010_120000' in scope
+    assert any(e.startswith('selftest ') and '--box Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60' in e for e in events)
+    (argv,) = pythons(events)
+    name = 'localpca_d1_nb250_gh0_l24n184_ser0_i90.0_20261010_120000'
+    state = results / 'logs/localpca' / name
+    assert argv[2] == str(work / 'run_local_pca.py')
+    assert argv[argv.index('--state-dir') + 1] == str(state)
+    assert argv[argv.index('--orblib-dir') + 1] == str(work / 'orblib_localpca' / name)
+    assert argv[argv.index('--shared-orblib') + 1] == str(work / 'orblib')
+    assert argv[argv.index('--box') + 1] == 'Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60'
+    assert argv[argv.index('--prior-states') + 1] == str(results / 'logs/qprofile' / QSTATE)
+    assert argv[argv.index('--suffix') + 1] == 'localpca20261010_120000'
+    assert argv[argv.index('--save-below') + 1] == '3.5' and argv[argv.index('--n_threads') + 1] == '4'
+    assert '--resume' not in argv and '--budget' not in argv and 'OMP=4' in argv
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    committed = verify / 'logs/localpca' / name
+    assert (committed / 'search_state.json').exists()
+    assert list(committed.glob('runlog_localpca_*.log')) and list(committed.glob('launch_tycho_localpca_*.log'))
+    log = next(work.glob('launch_tycho_localpca_*.log')).read_text()
+    assert 'priors in the box: 1 (rejected 0)' in log and 'evaluations: 60 (8 Sobol + 52 TuRBO)' in log
+    assert 'BoTorch: предложение qLogNEI с ограничениями бокса' in log
+
+
+def test_local_pca_resume_forwards_budget_and_bundles_offline(tmp_path):
+    name = 'localpca_d1_nb250_gh0_l24n184_ser0_i90.0_20261001_000000'
+
+    def setup(work):
+        copy_local_pca(work)
+        (work / 'localpca' / name).mkdir(parents=True)
+        (work / 'localpca' / name / 'search_state.json').write_text('{}')
+
+    result, events, work = run(tmp_path, '--threads=4', '--local-pca', '--offline', LP_BOX, f'--resume-search={name}',
+                               '--budget=80', '--n-sobol=0', '--prior-states=none', '--no-save-orblib', setup=setup)
+    assert result.returncode == 0, output(result)
+    (argv,) = pythons(events)
+    assert '--resume' in argv and argv[argv.index('--state-dir') + 1] == str(work / 'localpca' / name)
+    assert argv[argv.index('--budget') + 1] == '80' and argv[argv.index('--n-sobol') + 1] == '0'
+    assert argv[argv.index('--save-below') + 1] == '-1' and '--prior-states' not in argv
+    bundle = next(work.glob('tycho_results_localpca_*.tar.gz'))
+    listing = subprocess.run(['tar', '-tzf', str(bundle)], capture_output=True, text=True, check=True).stdout
+    assert f'localpca/{name}/search_state.json' in listing and 'runlog_localpca_' in listing
+
+
+def test_local_pca_explicit_prior_states_and_failed_self_test(tmp_path):
+    harness = fake_harness_text(tmp_path)
+
+    def setup(work):
+        copy_local_pca(work)
+        (work / 'states' / 'a').mkdir(parents=True)
+        (work / 'states' / 'a' / 'profile_state.json').write_text(qprofile_state(harness))
+
+    result, events, work = run(tmp_path, '--threads=4', '--local-pca', '--offline', LP_BOX,
+                               '--prior-states=states/a', setup=setup, PY_SELFTEST='1')
+    assert result.returncode == 1 and not pythons(events), output(result)
+    assert any(e.startswith('selftest ') for e in events)
+    assert 'самопроверка BoTorch' in output(result)
+
+
+@pytest.mark.parametrize('extra_args', [
+    ('--local-pca',),
+    ('--local-pca', '--box=Q=0.9:1.05'),
+    ('--local-pca', '--box=Q=0.90:1.05,gh=0:0.20,rh=10:31,rho0=15:60'),
+    ('--local-pca', LP_BOX, '--q-profile'),
+    ('--local-pca', LP_BOX, '--models=finalists.txt'),
+    ('--local-pca', LP_BOX, '--Q1'),
+    ('--local-pca', LP_BOX, '--resume'),
+    ('--local-pca', LP_BOX, '--nproc=2'),
+    ('--local-pca', LP_BOX, '--pot-lmax=8'),
+    ('--local-pca', LP_BOX, '--budget=0'),
+    ('--local-pca', LP_BOX, '--n-sobol=x'),
+    ('--local-pca', LP_BOX, '--n-sobol=61'),
+    ('--local-pca', LP_BOX, '--resume-search=missing'),
+    ('--local-pca', LP_BOX, '--prior-states=nope'),
+    ('--local-pca', LP_BOX, '--q-grid=0.3,1'),
+    ('--local-pca', LP_BOX, '--save-below=abc'),
+    (LP_BOX,),
+    ('--budget=10',),
+    ('--resume-search=x',),
+    ('--save-below=3',),
+])
+def test_local_pca_rejects_invalid_combinations(tmp_path, extra_args):
+    def setup(work):
+        copy_local_pca(work)
+        (work / 'finalists.txt').write_text(FINALISTS)
     result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=setup)
     assert result.returncode == 2 and not events, output(result)

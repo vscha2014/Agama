@@ -659,6 +659,64 @@ Tests: `tests/test_q_profile.py`, `tests/test_launch_tycho.py` (`*q_profile*`).
   carry the scatter of two independent realisations (√2 × the seed-scan sd) — decide on
   re-evaluation with other seeds only after the run.
 
+## 3j. Local PCA search (`run_local_pca.py`, `launch_tycho.sh --local-pca`)
+
+Local TuRBO search in a full 4D PCA basis at a fixed IC seed (DECISIONS 2026-11-03): resolve
+the parameters of one region before varying the seed. Diagnostic only: harness, production and
+CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.py` (`*local_pca*`).
+
+- `bash launch_tycho.sh --local-pca --box=Q=a:b,gh=a:b,rh=a:b,rho0=a:b [--budget=60] [--n-sobol=8]
+  [--prior-states=LIST|none] [--resume-search=DIR] [--save-below=3.5] [--preflight]`. Always
+  `--l24`, MemoryMax 8 GiB, 1 process; refuses `--q-profile/--models/--ic-seeds/--protocols/--Q1/
+  --resume/--nproc>1`. `--box` is required and must lie inside `bounds_original` (Upsilon stays the
+  internal search on [0.1, 1.6]). Preflight prints `run_local_pca.py --dry-run` (box, priors, best
+  prior, budget) and runs `--self-test` with the conda Python: qLogNEI with the box constraints on a
+  synthetic objective must return a feasible point, otherwise the launcher stops.
+- Evaluation: as the Q profile (`run_q_profile.build_evaluator(prefix='localpca')`): harness imported
+  once with `--l24 --orblib-dir orblib_localpca/<name> --no-resume`; every evaluation
+  `agama.setRandomSeed(42)` + `exp` protocol with subsample seed 20261001 and an empty Upsilon
+  bracket history; `.npz` with penalty ≤ `--save-below` and Q ≠ 1 saved into the shared `orblib/`
+  after the evaluation (never overwriting); statuses `ok`/`rejected`/`failed` as in §3i.
+- Priors (`--prior-states`, default every `results/logs/qprofile/qprofile_*/profile_state.json`;
+  `none` = without): the seed-42 evaluations (`source=qprofile`, not the profile's own priors) inside
+  the box, without recomputation and outside the budget; rejected ones (also legacy `failed` with
+  such a penalty) enter capped at 1e5. A state is refused unless `opt_seed=42`, `pot=l24`, same
+  `incl` and `bounds_original`, and all its runs share one complete context (`exp_id`, `geom_hash`,
+  `evaluation_context`, `harness_sha256`); the states must agree with each other, with the current
+  harness file (dry-run) and with the imported module (run). Duplicates are skipped.
+- Coordinates x = (Q, gh, log10 rh, log10 rho0). PCA as in the harness, but with **all 4
+  components**: ok points, adaptive cutoff (best 30 %, ≥ 10, port of `adaptive_penalty_cutoff`),
+  weights `exp(-(P − Pmin)/0.1)`, weighted mean/std with the std floored at 0.05 × the box width in
+  x, unweighted centring + SVD (sign fixed). Normalised coordinates u ∈ [0,1]^4 = bounding box of
+  the 16 box corners in PC space; the physical box is 8 linear constraints `A u ≥ b` (no clipping
+  except round-off). Refit every 6 new evaluations (bases stored in the state); the identity
+  basis is used with < 2 ok points.
+- Schedule: `--n-sobol` scrambled Sobol points (d=4, seed 20261103) in the box (Q, gh linear; rh,
+  rho0 logarithmic), then TuRBO steps until `--budget` new evaluations. TR centred at the best ok
+  point (priors included), cube [c ± L/2] ∩ [0,1]^4 ∩ box; harness hyperparameters (L 0.6, min
+  0.5^7, max 1.6, ×2 after 3 successes, /2 after 4 failures, success = relative improvement
+  > 1e-4, restart at 0.6 after a collapse). Proposal: GP (`SingleTaskGP`, y = −log P, learned noise
+  ≥ 1e-6, as §3i) + qLogNEI over all GP points, `optimize_acqf(..., inequality_constraints)`;
+  an infeasible proposal is replaced by the nearest feasible sample (`projected`), a failed one by a
+  feasible random sample (`fallback`) — counted per record (`proposal`) and in the report. A
+  duplicate (< 1e-6 in box-normalised x) costs no evaluation and counts as a TR failure; 50
+  duplicates in a row stop the run (`stalled`).
+- Output (`results/logs/localpca/<name>/`, offline `py/localpca/<name>/`): `search_state.json`
+  (atomic after every evaluation; config with priors and their provenance (state path, sha256,
+  record id), TR, bases, runs with harness/driver SHA256 and context), `search.tsv`,
+  `localpca_<hostname_proc>.txt` (blocks preceded by `# localpca: …` and `# ic_seed: 42`; no pool
+  glob reads it), `report_localpca.json/.txt` (`--summarize DIR`, stdlib): best / best prior /
+  best new (7 numbers, rho0·Υ), improvement over the best prior, edges of the box and of
+  `bounds_original`, edge counts within +0.25/+0.5 of the best, PCA explained variance and axes,
+  proposal counts, TR state.
+- Resume: `--local-pca --resume-search=<name>` with the same inputs (box, priors, seeds); budget
+  omitted ⇒ stored, larger ⇒ the search continues, smaller ⇒ refused; other differences are refused
+  with the names of the config keys. Exit 75 = stopped with state saved, 1 = 5 consecutive failures
+  or error, 0 = done or stalled.
+- Reading: one IC realisation (seed 42), comparable with the Q profiles' seed-42 points; penalty is
+  not χ². An optimum on a box edge that is not a physical bound calls for a wider box (inside
+  `bounds_original`); one on `rh = 30` / `gh = 0` is conditional on those bounds.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -670,9 +728,10 @@ Tests: `tests/test_q_profile.py`, `tests/test_launch_tycho.py` (`*q_profile*`).
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
     test_orblib_storage.py test_single_model.py test_launch_tycho.py test_q_profile.py \
-    --rootdir=. --import-mode=importlib -p no:cacheprovider
+    test_local_pca.py --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
-    py/orblib_storage.py py/run_single_model.py py/run_q_profile.py tests/test_orblib_q1.py
+    py/orblib_storage.py py/run_single_model.py py/run_q_profile.py py/run_local_pca.py \
+    tests/test_orblib_q1.py
 bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
     && bash -n py/launch_multi_model.sh && bash -n py/launch_tycho.sh && git diff --check
 ```

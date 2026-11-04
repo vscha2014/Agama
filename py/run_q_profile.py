@@ -905,7 +905,7 @@ def save_library(mod, storage, capture, Q, params, penalty, shared_dir, save_bel
             os.remove(temporary)
 
 
-def build_evaluator(args, state_dir):
+def build_evaluator(args, state_dir, prefix='qprofile'):
     import importlib.util
     import numpy
     sys.argv = [rsm.EXP_SCRIPT, '--incl', repr(float(args.incl)), '--suffix', args.suffix,
@@ -922,13 +922,13 @@ def build_evaluator(args, state_dir):
     rsm.prepare_module(mod, store)
     capture = OrbitCapture(mod.agama)
     mod.agama = capture
-    history = os.path.join(state_dir, f'qprofile_{mod.hostname_proc}.txt')
+    history = os.path.join(state_dir, f'{prefix}_{mod.hostname_proc}.txt')
     files = dict(pool=history, side=history)
 
     def evaluate(Q, params, seed, meta):
         try:
             store.check_stop()
-            append_line(history, f"# qprofile: eval={meta['id']} Q={Q!r} branch={meta['branch']} kind={meta['kind']}")
+            append_line(history, f"# {prefix}: eval={meta['id']} Q={Q!r} branch={meta['branch']} kind={meta['kind']}")
             rsm.mark_seed(history, seed)
             capture.last = None
             try:

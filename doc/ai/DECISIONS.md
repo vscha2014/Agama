@@ -547,3 +547,31 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   stopped by budget (trust region kept); budgets omitted ⇒ stored; smaller ⇒ refused. A
   per-Q filter was declined.
 - Mocked tests only; the run is started by the user on tycho.
+
+## 2026-11-03 — Resolve local parameters before varying the IC seed (user)
+
+- Keep AGAMA IC seed 42 for the next parameter investigation; defer additional seed scans
+  until the local parameter regions have been explored at that seed.
+- Two independent local searches around the compact and near-spherical candidates are under
+  discussion. Their proposed windows and budgets are in the private run notes; this is not
+  approval to launch them or alter the frozen physical bounds.
+- Any such search must reset the IC seed before each evaluation and use observations with
+  matching seed/protocol provenance. The ordinary PCA search advances AGAMA's RNG and pools
+  historical realisations, so its existing launch command does not meet this requirement.
+
+## 2026-11-03 — Local 4D-PCA search at seed 42, near-spherical box (user)
+
+- **Driver** | new `py/run_local_pca.py` + `launch_tycho.sh --local-pca` (harness §3j), not flags in
+  the harness's `run_pca_optimization` (pool/reservation/prior logic, no per-evaluation seed).
+  Evaluation path shared with the Q profile (`build_evaluator(prefix=…)`): `setRandomSeed(42)`
+  before every evaluation, `exp` protocol, `.npz` ≤ 3.5 into the shared `orblib/`.
+- **PCA 4D** | all four components of (Q, gh, log rh, log rho0), built as in the harness (best 30 %,
+  weights exp(−ΔP/0.1), std floor 0.05 × box width), refit every 6 evaluations; the local box is
+  imposed by linear constraints in PC space. GP on −log P with learned noise (as the Q profile,
+  robust to outlier priors), not the harness's fixed noise on −P.
+- **First run** | box Q 0.90–1.05, gh 0–0.20, rh 10–30, rho0 15–60; 60 new evaluations = 8 Sobol +
+  52 TuRBO (one trust region, restart on collapse); the 30 in-box seed-42 points of the two Q
+  profiles enter without recomputation (same harness SHA256 and evaluation context, checked at
+  dry-run and start). Preflight runs a BoTorch self-test of the constrained proposal.
+- Mocked tests only; the run on tycho is started by the user. The compact-region search will use
+  the same driver with another `--box` (not decided yet).

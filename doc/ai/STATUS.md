@@ -1,13 +1,12 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-10-31: the Q-profile run on
-tycho (2026-10-29/31) completed and was analysed; numbers in the private results.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-03: second Q profile analysed;
+user prioritises local parameter searches at the existing IC seed. Numerical results private.
 
 ## Where the science stands
 
-- Completed free-Q L24 and spherical Q1 searches at incl=90 provide two finalists.
-  Their historical minima and adaptive clusters do not calibrate IC uncertainty
-  or establish connectivity of the branches. Numerical results remain in results/.
+- Completed free-Q L24 and spherical Q1 searches at incl=90 provide two finalists; their
+  historical minima do not calibrate IC uncertainty. Numerical results remain in results/.
 - The Upsilon control (2026-10-25) showed a small protocol effect on the finalists' gap;
   its reports were marked failed only by the runner's store check (fixed). Notes under
   `results/logs/multi_d1_nb250_gh0_l24n184_ser0_n2_20261025_225604/`.
@@ -15,16 +14,17 @@ tycho (2026-10-29/31) completed and was analysed; numbers in the private results
   the free-Q finalist is better in almost every seed; the mean paired gap is many
   MC standard errors from zero and agrees with the historical gap, because both
   historical records carry a similar winner's-curse bias. This is IC-noise robustness
-  of two fixed points, not observational significance; connectivity of the branches
-  is untested. Numbers: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
+  of two fixed points, not observational significance or a connectivity test.
+  Numbers: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
   Root search pools are unchanged.
-- Q profile (seed-42 CRN, (gh, rh, rho0) re-optimised in the full box at 8 values of Q,
-  incl=90): completed on tycho, all branches budget-limited, exit 0. The flattened and the
-  near-spherical minima are separated by a penalty hump over the intermediate Q that is far
-  larger than the realisation scatter and the optimisation slack; both minima are narrow in
-  Q; compact and extended halo families coexist at every Q and become degenerate in penalty
-  near Q=0.9. Q=1 is the grid end, prolate halos were not probed. Numbers and follow-ups:
-  private `results/logs/qprofile/qprofile_…_20261029_111955/NOTES.md`.
+- Q profiles use seed-42 CRN, re-optimise (gh, rh, rho0) at fixed Q in the full physical box,
+  and keep their rows separate from ordinary search pools. Both runs are analysed:
+  private `results/logs/qprofile/qprofile_…_20261029_111955/NOTES.md` and
+  `results/logs/qprofile/qprofile_…_20261102_145506/NOTES.md`.
+- The private notes distinguish the candidate penalty gap from the intermediate profile
+  height. Budget-limited searches give upper bounds on the true minima, not a proof of
+  a minimum barrier. Sparse Q samples do not establish a loss of CRN correlation or a
+  numerical error. Earlier stronger claims in the second run's notes were corrected.
 
 ## Code state
 
@@ -32,24 +32,23 @@ tycho (2026-10-29/31) completed and was analysed; numbers in the private results
   (placeholder of a read-only library is not a failure), `--require-library`,
   `potential_provenance`, `--ic-seeds` paired batches with isolated `orblib_seed/` store and
   git-backed `results/` (`harness/orblib_exp.md` §3d, §3g–§3h) as before.
-- Public code HEAD `db4d80e`: Q profile (§3i, DECISIONS 2026-10-28): seed-42 CRN, trust-region
-  BO per Q in the full box, `compact`/`extended` continuation + Sobol/global starts, optional
-  priors, isolated `qprofile_*` rows, `.npz` ≤ 3.5 (Q≠1) into `orblib/`, resume.
-- Uncommitted (2026-10-31, DECISIONS): Q-profile grid without Q=1 / beyond 1 (extended starts
-  at the grid Q closest to 1, goes down then up); finite penalty ≥ 1e5 ⇒ `rejected`, fed to the
-  GP capped at 1e5, not a consecutive failure; budget extension on resume; `--no-smooth-check`;
-  launcher options `--local-budget/--global-budget/--no-smooth-check`.
-- Verification: 302 harness/launcher/profile tests + 167 potential-check tests pass
-  (mocked/numeric); py_compile, bash -n, git diff --check clean.
+- Q profile (§3i, DECISIONS 2026-10-28): seed-42 CRN, trust-region BO per Q in the full box,
+  `compact`/`extended` continuation + Sobol/global starts, optional priors, isolated
+  `qprofile_*` rows, `.npz` ≤ 3.5 (Q≠1) into `orblib/`, resume.
+- `195cba8` (DECISIONS 2026-10-31): grid without Q=1 / beyond 1; `rejected` points (GP capped
+  at 1e5); budget extension on resume; `--no-smooth-check`.
+- Local PCA search (DECISIONS 2026-11-03, §3j): `run_local_pca.py` + `launch_tycho.sh --local-pca` —
+  TuRBO in a full 4D PCA basis inside a local box, seed 42 before every evaluation, Q-profile
+  seed-42 points as priors (context-checked), BoTorch self-test in preflight. 354 mocked tests pass.
 
 ## Next steps (need user go-ahead on tycho)
 
-1. Plan item 3: commit/push, `git pull` on tycho, then
-   `launch_tycho.sh --q-profile --q-grid=0.28,0.29,0.95,1.1,1.2 --no-smooth-check` (preflight
-   first; 130 evaluations, max 180, ~22 h; check free disk for the saved libraries).
-   Other-seed re-evaluation is not needed for the hump.
-2. Optional: extend the finalist scan by ~8 seeds if a tighter paired SEM is needed.
-3. J-factor/mass comparison of both branches incl. outer continuation; other inclinations.
+1. Commit/push Agama, `git pull` on tycho, then (preflight first; ~9 h, ≤ 37 GB `.npz`):
+   `launch_tycho.sh --local-pca --box=Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60 --budget=60 --n-sobol=8`.
+2. Afterwards: the compact region with the same driver and its own box; additional IC seeds
+   only after both regions are resolved at seed 42 (DECISIONS 2026-11-03).
+3. Optional field-only potential validation beyond Q=1.
+4. J-factor/mass comparison of both branches incl. outer continuation; other inclinations.
 
 ## Open questions
 
