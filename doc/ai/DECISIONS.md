@@ -575,3 +575,22 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   dry-run and start). Preflight runs a BoTorch self-test of the constrained proposal.
 - Mocked tests only; the run on tycho is started by the user. The compact-region search will use
   the same driver with another `--box` (not decided yet).
+
+## 2026-11-04 — Compact local search with explicit boundary starts (user)
+
+- Prepare the compact-region analogue with the same 4D PCA, per-evaluation AGAMA seed 42,
+  L24/exp evaluator and internal Upsilon search. Keep physical bounds and scientific definitions.
+- **Budget:** 60 new evaluations. User selected four explicit gh=0 starts, four dispersed Sobol
+  points and 52 TuRBO steps rather than eight Sobol points. The starts probe the lower-Q side;
+  their other halo coordinates come from the compatible compact candidate. A fixed-coordinate
+  slice is not a minimised Q profile.
+- **Inputs:** only provenance-checked Q-profile observations are reused without recalculation.
+  Exact compact box, coordinates and source results are private:
+  `results/logs/localpca/HANDOFF_LOCALPCA_COMPACT.md` and `compact_initial_points.txt`.
+- **Implementation:** optional `--initial-points` in `run_local_pca.py` and `launch_tycho.sh`;
+  coordinates are evaluated before Sobol and count towards the budget. Ordered starts and file
+  SHA256 are checkpointed; recorded starts are not repeated on resume. Old states without
+  these fields remain compatible when no file is supplied.
+- Preparation/tests only, no agent-run optimisation or tycho operations. The user launches after
+  delivery and successful preflight, separately from the near-spherical run. Other IC seeds and
+  J-factor work remain deferred until local parameter searches are assessed.

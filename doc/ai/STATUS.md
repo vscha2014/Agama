@@ -1,7 +1,7 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-03: second Q profile analysed;
-user prioritises local parameter searches at the existing IC seed. Numerical results private.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-04: compact local search prepared;
+explicit boundary starts at the existing IC seed. Numerical results private; no new run executed.
 
 ## Where the science stands
 
@@ -35,18 +35,19 @@ user prioritises local parameter searches at the existing IC seed. Numerical res
 - Q profile (§3i, DECISIONS 2026-10-28): seed-42 CRN, trust-region BO per Q in the full box,
   `compact`/`extended` continuation + Sobol/global starts, optional priors, isolated
   `qprofile_*` rows, `.npz` ≤ 3.5 (Q≠1) into `orblib/`, resume.
-- `195cba8` (DECISIONS 2026-10-31): grid without Q=1 / beyond 1; `rejected` points (GP capped
-  at 1e5); budget extension on resume; `--no-smooth-check`.
+- `195cba8`: grids beyond Q=1, rejected points capped at 1e5 in GP, budget extension, no-smooth-check.
 - Local PCA search (DECISIONS 2026-11-03, §3j): `run_local_pca.py` + `launch_tycho.sh --local-pca` —
   TuRBO in a full 4D PCA basis inside a local box, seed 42 before every evaluation, Q-profile
-  seed-42 points as priors (context-checked), BoTorch self-test in preflight. 354 mocked tests pass.
+  seed-42 points as priors (context-checked), BoTorch self-test in preflight.
+- Explicit starts (DECISIONS 2026-11-04): `--initial-points=FILE` before Sobol, within the new-eval
+  budget; checkpointed indices/input hash, old states remain resume-compatible. 392 mocked tests pass.
 
 ## Next steps (need user go-ahead on tycho)
 
-1. Commit/push Agama, `git pull` on tycho, then (preflight first; ~9 h, ≤ 37 GB `.npz`):
-   `launch_tycho.sh --local-pca --box=Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60 --budget=60 --n-sobol=8`.
-2. Afterwards: the compact region with the same driver and its own box; additional IC seeds
-   only after both regions are resolved at seed 42 (DECISIONS 2026-11-03).
+1. Deliver checked code and private compact inputs; confirm near-spherical run status on tycho.
+   Follow `results/logs/localpca/HANDOFF_LOCALPCA_COMPACT.md`: preflight, then 4 starts + 4 Sobol
+   + 52 TuRBO. One launcher at a time; do not update code under a running search.
+2. Analyse both local regions at seed 42 before additional IC seeds (DECISIONS 2026-11-03).
 3. Optional field-only potential validation beyond Q=1.
 4. J-factor/mass comparison of both branches incl. outer continuation; other inclinations.
 

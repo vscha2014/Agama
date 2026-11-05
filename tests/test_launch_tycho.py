@@ -765,6 +765,7 @@ def test_local_pca_explicit_prior_states_and_failed_self_test(tmp_path):
     ('--local-pca', LP_BOX, '--budget=0'),
     ('--local-pca', LP_BOX, '--n-sobol=x'),
     ('--local-pca', LP_BOX, '--n-sobol=61'),
+    ('--local-pca', LP_BOX, '--initial-points='),
     ('--local-pca', LP_BOX, '--resume-search=missing'),
     ('--local-pca', LP_BOX, '--prior-states=nope'),
     ('--local-pca', LP_BOX, '--q-grid=0.3,1'),
@@ -780,3 +781,68 @@ def test_local_pca_rejects_invalid_combinations(tmp_path, extra_args):
         (work / 'finalists.txt').write_text(FINALISTS)
     result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=setup)
     assert result.returncode == 2 and not events, output(result)
+
+
+LP_INITIAL = '0.91 0 20 30\n0.93 0 20 30\n0.98 0 20 30\n1.02 0 20 30\n'
+
+
+@pytest.mark.parametrize('resume', [False, True])
+def test_local_pca_forwards_initial_points_from_results(tmp_path, resume):
+    _, results = results_repo(tmp_path, {'logs/localpca/initial.txt': LP_INITIAL})
+    name = 'localpca_test'
+
+    def setup(work):
+        copy_local_pca(work)
+        if resume:
+            (results / 'logs/localpca' / name).mkdir()
+            (results / 'logs/localpca' / name / 'search_state.json').write_text('{}')
+
+    extra = [f'--resume-search={name}'] if resume else []
+    result, events, work = run(tmp_path, '--threads=4', '--local-pca', LP_BOX, '--prior-states=none',
+                               '--initial-points=initial.txt', '--n-sobol=4', '--budget=60', *extra, setup=setup)
+    assert result.returncode == 0, output(result)
+    (argv,) = pythons(events)
+    assert argv[argv.index('--initial-points') + 1] == str(results / 'logs/localpca/initial.txt')
+    assert argv[argv.index('--n-sobol') + 1] == '4' and argv[argv.index('--budget') + 1] == '60'
+    assert ('--resume' in argv) == resume
+    log = next(work.glob('launch_tycho_localpca_*.log')).read_text()
+    assert '4 initial + 4 Sobol + 52 TuRBO' in log and 'Q=0.91 gh=0 rh=20 rho0=30' in log
+    assert any(e.startswith('selftest ') for e in events)
+
+
+def test_local_pca_preflight_accepts_initial_points_without_running_evaluator(tmp_path):
+    def setup(work):
+        copy_local_pca(work)
+        (work / 'initial.txt').write_text(LP_INITIAL)
+
+    result, events, _ = run(tmp_path, '--threads=4', '--local-pca', LP_BOX, '--prior-states=none',
+                            '--initial-points=initial.txt', '--n-sobol=4', '--preflight', '--offline', setup=setup)
+    assert result.returncode == 0 and not pythons(events), output(result)
+    assert '4 initial + 4 Sobol + 52 TuRBO' in output(result)
+    assert any(e.startswith('selftest ') for e in events)
+
+
+@pytest.mark.parametrize('text,extra', [
+    (None, []),
+    ('', []),
+    ('0.91 0 20 30 2\n', []),
+    ('0.91 0 20 nan\n', []),
+    ('0.91 0 20 30\n0.91 0 20 30\n', []),
+    ('0.8 0 20 30\n', []),
+    (LP_INITIAL, ['--budget=7']),
+])
+def test_local_pca_invalid_initial_points_stop_before_preflight(tmp_path, text, extra):
+    def setup(work):
+        copy_local_pca(work)
+        if text is not None:
+            (work / 'initial.txt').write_text(text)
+
+    result, events, _ = run(tmp_path, '--threads=4', '--local-pca', LP_BOX, '--prior-states=none',
+                            '--initial-points=initial.txt', '--n-sobol=4', *extra, setup=setup)
+    assert result.returncode == 2 and not events, output(result)
+
+
+def test_initial_points_are_only_for_local_pca(tmp_path):
+    result, events, _ = run(tmp_path, '--initial-points=initial.txt', setup=copy_local_pca)
+    assert result.returncode == 2 and not events, output(result)
+    assert 'только с --local-pca' in output(result)

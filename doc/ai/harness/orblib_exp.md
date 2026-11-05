@@ -666,7 +666,7 @@ the parameters of one region before varying the seed. Diagnostic only: harness, 
 CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.py` (`*local_pca*`).
 
 - `bash launch_tycho.sh --local-pca --box=Q=a:b,gh=a:b,rh=a:b,rho0=a:b [--budget=60] [--n-sobol=8]
-  [--prior-states=LIST|none] [--resume-search=DIR] [--save-below=3.5] [--preflight]`. Always
+  [--initial-points=FILE] [--prior-states=LIST|none] [--resume-search=DIR] [--save-below=3.5] [--preflight]`. Always
   `--l24`, MemoryMax 8 GiB, 1 process; refuses `--q-profile/--models/--ic-seeds/--protocols/--Q1/
   --resume/--nproc>1`. `--box` is required and must lie inside `bounds_original` (Upsilon stays the
   internal search on [0.1, 1.6]). Preflight prints `run_local_pca.py --dry-run` (box, priors, best
@@ -691,7 +691,14 @@ CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.p
   the 16 box corners in PC space; the physical box is 8 linear constraints `A u ≥ b` (no clipping
   except round-off). Refit every 6 new evaluations (bases stored in the state); the identity
   basis is used with < 2 ok points.
-- Schedule: `--n-sobol` scrambled Sobol points (d=4, seed 20261103) in the box (Q, gh linear; rh,
+- Optional explicit starts (DECISIONS 2026-11-04): `--initial-points=FILE`, four whitespace-separated
+  columns `Q gh rh rho0`, blank lines and `#` comments allowed. These are new coordinates, **not**
+  measured observations: no Upsilon, penalty or timestamp columns. The stdlib parser refuses empty,
+  malformed/nonfinite, out-of-box/physical-bounds rows and duplicates within the file or against
+  imported priors before AGAMA starts. Launcher resolves paths as for other inputs, also looking
+  in `results/logs/localpca/`. Coordinates, input path and SHA256 are stored in the config.
+- Schedule: explicit starts in file order (if provided), then `--n-sobol` scrambled Sobol points
+  (d=4, seed 20261103) in the box (Q, gh linear; rh,
   rho0 logarithmic), then TuRBO steps until `--budget` new evaluations. TR centred at the best ok
   point (priors included), cube [c ± L/2] ∩ [0,1]^4 ∩ box; harness hyperparameters (L 0.6, min
   0.5^7, max 1.6, ×2 after 3 successes, /2 after 4 failures, success = relative improvement
@@ -701,6 +708,10 @@ CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.p
   feasible random sample (`fallback`) — counted per record (`proposal`) and in the report. A
   duplicate (< 1e-6 in box-normalised x) costs no evaluation and counts as a TR failure; 50
   duplicates in a row stop the run (`stalled`).
+  Explicit starts and Sobol both count towards the budget; their sum must not exceed it.
+  Every explicit start uses the shared seed-42 evaluator, re-optimises Upsilon and contributes
+  its result to the GP/PCA under the usual status rules. Dry-run prints the start coordinates
+  and the full initial/Sobol/TuRBO budget breakdown; without a file the old schedule is unchanged.
 - Output (`results/logs/localpca/<name>/`, offline `py/localpca/<name>/`): `search_state.json`
   (atomic after every evaluation; config with priors and their provenance (state path, sha256,
   record id), TR, bases, runs with harness/driver SHA256 and context), `search.tsv`,
@@ -708,10 +719,15 @@ CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.p
   glob reads it), `report_localpca.json/.txt` (`--summarize DIR`, stdlib): best / best prior /
   best new (7 numbers, rho0·Υ), improvement over the best prior, edges of the box and of
   `bounds_original`, edge counts within +0.25/+0.5 of the best, PCA explained variance and axes,
-  proposal counts, TR state.
-- Resume: `--local-pca --resume-search=<name>` with the same inputs (box, priors, seeds); budget
+  proposal counts, TR state, `evaluation_kinds` counts for initial/Sobol/BO.
+- Resume: `--local-pca --resume-search=<name>` with the same inputs (box, priors, seeds, initial
+  points file and its path, `--n-sobol`); budget
   omitted ⇒ stored, larger ⇒ the search continues, smaller ⇒ refused; other differences are refused
-  with the names of the config keys. Exit 75 = stopped with state saved, 1 = 5 consecutive failures
+  with the names of the config keys. Initial records carry `kind=initial`/`initial_index`;
+  recorded starts are not repeated (including failed/rejected ones), while an interrupted
+  evaluation not yet recorded can be repeated. Old states without initial-point config fields
+  are treated as having no explicit starts, so near-spherical checkpoints remain compatible.
+  Exit 75 = stopped with state saved, 1 = 5 consecutive failures
   or error, 0 = done or stalled.
 - Reading: one IC realisation (seed 42), comparable with the Q profiles' seed-42 points; penalty is
   not χ². An optimum on a box edge that is not a physical bound calls for a wider box (inside

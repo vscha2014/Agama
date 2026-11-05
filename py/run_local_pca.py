@@ -176,6 +176,43 @@ def read_prior_states(paths, box, bounds, incl):
     return priors, skipped, outside, context, sources
 
 
+def read_initial_points(path, box, bounds, priors):
+    if path is None:
+        return [], None
+    try:
+        with open(path, 'rb') as stream:
+            raw = stream.read()
+        lines = raw.decode('utf-8').splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ConfigError(f'{path}: unreadable initial points ({error})')
+    points = []
+    for number, line in enumerate(lines, 1):
+        tokens = line.partition('#')[0].split()
+        if not tokens:
+            continue
+        where = f'{path}:{number}'
+        if len(tokens) != len(NAMES):
+            raise ConfigError(f'{where}: expected four coordinates: Q gh rh rho0')
+        try:
+            params = dict(zip(NAMES, map(float, tokens)))
+        except ValueError:
+            raise ConfigError(f'{where}: initial coordinates must be numeric')
+        if not all(math.isfinite(v) for v in params.values()):
+            raise ConfigError(f'{where}: initial coordinates must be finite')
+        if not in_box(params, bounds, tol=0):
+            raise ConfigError(f'{where}: initial point outside bounds_original')
+        if not in_box(params, box, tol=0):
+            raise ConfigError(f'{where}: initial point outside --box')
+        if any(same_params(params, p) for p in points):
+            raise ConfigError(f'{where}: duplicate initial point')
+        if any(same_params(params, p['params']) for p in priors):
+            raise ConfigError(f'{where}: initial point duplicates a prior observation')
+        points.append(params)
+    if not points:
+        raise ConfigError(f'{path}: no points in --initial-points')
+    return points, dict(name=os.path.basename(path), file=os.path.abspath(path), sha256=hashlib.sha256(raw).hexdigest())
+
+
 def build_config(args, bounds):
     box = parse_box(args.box, bounds)
     budget = DEFAULTS['budget'] if args.budget is None else args.budget
@@ -184,10 +221,13 @@ def build_config(args, bounds):
     if not 0 <= args.n_sobol <= budget:
         raise ConfigError('--n-sobol must be between 0 and --budget')
     priors, skipped, outside, context, sources = read_prior_states(args.prior_states or [], box, bounds, args.incl)
+    initial, initial_source = read_initial_points(args.initial_points, box, bounds, priors)
+    if len(initial) + args.n_sobol > budget:
+        raise ConfigError('initial points + --n-sobol must not exceed --budget')
     return dict(DEFAULTS, incl=float(args.incl), pot='l24', box=box, bounds={k: list(v) for k, v in bounds.items()},
                 budget=budget, n_sobol=args.n_sobol, sobol_seed=args.sobol_seed, subsample_seed=args.subsample_seed,
                 priors=priors, prior_skipped=skipped, prior_outside=outside, prior_context=context,
-                prior_sources=sources)
+                prior_sources=sources, initial_points=initial, initial_source=initial_source)
 
 
 def check_prior_context(config, live):
@@ -202,7 +242,10 @@ def check_prior_context(config, live):
 
 
 def identity(config):
-    return {k: v for k, v in config.items() if k != 'budget'}
+    result = {k: v for k, v in config.items() if k != 'budget'}
+    result.setdefault('initial_points', [])
+    result.setdefault('initial_source', None)
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -491,6 +534,7 @@ class Search:
 
     # ---- schedule --------------------------------------------------------
     def run(self):
+        self.initial_stage()
         self.sobol_stage()
         while len(self.new_records()) < self.cfg['budget']:
             if self.state['dup_run'] >= self.cfg['max_dup_run']:
@@ -501,6 +545,14 @@ class Search:
             self.step()
         self.state['status'] = 'done'
         self.save()
+
+    def initial_stage(self):
+        for j, params in enumerate(self.cfg.get('initial_points', [])):
+            if len(self.new_records()) >= self.cfg['budget']:
+                return
+            if any(r['kind'] == 'initial' and r.get('initial_index') == j for r in self.state['evaluations']):
+                continue
+            self._record(self.evaluate(params, 'initial', extra=dict(initial_index=j)))
 
     def sobol_stage(self):
         lo, hi = box_x(self.cfg['box'])
@@ -618,6 +670,7 @@ def summarize(state):
         near[str(delta)] = dict(n=len(rows), box_edges=counts)
     return dict(status=state.get('status'), updated=state.get('updated'), opt_seed=cfg['opt_seed'], box=cfg['box'],
                 budget=cfg['budget'], n_new=len(new), n_priors=len(evaluations) - len(new),
+                evaluation_kinds={k: sum(r['kind'] == k for r in new) for k in ('initial', 'sobol', 'bo')},
                 n_failed=sum(1 for r in new if r['status'] == 'failed'),
                 n_rejected=sum(1 for r in new if r['status'] == 'rejected'),
                 libraries_saved=sum(1 for r in new if (r.get('library') or {}).get('name')),
@@ -653,6 +706,8 @@ def format_summary(summary):
              '  box: ' + ', '.join(f'{k} {lo:g}..{hi:g}' for k, (lo, hi) in summary['box'].items()),
              f"  trust region: length={tr.get('length')} restarts={tr.get('restarts')}; proposals "
              + ', '.join(f'{k}={v}' for k, v in (summary.get('proposals') or {}).items())]
+    lines.append('  new evaluations by kind: ' + ' '.join(
+        f'{k}={v}' for k, v in summary.get('evaluation_kinds', {}).items()))
     lines += _fmt_point('best', summary['best'])
     lines += _fmt_point('best prior', summary['best_prior'])
     lines += _fmt_point('best new', summary['best_new'])
@@ -699,8 +754,15 @@ def format_dry_run(config):
                      f"evaluation_context {config['prior_context']['evaluation_context'][:12]}")
     else:
         lines.append('  priors in the box: 0')
-    n_bo = config['budget'] - config['n_sobol']
-    lines.append(f"  evaluations: {config['budget']} ({config['n_sobol']} Sobol + {n_bo} TuRBO), "
+    initial = config.get('initial_points', [])
+    if initial:
+        source = config['initial_source']
+        lines.append(f"  initial points: {len(initial)} ({source['file']}, sha256 {source['sha256'][:12]})")
+        for j, params in enumerate(initial):
+            lines.append(f'    initial {j}: ' + ' '.join(f'{k}={params[k]:.12g}' for k in NAMES))
+    n_bo = config['budget'] - len(initial) - config['n_sobol']
+    start = f'{len(initial)} initial + ' if initial else ''
+    lines.append(f"  evaluations: {config['budget']} ({start}{config['n_sobol']} Sobol + {n_bo} TuRBO), "
                  f"~{config['budget'] * SECONDS_PER_EVAL / 3600:.1f} h at {SECONDS_PER_EVAL:.0f} s/evaluation")
     return '\n'.join(lines) + '\n'
 
@@ -715,6 +777,8 @@ def parse_args(argv=None):
     parser.add_argument('--budget', type=int, default=None,
                         help=f"New evaluations (default {DEFAULTS['budget']}; on --resume: stored, larger extends)")
     parser.add_argument('--n-sobol', type=int, default=DEFAULTS['n_sobol'])
+    parser.add_argument('--initial-points', default=None,
+                        help='File of Q gh rh rho0 rows to evaluate before Sobol (counts towards --budget)')
     parser.add_argument('--prior-states', nargs='*', default=[],
                         help='Q-profile state directories (or profile_state.json) whose seed-42 points enter the GP')
     parser.add_argument('--state-dir', default=None)

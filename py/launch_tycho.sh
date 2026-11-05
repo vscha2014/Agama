@@ -57,6 +57,7 @@ LOCALPCA=0
 LP_BOX=""
 LP_BUDGET=""
 LP_NSOBOL=""
+LP_INITIAL=""
 LP_PRIORS=""
 LP_RESUME=""
 LP_OPTS_SET=0
@@ -99,6 +100,7 @@ for arg in "$@"; do
                 '    --box=SPEC        Обязательно: Q=a:b,gh=a:b,rh=a:b,rho0=a:b внутри bounds_original.' \
                 '    --budget=N        Новых оценок (по умолчанию 60; при --resume-search больше — продление).' \
                 '    --n-sobol=N       Из них точек Sobol в боксе до TuRBO (по умолчанию 8).' \
+                '    --initial-points=FILE  Новые старты перед Sobol: строки Q gh rh rho0, входят в --budget.' \
                 '    --prior-states=LIST  Каталоги Q-профилей через запятую (имена в results/logs/qprofile/ или' \
                 '                      пути; по умолчанию все qprofile_*; none — без них): seed-42 точки в боксе.' \
                 '    --resume-search=DIR  Продолжить поиск (имя каталога в results/logs/localpca/ или путь).' \
@@ -148,6 +150,8 @@ for arg in "$@"; do
         --box=*)           LP_BOX="${arg#*=}"; LP_OPTS_SET=1 ;;
         --budget=*)        LP_BUDGET="${arg#*=}"; LP_OPTS_SET=1 ;;
         --n-sobol=*)       LP_NSOBOL="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --initial-points=) echo "ОШИБКА: --initial-points требует путь к файлу" >&2; exit 2 ;;
+        --initial-points=*) LP_INITIAL="${arg#*=}"; LP_OPTS_SET=1 ;;
         --prior-states=*)  LP_PRIORS="${arg#*=}"; LP_OPTS_SET=1 ;;
         --resume-search=*) LP_RESUME="${arg#*=}"; LP_OPTS_SET=1 ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
@@ -288,6 +292,7 @@ resolve_input() {
     fi
     for cand in "${WORK_DIR}/${name}" "${RESULTS_DIR}/${name}" "${RESULTS_DIR}/logs/${name}" \
                 "${RESULTS_DIR}/logs/qprofile/${name}" "${RESULTS_DIR}/logs/seed/${name}" \
+                "${RESULTS_DIR}/logs/localpca/${name}" \
                 "${RESULTS_DIR}/logs/Q1d1_rh_bounds/${name}" "${RESULTS_DIR}/Q1d1_rh_bounds/${name}"; do
         if [ -f "$cand" ]; then
             printf '%s/%s' "$(cd "$(dirname "$cand")" && pwd)" "$(basename "$cand")"
@@ -308,7 +313,7 @@ if [ "$QPROFILE" -eq 0 ] && [ "$QP_OPTS_SET" -eq 1 ]; then
     exit 2
 fi
 if [ "$LOCALPCA" -eq 0 ] && [ "$LP_OPTS_SET" -eq 1 ]; then
-    echo "ОШИБКА: --box, --budget, --n-sobol, --prior-states и --resume-search — только с --local-pca" >&2
+    echo "ОШИБКА: --box, --budget, --n-sobol, --initial-points, --prior-states и --resume-search — только с --local-pca" >&2
     exit 2
 fi
 if [ "$DRIVER" -eq 0 ] && [ "$SAVE_BELOW_SET" -eq 1 ]; then
@@ -372,9 +377,16 @@ if [ "$LOCALPCA" -eq 1 ]; then
     declare -a QP_INPUT_ARGS=(--incl "$INCL" --box "$LP_BOX")
     [ -n "$LP_BUDGET" ] && QP_INPUT_ARGS+=(--budget "$LP_BUDGET")
     [ -n "$LP_NSOBOL" ] && QP_INPUT_ARGS+=(--n-sobol "$LP_NSOBOL")
+    if [ -n "$LP_INITIAL" ]; then
+        if ! LP_INITIAL="$(resolve_input "$LP_INITIAL")"; then
+            echo "ОШИБКА: не найден файл --initial-points" >&2
+            exit 2
+        fi
+        QP_INPUT_ARGS+=(--initial-points "$LP_INITIAL")
+    fi
     [ "${#LP_PRIOR_DIRS[@]}" -gt 0 ] && QP_INPUT_ARGS+=(--prior-states "${LP_PRIOR_DIRS[@]}")
     if ! QP_PLAN="$(python3 "${WORK_DIR}/run_local_pca.py" --dry-run "${QP_INPUT_ARGS[@]}")"; then
-        echo "ОШИБКА: run_local_pca.py --dry-run отверг входные данные (бокс, бюджет или состояния Q-профилей)" >&2
+        echo "ОШИБКА: run_local_pca.py --dry-run отверг входные данные (бокс, бюджет, старты или состояния Q-профилей)" >&2
         exit 2
     fi
 fi
@@ -577,6 +589,7 @@ preflight() {
             log "    finalists: ${QP_ENDPOINTS}; priors: ${QP_PRIORS:-нет}"
         else
             log "    box: ${LP_BOX}; prior states: ${LP_PRIOR_DIRS[*]:-нет}"
+            log "    initial points: ${LP_INITIAL:-нет}"
         fi
         while IFS= read -r _line; do log "    ${_line}"; done <<< "$QP_PLAN"
     fi

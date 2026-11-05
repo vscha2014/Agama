@@ -434,3 +434,161 @@ def test_the_evaluator_is_shared_with_the_q_profile():
     assert inspect.signature(lp.rqp.build_evaluator).parameters['prefix'].default == 'qprofile'
     assert lp.PREFIX == 'localpca' and lp.DEFAULTS['opt_seed'] == 42
     assert lp.DEFAULTS['subsample_seed'] == lp.rqp.DEFAULTS['subsample_seed']
+
+
+INITIAL_TEXT = '0.91 0 20 30\n0.93 0 20 30\n0.98 0 20 30\n1.02 0 20 30\n'
+COMPACT_BOX_SPEC = 'Q=0.22:0.30,gh=0:0.20,rh=1.5:5,rho0=50:120'
+COMPACT_INITIAL_TEXT = '0.23 0 3 80\n0.24 0 3 80\n0.25 0 3 80\n0.28 0 3 80\n'
+
+
+def initial_config(tmp_path, text=INITIAL_TEXT, box=BOX_SPEC, extra=()):
+    path = tmp_path / 'initial.txt'
+    path.write_text(text)
+    args = lp.parse_args(['--dry-run', '--box', box, '--initial-points', str(path), '--n-sobol', '4', *extra])
+    return lp.build_config(args, BOUNDS)
+
+
+def test_initial_points_are_coordinates_not_observations(tmp_path):
+    config = initial_config(tmp_path, '# Q gh rh rho0\n\n' + INITIAL_TEXT.replace('20 30', '20 30 # new point'))
+    assert config['initial_points'] == [dict(Q=q, gh=0.0, rh=20.0, rho0=30.0) for q in (0.91, 0.93, 0.98, 1.02)]
+    source = config['initial_source']
+    assert source['file'] == str(tmp_path / 'initial.txt') and source['name'] == 'initial.txt'
+    assert source['sha256'] == lp.rqp.sha256_file(source['file'])
+    assert config['priors'] == []
+    text = lp.format_dry_run(config)
+    assert '4 initial + 4 Sobol + 52 TuRBO' in text
+    assert 'Q=0.91 gh=0 rh=20 rho0=30' in text
+
+
+@pytest.mark.parametrize('text,extra,message', [
+    ('', (), 'no points'),
+    ('# only a comment\n', (), 'no points'),
+    ('0.91 0 20\n', (), 'four'),
+    ('0.91 0 20 30 1.5\n', (), 'four'),
+    ('Q gh rh rho0\n', (), 'numeric'),
+    ('nan 0 20 30\n', (), 'finite'),
+    ('0.91 inf 20 30\n', (), 'finite'),
+    ('0.91 0 -inf 30\n', (), 'finite'),
+    ('0.8 0 20 30\n', (), 'box'),
+    ('0.91 -0.01 20 30\n', (), 'bounds_original'),
+    ('0.91 0 0 30\n', (), 'bounds_original'),
+    ('0.91 0 20 121\n', (), 'bounds_original'),
+    ('0.91 0 20 30\n0.910 0.0 20 30\n', (), 'duplicate'),
+    (INITIAL_TEXT, ('--budget', '7'), 'initial'),
+])
+def test_initial_points_invalid_inputs_are_refused(tmp_path, text, extra, message):
+    with pytest.raises(lp.ConfigError, match=message):
+        initial_config(tmp_path, text, extra=extra)
+
+
+def test_initial_points_refuse_unreadable_files_and_prior_duplicates(tmp_path):
+    args = lp.parse_args(['--dry-run', '--box', BOX_SPEC, '--initial-points', str(tmp_path / 'missing')])
+    with pytest.raises(lp.ConfigError, match='unreadable'):
+        lp.build_config(args, BOUNDS)
+    state = write_state(tmp_path / 'qprofile', [qrecord(0, 0.91, dict(gh=0, rh=20, rho0=30), 2.0)])
+    with pytest.raises(lp.ConfigError, match='prior'):
+        initial_config(tmp_path, extra=('--prior-states', str(state)))
+
+
+@pytest.mark.parametrize('box,text', [(BOX_SPEC, INITIAL_TEXT), (COMPACT_BOX_SPEC, COMPACT_INITIAL_TEXT)])
+def test_initial_points_then_sobol_then_52_turbo_evaluations(tmp_path, box, text):
+    config = initial_config(tmp_path, text, box=box)
+    params = dict(config['initial_points'][-1], Q=config['box']['Q'][1])
+    config['priors'] = [prior(params, 1.4)]
+    recorder = Recorder()
+    run = search(tmp_path, config=config, evaluator=recorder)
+    run.open(resume=False)
+    run.run()
+    new = run.new_records()
+    assert len(recorder.calls) == 60 and run.state['status'] == 'done'
+    assert [r['kind'] for r in new] == ['initial'] * 4 + ['sobol'] * 4 + ['bo'] * 52
+    assert [r['params'] for r in new[:4]] == config['initial_points']
+    assert [r['initial_index'] for r in new[:4]] == [0, 1, 2, 3]
+    assert all(c['seed'] == 42 and lp.in_box(c['params'], config['box'], tol=0) for c in recorder.calls)
+    assert run.state['evaluations'][0]['kind'] == 'prior'
+    assert all(r in run.gp_records() for r in new[:4])
+    summary = lp.summarize(run.state)
+    assert summary['evaluation_kinds'] == dict(initial=4, sobol=4, bo=52)
+    assert summary['n_new'] == 60 and summary['n_priors'] == 1
+    assert 'initial=4 sobol=4 bo=52' in lp.format_summary(summary)
+    assert run.state['bases'][0]['at'] == 8
+
+
+@pytest.mark.parametrize('stop_at', [2, 6, 10])
+def test_initial_points_resume_matches_uninterrupted_run(tmp_path, stop_at):
+    config = initial_config(tmp_path, extra=('--budget', '12'))
+    full = search(tmp_path / 'full', config=config)
+    full.open(resume=False)
+    full.run()
+    interrupted = search(tmp_path / 'resumed', config=config, evaluator=Recorder(stop_at=stop_at))
+    interrupted.open(resume=False)
+    with pytest.raises(lp.StopRun):
+        interrupted.run()
+    recorder = Recorder()
+    resumed = search(tmp_path / 'resumed', config=config, evaluator=recorder)
+    resumed.open(resume=True)
+    resumed.run()
+    assert len(recorder.calls) == 12 - stop_at
+    assert [(r['kind'], r['params']) for r in resumed.new_records()] == [
+        (r['kind'], r['params']) for r in full.new_records()]
+
+
+@pytest.mark.parametrize('status', ['failed', 'rejected'])
+def test_completed_unsuccessful_initial_points_are_not_retried(tmp_path, status):
+    config = initial_config(tmp_path, extra=('--budget', '4', '--n-sobol', '0'))
+    first = search(tmp_path, config=config,
+                   evaluator=Recorder(stop_at=2, fail=status == 'failed', reject=status == 'rejected'))
+    first.open(resume=False)
+    with pytest.raises(lp.StopRun):
+        first.run()
+    recorder = Recorder()
+    resumed = search(tmp_path, config=config, evaluator=recorder)
+    resumed.open(resume=True)
+    resumed.run()
+    assert [r['status'] for r in resumed.new_records()] == [status, status, 'ok', 'ok']
+    assert [c['params'] for c in recorder.calls] == config['initial_points'][2:]
+
+
+def test_initial_points_identity_and_budget_extension(tmp_path):
+    config = initial_config(tmp_path, extra=('--budget', '8'))
+    run = search(tmp_path, config=config)
+    run.open(resume=False)
+    run.run()
+    for text in (''.join(reversed(INITIAL_TEXT.splitlines(keepends=True))),
+                 INITIAL_TEXT.replace('0.91', '0.92'), INITIAL_TEXT + '# changed\n'):
+        changed = initial_config(tmp_path, text, extra=('--budget', '10'))
+        with pytest.raises(lp.ConfigError, match='initial'):
+            search(tmp_path, config=changed).open(resume=True)
+    no_initial = dict(config, initial_points=[], initial_source=None)
+    with pytest.raises(lp.ConfigError, match='initial'):
+        search(tmp_path, config=no_initial).open(resume=True)
+    config = initial_config(tmp_path, extra=('--budget', '10'))
+    resumed = search(tmp_path, config=config)
+    resumed.open(resume=True)
+    resumed.run()
+    assert [r['kind'] for r in resumed.new_records()] == ['initial'] * 4 + ['sobol'] * 4 + ['bo'] * 2
+
+
+def test_old_states_without_initial_fields_can_resume(tmp_path):
+    old_config = make_config(budget=6)
+    old = search(tmp_path, config=old_config)
+    old.open(resume=False)
+    old.run()
+    raw = json.loads(Path(old.path).read_text())
+    assert 'initial_points' not in raw['config'] and 'initial_source' not in raw['config']
+    assert lp.identity(old_config) == lp.identity(dict(old_config, initial_points=[], initial_source=None))
+    new_config = dict(old_config, budget=8, initial_points=[], initial_source=None)
+    resumed = search(tmp_path, config=new_config)
+    resumed.open(resume=True)
+    resumed.run()
+    assert len(resumed.new_records()) == 8
+    assert all(r['kind'] != 'initial' for r in resumed.new_records())
+
+
+def test_initial_points_dry_run_needs_only_stdlib(tmp_path):
+    config = initial_config(tmp_path)
+    result = subprocess.run([sys.executable, '-S', str(DRIVER), '--dry-run', '--box', BOX_SPEC,
+                             '--initial-points', config['initial_source']['file'], '--n-sobol', '4'],
+                            capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=''))
+    assert result.returncode == 0, result.stderr
+    assert '4 initial + 4 Sobol + 52 TuRBO' in result.stdout
