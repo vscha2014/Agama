@@ -7,6 +7,8 @@ a 4-component PCA of x = (Q, gh, log10 rh, log10 rho0), built as in the harness
 (best 30 % of the points, at least 10; weights exp(-(P - Pmin)/0.1); weighted
 mean/std with a floor of 0.05 x the box width) and refitted every 6 evaluations.
 The box is imposed as linear constraints in PCA coordinates (no clipping).
+A box item NAME=v:v fixes that parameter: PCA, GP and TuRBO then work on the
+remaining free parameters (at least two), e.g. gh=1:1 for a fixed-cusp search.
 Every evaluation calls agama.setRandomSeed(42) first (DECISIONS 2026-10-28,
 2026-11-03), exactly as run_q_profile.py, so known seed-42 evaluations of Q-profile
 states (--prior-states) enter the GP and the PCA without recomputation.
@@ -68,8 +70,20 @@ def box_x(box):
     return (to_x({k: box[k][0] for k in NAMES}), to_x({k: box[k][1] for k in NAMES}))
 
 
+def free_names(box):
+    return tuple(k for k in NAMES if box[k][1] > box[k][0])
+
+
+def free_index(box):
+    return [i for i, k in enumerate(NAMES) if box[k][1] > box[k][0]]
+
+
+def fixed_params(box):
+    return {k: box[k][0] for k in NAMES if box[k][1] == box[k][0]}
+
+
 def parse_box(spec, bounds):
-    """'Q=a:b,gh=a:b,rh=a:b,rho0=a:b' inside bounds_original."""
+    """'Q=a:b,gh=a:b,rh=a:b,rho0=a:b' inside bounds_original; a == b fixes that parameter."""
     box = {}
     for item in str(spec or '').split(','):
         item = item.strip()
@@ -89,12 +103,15 @@ def parse_box(spec, bounds):
     if set(box) != set(NAMES):
         raise ConfigError(f'--box needs all of {", ".join(NAMES)}')
     for name, (lo, hi) in box.items():
-        if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
-            raise ConfigError(f'--box {name}: need finite lo < hi')
+        if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi):
+            raise ConfigError(f'--box {name}: need finite lo <= hi (lo == hi fixes the parameter)')
         blo, bhi = bounds[name]
         if lo < blo or hi > bhi:
             raise ConfigError(f'--box {name} [{lo:g}, {hi:g}] outside bounds_original [{blo:g}, {bhi:g}]')
-    return {k: box[k] for k in NAMES}
+    box = {k: box[k] for k in NAMES}
+    if len(free_names(box)) < 2:
+        raise ConfigError('--box: at least two parameters must have lo < hi')
+    return box
 
 
 def in_box(params, box, tol=1e-9):
@@ -112,7 +129,7 @@ def same_params(a, b):
 
 def box_distance(a, b, box):
     lo, hi = box_x(box)
-    return math.sqrt(sum(((p - q) / (h - l)) ** 2 for p, q, l, h in zip(to_x(a), to_x(b), lo, hi)))
+    return math.sqrt(sum(((p - q) / (h - l)) ** 2 for p, q, l, h in zip(to_x(a), to_x(b), lo, hi) if h > l))
 
 
 # --------------------------------------------------------------------------
@@ -266,13 +283,16 @@ def adaptive_cutoff(penalties, target_fraction, min_points, cutoff_start):
 
 
 def fit_basis(records, config, at):
-    """Full-rank (4-component) weighted PCA of the ok points, as in the harness."""
+    """Full-rank weighted PCA of the ok points over the free parameters, as in the harness."""
     import numpy
-    lo, hi = (numpy.array(v) for v in box_x(config['box']))
+    free = free_index(config['box'])
+    x_fixed = box_x(config['box'])[0]
+    lo, hi = (numpy.array(v)[free] for v in box_x(config['box']))
+    d = len(free)
     ok = [r for r in records if r['status'] == 'ok']
     if len(ok) >= 2:
         P = numpy.array([r['penalty'] for r in ok])
-        X = numpy.array([to_x(r['params']) for r in ok])
+        X = numpy.array([to_x(r['params']) for r in ok])[:, free]
         cutoff = adaptive_cutoff(P.tolist(), config['target_fraction'], config['min_good'], config['cutoff_start'])
         good = P <= cutoff
         Xg, Pg = X[good], P[good]
@@ -283,49 +303,57 @@ def fit_basis(records, config, at):
         scaled = (Xg - mean) / std
         center = scaled.mean(axis=0)
         _, singular, components = numpy.linalg.svd(scaled - center, full_matrices=True)
-        variance = numpy.zeros(len(NAMES))
+        variance = numpy.zeros(d)
         variance[:len(singular)] = singular ** 2
         n_good = int(good.sum())
     else:
         cutoff, n_good = None, len(ok)
         mean, std = (lo + hi) / 2, hi - lo
-        center, components, variance = numpy.zeros(len(NAMES)), numpy.eye(len(NAMES)), numpy.zeros(len(NAMES))
-    rows = numpy.arange(len(NAMES))
+        center, components, variance = numpy.zeros(d), numpy.eye(d), numpy.zeros(d)
+    rows = numpy.arange(d)
     sign = numpy.sign(components[rows, numpy.argmax(numpy.abs(components), axis=1)])
     components = components * numpy.where(sign == 0, 1.0, sign)[:, None]
     corners = numpy.array(list(itertools.product(*zip(lo, hi))))
     Z = ((corners - mean) / std - center) @ components.T
-    explained = variance / variance.sum() if variance.sum() > 0 else numpy.full(len(NAMES), 1.0 / len(NAMES))
+    explained = variance / variance.sum() if variance.sum() > 0 else numpy.full(d, 1.0 / d)
     return dict(at=at, n_points=len(ok), n_good=n_good, cutoff=None if cutoff is None else float(cutoff),
                 mean=mean.tolist(), std=std.tolist(), center=center.tolist(), components=components.tolist(),
-                explained=explained.tolist(), zlo=Z.min(axis=0).tolist(), zhi=Z.max(axis=0).tolist())
+                explained=explained.tolist(), zlo=Z.min(axis=0).tolist(), zhi=Z.max(axis=0).tolist(),
+                free=free, x_fixed=x_fixed)
 
 
 def _arrays(basis):
+    """Stored bases of all-free searches (before fixed parameters) have no free/x_fixed keys."""
     import numpy
-    return {k: numpy.array(basis[k]) for k in ('mean', 'std', 'center', 'components', 'zlo', 'zhi')}
+    a = {k: numpy.array(basis[k]) for k in ('mean', 'std', 'center', 'components', 'zlo', 'zhi')}
+    a['free'] = basis.get('free', list(range(len(NAMES))))
+    a['x_fixed'] = numpy.array(basis.get('x_fixed', [0.0] * len(NAMES)), dtype=float)
+    return a
 
 
 def to_u(params, basis):
-    """Physical parameters -> normalised PCA coordinates ([0,1]^4 = PCA box of the local box)."""
+    """Physical parameters -> normalised PCA coordinates ([0,1]^d = PCA box of the local box)."""
     import numpy
     a = _arrays(basis)
-    z = ((numpy.array(to_x(params)) - a['mean']) / a['std'] - a['center']) @ a['components'].T
+    z = ((numpy.array(to_x(params))[a['free']] - a['mean']) / a['std'] - a['center']) @ a['components'].T
     return ((z - a['zlo']) / (a['zhi'] - a['zlo'])).tolist()
 
 
 def x_from_u(u, basis):
+    """Normalised PCA coordinates -> full x; fixed parameters take their box value."""
     import numpy
     a = _arrays(basis)
     z = a['zlo'] + numpy.asarray(u, dtype=float) * (a['zhi'] - a['zlo'])
-    return (a['mean'] + a['std'] * (z @ a['components'] + a['center'])).tolist()
+    x = a['x_fixed'].copy()
+    x[a['free']] = a['mean'] + a['std'] * (z @ a['components'] + a['center'])
+    return x.tolist()
 
 
 def box_constraints(basis, box):
     """Rows A, rhs b with A u >= b  <=>  the point lies in the local box (x linear in u)."""
     import numpy
     a = _arrays(basis)
-    lo, hi = (numpy.array(v) for v in box_x(box))
+    lo, hi = (numpy.array(v)[a['free']] for v in box_x(box))
     M = ((a['zhi'] - a['zlo'])[:, None] * a['components']) * a['std'][None, :]
     offset = a['mean'] + a['std'] * (a['zlo'] @ a['components'] + a['center'])
     return numpy.vstack([M.T, -M.T]).tolist(), numpy.concatenate([lo - offset, offset - hi]).tolist()
@@ -356,14 +384,14 @@ def feasible_point(target, A, b, lo, hi, seed, fallback):
 # --------------------------------------------------------------------------
 # Default numerical back-ends (torch/BoTorch only on the run host)
 # --------------------------------------------------------------------------
-def sobol_points(n, seed):
+def sobol_points(n, seed, d=len(NAMES)):
     import warnings
     from scipy.stats import qmc
     if n <= 0:
         return []
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        return qmc.Sobol(d=len(NAMES), scramble=True, seed=seed).random(n).tolist()
+        return qmc.Sobol(d=d, scramble=True, seed=seed).random(n).tolist()
 
 
 def propose_bo(points, values, center, lo, hi, A, b, seed):
@@ -386,13 +414,14 @@ def propose_bo(points, values, center, lo, hi, A, b, seed):
         dtype = torch.double
         X = torch.tensor(points, dtype=dtype)
         Y = -torch.log(torch.tensor(values, dtype=dtype)).unsqueeze(-1)
-        unit = torch.tensor([[0.0] * len(NAMES), [1.0] * len(NAMES)], dtype=dtype)
+        d = len(lo)
+        unit = torch.tensor([[0.0] * d, [1.0] * d], dtype=dtype)
         model = SingleTaskGP(X, Y, likelihood=GaussianLikelihood(noise_constraint=GreaterThan(1e-6)),
-                             input_transform=Normalize(d=len(NAMES), bounds=unit),
+                             input_transform=Normalize(d=d, bounds=unit),
                              outcome_transform=Standardize(m=1))
         fit_gpytorch_mll(ExactMarginalLogLikelihood(model.likelihood, model))
         acqf = qLogNoisyExpectedImprovement(model=model, X_baseline=X, prune_baseline=True)
-        index = torch.arange(len(NAMES))
+        index = torch.arange(d)
         constraints = [(index, torch.tensor(row, dtype=dtype), float(rhs)) for row, rhs in zip(A, b)]
         candidate, _ = optimize_acqf(acq_function=acqf, bounds=torch.tensor([lo, hi], dtype=dtype), q=1,
                                      num_restarts=10, raw_samples=2048, inequality_constraints=constraints)
@@ -412,7 +441,7 @@ def self_test(box, proposer=propose_bo, n=30, seed=1):
     records = []
     for _ in range(n):
         x = [rng.uniform(a, c) for a, c in zip(lo, hi)]
-        penalty = 1.5 + sum(((v - t) / (c - a)) ** 2 for v, t, a, c in zip(x, target, lo, hi))
+        penalty = 1.5 + sum(((v - t) / (c - a)) ** 2 for v, t, a, c in zip(x, target, lo, hi) if c > a)
         records.append(dict(params=from_x(x), status='ok', penalty=penalty))
     config = dict(DEFAULTS, box=box)
     basis = fit_basis(records, config, 0)
@@ -556,12 +585,16 @@ class Search:
 
     def sobol_stage(self):
         lo, hi = box_x(self.cfg['box'])
-        for j, s in enumerate(self.sobol(self.cfg['n_sobol'], self.cfg['sobol_seed'])):
+        free = free_index(self.cfg['box'])
+        for j, s in enumerate(self.sobol(self.cfg['n_sobol'], self.cfg['sobol_seed'], len(free))):
             if len(self.new_records()) >= self.cfg['budget']:
                 return
             if any(r['kind'] == 'sobol' and r.get('sobol_index') == j for r in self.state['evaluations']):
                 continue
-            params = clip_to_box(from_x([a + t * (c - a) for a, t, c in zip(lo, s, hi)]), self.cfg['box'])
+            x = list(lo)
+            for i, t in zip(free, s):
+                x[i] = lo[i] + t * (hi[i] - lo[i])
+            params = clip_to_box(from_x(x), self.cfg['box'])
             self._record(self.evaluate(params, 'sobol', extra=dict(sobol_index=j)))
 
     def basis(self):
@@ -631,6 +664,8 @@ def _edges(params, limits, rel=1e-3):
     hits = []
     for k in NAMES:
         lo, hi = limits[k]
+        if hi <= lo:
+            continue
         if k in LOG_NAMES:
             lo, hi, value = math.log10(lo), math.log10(hi), math.log10(params[k])
         else:
@@ -669,7 +704,7 @@ def summarize(state):
                 counts[edge] = counts.get(edge, 0) + 1
         near[str(delta)] = dict(n=len(rows), box_edges=counts)
     return dict(status=state.get('status'), updated=state.get('updated'), opt_seed=cfg['opt_seed'], box=cfg['box'],
-                budget=cfg['budget'], n_new=len(new), n_priors=len(evaluations) - len(new),
+                fixed=fixed_params(cfg['box']), budget=cfg['budget'], n_new=len(new), n_priors=len(evaluations) - len(new),
                 evaluation_kinds={k: sum(r['kind'] == k for r in new) for k in ('initial', 'sobol', 'bo')},
                 n_failed=sum(1 for r in new if r['status'] == 'failed'),
                 n_rejected=sum(1 for r in new if r['status'] == 'rejected'),
@@ -697,13 +732,19 @@ def _fmt_point(label, point):
             f"{','.join(point['bounds_edges']) or '-'}"]
 
 
+def _fmt_fixed(box):
+    fixed = fixed_params(box)
+    return ''.join(f', fixed {k}={v:g}' for k, v in fixed.items())
+
+
 def format_summary(summary):
     tr = summary.get('tr') or {}
     lines = [f"Local PCA search: status={summary['status']} new evaluations={summary['n_new']}/{summary['budget']} "
              f"priors={summary['n_priors']} failed={summary['n_failed']} rejected={summary['n_rejected']} "
              f"duplicates={summary['duplicates']} libraries saved={summary['libraries_saved']} "
              f"(seed {summary['opt_seed']}, updated {summary['updated']})",
-             '  box: ' + ', '.join(f'{k} {lo:g}..{hi:g}' for k, (lo, hi) in summary['box'].items()),
+             '  box: ' + ', '.join(f'{k} {lo:g}..{hi:g}' for k, (lo, hi) in summary['box'].items())
+             + _fmt_fixed(summary['box']),
              f"  trust region: length={tr.get('length')} restarts={tr.get('restarts')}; proposals "
              + ', '.join(f'{k}={v}' for k, v in (summary.get('proposals') or {}).items())]
     lines.append('  new evaluations by kind: ' + ' '.join(
@@ -739,7 +780,9 @@ def format_dry_run(config):
              f"(agama.setRandomSeed before every evaluation)",
              '  box: ' + ', '.join(f'{k} {lo:g}..{hi:g}' for k, (lo, hi) in config['box'].items())
              + ' (Upsilon searched internally)',
-             f"  PCA: 4 components of (Q, gh, log10 rh, log10 rho0), refit every {config['refit_every']} evaluations"]
+             f"  PCA: {len(free_names(config['box']))} components of ("
+             + ', '.join(k if k not in LOG_NAMES else f'log10 {k}' for k in free_names(config['box']))
+             + f"){_fmt_fixed(config['box'])}, refit every {config['refit_every']} evaluations"]
     lines.append(f"  prior states: {len(config['prior_sources'])} "
                  f"({', '.join(s['name'] for s in config['prior_sources']) or '-'})")
     if priors:
@@ -773,7 +816,8 @@ def format_dry_run(config):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0], allow_abbrev=False)
     parser.add_argument('--incl', type=float, default=90.0)
-    parser.add_argument('--box', default=None, help='Q=lo:hi,gh=lo:hi,rh=lo:hi,rho0=lo:hi inside bounds_original')
+    parser.add_argument('--box', default=None,
+                        help='Q=lo:hi,gh=lo:hi,rh=lo:hi,rho0=lo:hi inside bounds_original (lo == hi fixes it)')
     parser.add_argument('--budget', type=int, default=None,
                         help=f"New evaluations (default {DEFAULTS['budget']}; on --resume: stored, larger extends)")
     parser.add_argument('--n-sobol', type=int, default=DEFAULTS['n_sobol'])

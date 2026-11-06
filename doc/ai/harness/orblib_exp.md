@@ -697,6 +697,15 @@ CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.p
   the 16 box corners in PC space; the physical box is 8 linear constraints `A u ≥ b` (no clipping
   except round-off). Refit every 6 new evaluations (bases stored in the state); the identity
   basis is used with < 2 ok points.
+- Fixed parameters (DECISIONS 2026-11-06, gh=1 search): a `--box` item `NAME=v:v` (lo == hi)
+  fixes that parameter; at least two must stay free. PCA (k components of the free x columns,
+  std floor and corners over free dims), the 2k box constraints, Sobol (d = k, same seed),
+  GP/qLogNEI and the TR cube all live in the k-dimensional space; `x_from_u` reinserts the fixed
+  values (bases store `free`/`x_fixed`; older bases without them are read as all-free). Box
+  distance and edge flags skip fixed dims; dry-run prints `PCA: k components of (…), fixed
+  NAME=v`, the report has `fixed`. Initial points keep four columns and must equal the fixed
+  value; priors enter only if they lie on it. An all-free box is bit-identical to before
+  (stored bases and Sobol points of the real states reproduced exactly).
 - Optional explicit starts (DECISIONS 2026-11-04): `--initial-points=FILE`, four whitespace-separated
   columns `Q gh rh rho0`, blank lines and `#` comments allowed. These are new coordinates, **not**
   measured observations: no Upsilon, penalty or timestamp columns. The stdlib parser refuses empty,

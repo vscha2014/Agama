@@ -1,15 +1,13 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-06: paired seed scan of the two
-seed-42 optima prepared for gray. Numerical results private; no calculations executed by the agent.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-06: gray seed scan and fixed-gh=1
+tycho search prepared. Numerical results private; no calculations executed by the agent.
 
 ## Where the science stands
 
 - Completed free-Q L24 and spherical Q1 searches at incl=90 provide two finalists; their
   historical minima do not calibrate IC uncertainty. Numerical results remain in results/.
-- The Upsilon control (2026-10-25) showed a small protocol effect on the finalists' gap;
-  its reports were marked failed only by the runner's store check (fixed). Notes under
-  `results/logs/multi_d1_nb250_gh0_l24n184_ser0_n2_20261025_225604/`.
+- Upsilon control (2026-10-25): small protocol effect on the finalists' gap (private `multi_…_225604/`).
 - Paired seed scan favours the old free-Q finalist over the strict-spherical finalist.
   It measures IC-noise robustness of two fixed points, not observational significance.
   Details: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
@@ -28,10 +26,8 @@ seed-42 optima prepared for gray. Numerical results private; no calculations exe
 
 ## Code state
 
-- Production, CONTRACT, harness and storage are unchanged. Runner library check
-  (placeholder of a read-only library is not a failure), `--require-library`,
-  `potential_provenance`, `--ic-seeds` paired batches with isolated `orblib_seed/` store and
-  git-backed `results/` (`harness/orblib_exp.md` §3d, §3g–§3h) as before.
+- Production, CONTRACT, harness and storage are unchanged. Runner library check, `--require-library`,
+  `--ic-seeds` paired batches, git-backed `results/` (`harness/orblib_exp.md` §3d, §3g–§3h) as before.
 - Q profile (§3i, DECISIONS 2026-10-28): seed-42 CRN, trust-region BO per Q in the full box,
   `compact`/`extended` continuation + Sobol/global starts, optional priors, isolated
   `qprofile_*` rows, `.npz` ≤ 3.5 (Q≠1) into `orblib/`, resume.
@@ -40,7 +36,9 @@ seed-42 optima prepared for gray. Numerical results private; no calculations exe
   TuRBO in a full 4D PCA basis inside a local box, seed 42 before every evaluation, Q-profile
   seed-42 points as priors (context-checked), BoTorch self-test in preflight.
 - Explicit starts (DECISIONS 2026-11-04): `--initial-points=FILE` before Sobol, within the new-eval
-  budget; checkpointed indices/input hash, old states remain resume-compatible. 392 mocked tests pass.
+  budget; checkpointed indices/input hash, old states remain resume-compatible.
+- Fixed box parameters (DECISIONS 2026-11-06): `--box NAME=v:v` → k-dim PCA/GP/TuRBO over the free
+  ones (gh=1:1 search); all-free boxes bit-identical. 401 mocked tests pass.
 
 ## Next steps (started by the user)
 
@@ -49,8 +47,9 @@ seed-42 optima prepared for gray. Numerical results private; no calculations exe
    and checks: private `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md` (not launched).
 2. Weak-cusp local search (tycho, 24 evaluations) done and analysed: no improvement, flat degenerate
    plateau, cores better at every Q; no extension (private `localpca_…_20261106_094514/NOTES.md`).
-   Fixed-gh=1 optimisation still only proposed; literal NFW needs an approved alpha=1 experiment.
-3. Keep seed 42 for parameter work; later J-factor/mass comparison and other inclinations.
+3. Fixed-gh=1 search on tycho (40 evaluations, Q 0.05–1.3, needs the new commit; private
+   `results/logs/localpca/HANDOFF_LOCALPCA_GH1.md`, not launched). Literal NFW needs approved alpha=1.
+4. Keep seed 42 for parameter work; later J-factor/mass comparison and other inclinations.
 
 ## Open questions
 

@@ -69,9 +69,9 @@ def center_proposer(points, values, center, lo, hi, A, b, seed):
     return list(center)
 
 
-def fake_sobol(n, seed):
+def fake_sobol(n, seed, d=4):
     rng = random.Random(seed)
-    return [[rng.random() for _ in range(4)] for _ in range(n)]
+    return [[rng.random() for _ in range(d)] for _ in range(n)]
 
 
 def prior(params, penalty, status='ok', source='p'):
@@ -592,3 +592,157 @@ def test_initial_points_dry_run_needs_only_stdlib(tmp_path):
                             capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=''))
     assert result.returncode == 0, result.stderr
     assert '4 initial + 4 Sobol + 52 TuRBO' in result.stdout
+
+
+# --------------------------------------------------------------------------
+# Fixed parameters (lo == hi in --box), e.g. gh=1
+# --------------------------------------------------------------------------
+GH1_BOX_SPEC = 'Q=0.05:1.3,gh=1:1,rh=0.5:30,rho0=10:120'
+GH1_BOX = dict(Q=[0.05, 1.3], gh=[1.0, 1.0], rh=[0.5, 30.0], rho0=[10.0, 120.0])
+GH1_INITIAL_TEXT = '0.08 1 2 36\n0.27 1 5 20\n0.27 1 2 36\n0.27 1 10 10\n0.6 1 3 20\n0.98 1 3 20\n'
+GH1_TARGET = dict(Q=0.3, gh=1.0, rh=4.0, rho0=20.0)
+
+
+def gh1_objective(Q, params):
+    lo, hi = lp.box_x(GH1_BOX)
+    return 5.0 + 4.0 * sum(((a - b) / (h - l)) ** 2 for a, b, l, h in zip(lp.to_x(params), lp.to_x(GH1_TARGET), lo, hi)
+                           if h > l)
+
+
+class GH1Recorder(Recorder):
+    def __call__(self, Q, params, seed, meta):
+        result = super().__call__(Q, params, seed, meta)
+        return dict(result, penalty=gh1_objective(Q, params)) if result['status'] == 'ok' else result
+
+
+def _gh1_records(n=30, seed=2):
+    rng = random.Random(seed)
+    records = []
+    for _ in range(n):
+        params = dict(Q=rng.uniform(0.05, 1.3), gh=1.0, rh=10 ** rng.uniform(math.log10(0.5), math.log10(30)),
+                      rho0=10 ** rng.uniform(1, math.log10(120)))
+        records.append(dict(params=params, status='ok', penalty=gh1_objective(params['Q'], params)))
+    return records
+
+
+def test_box_with_a_fixed_parameter():
+    assert lp.parse_box(GH1_BOX_SPEC, BOUNDS) == GH1_BOX
+    assert lp.free_names(GH1_BOX) == ('Q', 'rh', 'rho0') and lp.free_names(BOX) == lp.NAMES
+    for bad in ('Q=0.3:0.3,gh=1:1,rh=4:4,rho0=10:120', 'Q=0.3:0.3,gh=1:1,rh=4:4,rho0=20:20',
+                'Q=0.05:1.3,gh=1:0.9,rh=0.5:30,rho0=10:120', 'Q=0.05:1.3,gh=1.7:1.7,rh=0.5:30,rho0=10:120'):
+        with pytest.raises(lp.ConfigError):
+            lp.parse_box(bad, BOUNDS)
+    params = dict(Q=0.3, gh=1.0, rh=4.0, rho0=20.0)
+    assert lp.in_box(params, GH1_BOX, tol=0) and not lp.in_box(dict(params, gh=0.99), GH1_BOX)
+    assert lp._edges(params, GH1_BOX) == [] and lp._edges(dict(params, Q=0.05), GH1_BOX) == ['Q=lo']
+    assert math.isclose(lp.box_distance(params, dict(params, Q=0.3 + 1.25), GH1_BOX), 1.0)
+
+
+def test_fixed_parameter_basis_round_trip_and_constraints():
+    basis = lp.fit_basis(_gh1_records(), make_config(box=GH1_BOX), 0)
+    C = numpy.array(basis['components'])
+    assert C.shape == (3, 3) and numpy.allclose(C @ C.T, numpy.eye(3)) and len(basis['explained']) == 3
+    assert basis['free'] == [0, 2, 3]
+    for record in _gh1_records(10, seed=8):
+        u = lp.to_u(record['params'], basis)
+        assert len(u) == 3 and all(-1e-12 <= v <= 1 + 1e-12 for v in u)
+        back = lp.from_x(lp.x_from_u(u, basis))
+        assert back['gh'] == 1.0
+        assert all(math.isclose(back[k], record['params'][k], rel_tol=1e-9) for k in lp.NAMES)
+    A, b = lp.box_constraints(basis, GH1_BOX)
+    assert len(A) == 6 and all(len(row) == 3 for row in A)
+    rng = numpy.random.default_rng(6)
+    inside = outside = 0
+    for u in rng.random((3000, 3)):
+        params = lp.from_x(lp.x_from_u(u, basis))
+        lo, hi = lp.box_x(GH1_BOX)
+        x = lp.to_x(params)
+        margin = min(min(x[i] - lo[i], hi[i] - x[i]) / (hi[i] - lo[i]) for i in (0, 2, 3))
+        if abs(margin) < 1e-6:
+            continue
+        assert lp.feasible(u, A, b, [0] * 3, [1] * 3) == (margin > 0)
+        inside, outside = inside + (margin > 0), outside + (margin < 0)
+    assert inside > 50 and outside > 50
+    empty = lp.fit_basis([], make_config(box=GH1_BOX), 0)
+    assert numpy.allclose(empty['components'], numpy.eye(3))
+    assert lp.from_x(lp.x_from_u([0.5] * 3, empty))['gh'] == 1.0
+
+
+def test_stored_four_dimensional_bases_without_free_indices_still_work():
+    basis = lp.fit_basis(_records(), make_config(), 0)
+    assert basis['free'] == [0, 1, 2, 3]
+    old = {k: v for k, v in basis.items() if k not in ('free', 'x_fixed')}
+    params = _records(1, seed=9)[0]['params']
+    assert lp.to_u(params, old) == lp.to_u(params, basis)
+    assert lp.x_from_u([0.3] * 4, old) == lp.x_from_u([0.3] * 4, basis)
+    assert lp.box_constraints(old, BOX) == lp.box_constraints(basis, BOX)
+
+
+def gh1_config(tmp_path, budget=20, n_sobol=6, text=GH1_INITIAL_TEXT):
+    return initial_config(tmp_path, text, box=GH1_BOX_SPEC, extra=('--budget', str(budget), '--n-sobol', str(n_sobol)))
+
+
+def test_fixed_gh_search_keeps_gh_exactly_one(tmp_path):
+    config = gh1_config(tmp_path)
+    assert config['priors'] == [] and [p['gh'] for p in config['initial_points']] == [1.0] * 6
+    recorder = GH1Recorder()
+    run = search(tmp_path, config=config, evaluator=recorder)
+    run.open(resume=False)
+    run.run()
+    new = run.new_records()
+    assert len(recorder.calls) == 20 and run.state['status'] == 'done'
+    assert [r['kind'] for r in new] == ['initial'] * 6 + ['sobol'] * 6 + ['bo'] * 8
+    assert all(c['params']['gh'] == 1.0 and lp.in_box(c['params'], GH1_BOX, tol=0) for c in recorder.calls)
+    assert len({tuple(c['params'].values()) for c in recorder.calls}) == 20
+    assert all(numpy.array(b['components']).shape == (3, 3) for b in run.state['bases'])
+    summary = lp.summarize(run.state)
+    assert summary['fixed'] == dict(gh=1.0)
+    assert all(not e.startswith('gh=') for e in summary['best']['box_edges'])
+    assert 'fixed gh=1' in lp.format_summary(summary)
+    text = lp.format_dry_run(config)
+    assert 'PCA: 3 components of (Q, log10 rh, log10 rho0), fixed gh=1' in text
+    assert '6 initial + 6 Sobol + 8 TuRBO' in text
+
+
+def test_fixed_gh_resume_reproduces_the_uninterrupted_run(tmp_path):
+    config = gh1_config(tmp_path, budget=16)
+    full = search(tmp_path / 'full', config=config, evaluator=GH1Recorder())
+    full.open(resume=False)
+    full.run()
+    first = search(tmp_path / 'b', config=config, evaluator=GH1Recorder(stop_at=13))
+    first.open(resume=False)
+    with pytest.raises(lp.StopRun):
+        first.run()
+    second = search(tmp_path / 'b', config=config, evaluator=GH1Recorder())
+    second.open(resume=True)
+    second.run()
+    assert [(r['kind'], r['params']) for r in second.new_records()] == [
+        (r['kind'], r['params']) for r in full.new_records()]
+
+
+def test_fixed_gh_initial_points_must_lie_on_the_fixed_value(tmp_path):
+    with pytest.raises(lp.ConfigError, match='box'):
+        gh1_config(tmp_path, text='0.3 0.99 4 20\n')
+
+
+def test_fixed_gh_self_test_and_proposals_are_three_dimensional():
+    seen = []
+
+    def proposer(points, values, center, lo, hi, A, b, seed):
+        seen.append((len(points[0]), len(center), len(lo), len(A[0])))
+        return feasible_proposer(points, values, center, lo, hi, A, b, seed)
+
+    ok, params = lp.self_test(GH1_BOX, proposer=proposer)
+    assert ok and params['gh'] == 1.0 and lp.in_box(params, GH1_BOX, tol=0)
+    assert seen == [(3, 3, 3, 3)]
+
+
+def test_fixed_gh_dry_run_needs_only_stdlib(tmp_path):
+    path = tmp_path / 'gh1.txt'
+    path.write_text(GH1_INITIAL_TEXT)
+    result = subprocess.run([sys.executable, '-S', str(DRIVER), '--dry-run', '--box', GH1_BOX_SPEC,
+                             '--initial-points', str(path), '--n-sobol', '6', '--budget', '40'],
+                            capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=''))
+    assert result.returncode == 0, result.stderr
+    assert 'gh 1..1' in result.stdout and 'fixed gh=1' in result.stdout
+    assert '6 initial + 6 Sobol + 28 TuRBO' in result.stdout

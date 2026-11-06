@@ -622,3 +622,17 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Git** | launchers push only `results/` with rebase retries; concurrent tycho/gray runs write
   disjoint timestamped directories. Hand-off with commands and checks (private):
   `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md`. The run is started by the user.
+
+## 2026-11-06 — Fixed-gh=1 (r^-1 inner cusp) search at seed 42 (user)
+
+- **Why** | the cusp audit found no optimised gh≈1 model (only Sobol probes), so an exclusion
+  statement needs an optimised fixed-gh=1 family. Frozen alpha=2: this is an r^-1 inner cusp in our
+  family, not literal NFW (alpha=1 would need PI approval and a harness change).
+- **Code** | user chose exact gh=1 over a narrow gh slab: `run_local_pca.py` accepts `NAME=v:v` in
+  `--box` and searches the remaining free parameters (≥ 2) with a k-dimensional PCA/GP/TuRBO
+  (§3j). All-free boxes are bit-identical; harness, evaluator, bounds and CONTRACT unchanged.
+- **Run** | one run Q 0.05–1.3, gh=1, physical rh 0.5–30 and rho0 10–120; L24/exp, seed 42, internal
+  Upsilon; 40 new evaluations = 6 explicit starts across Q (rho0 matched to the inner density of good fits) + 6 Sobol +
+  28 TuRBO; no prior lies on gh=1 (both Q-profile states pinned for the context check). Private
+  hand-off and starts: `results/logs/localpca/HANDOFF_LOCALPCA_GH1.md`, `gh1_initial_points.txt`.
+  Started by the user on tycho after preflight; extension or a second-basin run decided afterwards.

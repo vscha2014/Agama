@@ -842,6 +842,20 @@ def test_local_pca_invalid_initial_points_stop_before_preflight(tmp_path, text, 
     assert result.returncode == 2 and not events, output(result)
 
 
+def test_local_pca_preflight_with_fixed_gh(tmp_path):
+    def setup(work):
+        copy_local_pca(work)
+        (work / 'gh1.txt').write_text('0.08 1 2 36\n0.27 1 5 20\n0.98 1 3 20\n')
+
+    box = 'Q=0.05:1.3,gh=1:1,rh=0.5:30,rho0=10:120'
+    result, events, _ = run(tmp_path, '--threads=4', '--local-pca', f'--box={box}', '--prior-states=none',
+                            '--initial-points=gh1.txt', '--n-sobol=6', '--budget=40', '--preflight', '--offline',
+                            setup=setup)
+    assert result.returncode == 0 and not pythons(events), output(result)
+    assert 'fixed gh=1' in output(result) and '3 initial + 6 Sobol + 31 TuRBO' in output(result)
+    assert any(e.startswith('selftest ') and f'--box {box}' in e for e in events)
+
+
 def test_initial_points_are_only_for_local_pca(tmp_path):
     result, events, _ = run(tmp_path, '--initial-points=initial.txt', setup=copy_local_pca)
     assert result.returncode == 2 and not events, output(result)

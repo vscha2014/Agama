@@ -97,7 +97,8 @@ for arg in "$@"; do
                 '    --no-smooth-check Без диагностики гладкости по rho0 на нижнем Q.' \
                 '  --local-pca         Локальный поиск TuRBO в полном 4D PCA-базисе (run_local_pca.py, всегда --l24,' \
                 '                      seed AGAMA 42 перед каждой оценкой, строки в localpca_*).' \
-                '    --box=SPEC        Обязательно: Q=a:b,gh=a:b,rh=a:b,rho0=a:b внутри bounds_original.' \
+                '    --box=SPEC        Обязательно: Q=a:b,gh=a:b,rh=a:b,rho0=a:b внутри bounds_original;' \
+                '                      a=b фиксирует параметр (например gh=1:1), поиск по остальным.' \
                 '    --budget=N        Новых оценок (по умолчанию 60; при --resume-search больше — продление).' \
                 '    --n-sobol=N       Из них точек Sobol в боксе до TuRBO (по умолчанию 8).' \
                 '    --initial-points=FILE  Новые старты перед Sobol: строки Q gh rh rho0, входят в --budget.' \
