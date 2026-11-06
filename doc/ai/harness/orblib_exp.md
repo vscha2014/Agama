@@ -574,6 +574,12 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
 - No docker, sudo, swapfile or shutdown. Reservations are per host, so a
   simultaneous VM run at the same `incl` can duplicate evaluations (no data
   corruption); prefer different `incl`. Real tycho runs are done by the user.
+- Other hosts (e.g. gray, 12 vCPU / 7.7 GiB): the same launcher works; file names carry
+  `hostname`, the ntfy title still reads "Tycho <host>". Set limits explicitly: `--threads=N`
+  (default nproc/4) and `TYCHO_MEM_MAX=<bytes>` — with `--models`/drivers the default is 8 GiB,
+  which may exceed the host RAM. Pass `--git-results` (exit 2 if `../results/.git` is missing
+  instead of falling back to rclone) and `git -C ../results pull --ff-only` **before** launching:
+  `--models=FILE` is resolved before the launcher's own pull. Keep `results/` clean (`add -A`).
 
 ## 3h. Git-backed `results/` synchronization (without `rclone` / Yandex.Disk)
 

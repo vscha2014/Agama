@@ -594,3 +594,31 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - Preparation/tests only, no agent-run optimisation or tycho operations. The user launches after
   delivery and successful preflight, separately from the near-spherical run. Other IC seeds and
   J-factor work remain deferred until local parameter searches are assessed.
+
+## 2026-11-05 — Weak-cusp local search (user)
+
+- Same driver/evaluator as the two core searches (4D PCA, AGAMA seed 42 per evaluation,
+  L24/exp, internal Upsilon); no code change. Box limited in Q to the sampled weak-cusp side
+  (user chose the narrower Q range); physical bounds and scientific definitions unchanged.
+- **Budget:** first stage of 24 new evaluations = four explicit fixed-shape Q starts at the
+  best weak-cusp coordinates, four Sobol points, 16 TuRBO steps; extension by `--budget` on
+  resume only after inspecting the result (edge hits, late improvement).
+- Only provenance-checked Q-profile observations are reused as priors. Exact box, starts and
+  numbers are private: `results/logs/localpca/HANDOFF_LOCALPCA_WEAKCUSP.md`,
+  `weakcusp_initial_points.txt`. Run on tycho is started by the user after preflight.
+
+## 2026-11-06 — Paired IC-seed scan of the two seed-42 optima on gray (user)
+
+- **Models** | both: the near-spherical (m0) and the compact (m1) local-PCA optima, in one run. The
+  compact point is kept because the decisive quantity is the paired gap, and gray may be a
+  different AGAMA build, so only points computed in the same run are directly comparable.
+  Parameters are taken at full double precision from the search states (private models file).
+- **Seeds** | `42,1-20` in this order. Seed 42 first = cross-host control: it must reproduce the
+  tycho seed-42 values (bit-identical or within the Q29 technical budget); otherwise gray results
+  are interpreted only within this run. Seeds 1–20 share labels with the 2026-10-26 scan.
+- **Run** | `launch_tycho.sh --l24 --git-results --threads=4 --models=… --ic-seeds=42,1-20` on gray
+  with `TYCHO_MEM_MAX` = 3.5 GiB: ≤ 1/3 of the CPUs and ≤ 1/2 of the RAM (the `--models` default
+  of 8 GiB exceeds gray's RAM). `exp`, L24, fresh orbits, no libraries; no code change.
+- **Git** | launchers push only `results/` with rebase retries; concurrent tycho/gray runs write
+  disjoint timestamped directories. Hand-off with commands and checks (private):
+  `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md`. The run is started by the user.

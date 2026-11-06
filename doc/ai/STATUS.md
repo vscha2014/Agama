@@ -1,7 +1,7 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-04: compact local search prepared;
-explicit boundary starts at the existing IC seed. Numerical results private; no new run executed.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-06: paired seed scan of the two
+seed-42 optima prepared for gray. Numerical results private; no calculations executed by the agent.
 
 ## Where the science stands
 
@@ -10,21 +10,21 @@ explicit boundary starts at the existing IC seed. Numerical results private; no 
 - The Upsilon control (2026-10-25) showed a small protocol effect on the finalists' gap;
   its reports were marked failed only by the runner's store check (fixed). Notes under
   `results/logs/multi_d1_nb250_gh0_l24n184_ser0_n2_20261025_225604/`.
-- Paired seed scan (seeds 1–20, fresh L24 orbits for both finalists, 40/40 ok):
-  the free-Q finalist is better in almost every seed; the mean paired gap is many
-  MC standard errors from zero and agrees with the historical gap, because both
-  historical records carry a similar winner's-curse bias. This is IC-noise robustness
-  of two fixed points, not observational significance or a connectivity test.
-  Numbers: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
-  Root search pools are unchanged.
+- Paired seed scan favours the old free-Q finalist over the strict-spherical finalist.
+  It measures IC-noise robustness of two fixed points, not observational significance.
+  Details: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
 - Q profiles use seed-42 CRN, re-optimise (gh, rh, rho0) at fixed Q in the full physical box,
   and keep their rows separate from ordinary search pools. Both runs are analysed:
   private `results/logs/qprofile/qprofile_…_20261029_111955/NOTES.md` and
   `results/logs/qprofile/qprofile_…_20261102_145506/NOTES.md`.
-- The private notes distinguish the candidate penalty gap from the intermediate profile
-  height. Budget-limited searches give upper bounds on the true minima, not a proof of
-  a minimum barrier. Sparse Q samples do not establish a loss of CRN correlation or a
-  numerical error. Earlier stronger claims in the second run's notes were corrected.
+- Budget-limited profile searches give upper bounds on the true minima, not a proven barrier;
+  sparse Q samples do not establish lost CRN correlation or a numerical error.
+- Both local seed-42 searches are done (private NOTES in `results/logs/localpca/localpca_…_20261104_134856/`
+  and `…_20261105_094229/`). Compact minimum is closed except gh=0, lower Q is worse; the near-spherical
+  one ranks clearly better at seed 42 but sits on gh=0/rh=30 and seed 42 is known to favour that side.
+- Cusp audit: no fixed-gh=1 optimisation; modern steep-cusp trials are only Sobol probes.
+  Weak cusps form a low-normalisation branch outside both local core boxes. Neither is excluded.
+  The frozen alpha=2 family differs from literal NFW. See `results/logs/CUSP_ASSESSMENT_20261105.md`.
 
 ## Code state
 
@@ -42,19 +42,19 @@ explicit boundary starts at the existing IC seed. Numerical results private; no 
 - Explicit starts (DECISIONS 2026-11-04): `--initial-points=FILE` before Sobol, within the new-eval
   budget; checkpointed indices/input hash, old states remain resume-compatible. 392 mocked tests pass.
 
-## Next steps (need user go-ahead on tycho)
+## Next steps (started by the user)
 
-1. Deliver checked code and private compact inputs; confirm near-spherical run status on tycho.
-   Follow `results/logs/localpca/HANDOFF_LOCALPCA_COMPACT.md`: preflight, then 4 starts + 4 Sobol
-   + 52 TuRBO. One launcher at a time; do not update code under a running search.
-2. Analyse both local regions at seed 42 before additional IC seeds (DECISIONS 2026-11-03).
-3. Optional field-only potential validation beyond Q=1.
-4. J-factor/mass comparison of both branches incl. outer continuation; other inclinations.
+1. Paired IC-seed scan of both seed-42 optima on **gray** (DECISIONS 2026-11-06): seeds 42 (cross-host
+   control first) + 1–20, `--threads=4`, `TYCHO_MEM_MAX` 3.5 GiB, no code change. Models file, commands
+   and checks: private `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md` (not launched).
+2. Weak-cusp local search on tycho (DECISIONS 2026-11-05, 24 evaluations; private
+   `results/logs/localpca/HANDOFF_LOCALPCA_WEAKCUSP.md`); analyse when delivered. Fixed-gh=1 optimisation
+   still only proposed; literal NFW would require an approved alpha=1 experiment.
+3. Keep seed 42 for parameter work; later J-factor/mass comparison and other inclinations.
 
 ## Open questions
 
 Q15 (Upsilon Brent into production), Q16 (J weighting / sampling density), Q17–Q19
 (shard consolidation, `ic`/`inttime`, shard naming), Q20 (production `pipefail`), Q23
 (OpenMP wrap in production) — see `questions_for_pi.md`.
-Decided (`DECISIONS.md`): Q21, Q22, Q28, Q29, Q30, TR bound, PCA std floor, git-results sync,
-finalist batch library check (2026-10-26), Q profile with CRN (2026-10-28).
+Decided (`DECISIONS.md`): Q21, Q22, Q28–Q30, TR bound, PCA std floor, git-results sync, Q profile, local PCA, gray seed scan.
