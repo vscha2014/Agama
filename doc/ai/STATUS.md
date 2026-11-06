@@ -23,7 +23,7 @@ seed-42 optima prepared for gray. Numerical results private; no calculations exe
   and `…_20261105_094229/`). Compact minimum is closed except gh=0, lower Q is worse; the near-spherical
   one ranks clearly better at seed 42 but sits on gh=0/rh=30 and seed 42 is known to favour that side.
 - Cusp audit: no fixed-gh=1 optimisation; modern steep-cusp trials are only Sobol probes.
-  Weak cusps form a low-normalisation branch outside both local core boxes. Neither is excluded.
+  Weak cusps: free-Q local search confirms a shallow plateau worse than the cores (not a proven barrier).
   The frozen alpha=2 family differs from literal NFW. See `results/logs/CUSP_ASSESSMENT_20261105.md`.
 
 ## Code state
@@ -47,9 +47,9 @@ seed-42 optima prepared for gray. Numerical results private; no calculations exe
 1. Paired IC-seed scan of both seed-42 optima on **gray** (DECISIONS 2026-11-06): seeds 42 (cross-host
    control first) + 1–20, `--threads=4`, `TYCHO_MEM_MAX` 3.5 GiB, no code change. Models file, commands
    and checks: private `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md` (not launched).
-2. Weak-cusp local search on tycho (DECISIONS 2026-11-05, 24 evaluations; private
-   `results/logs/localpca/HANDOFF_LOCALPCA_WEAKCUSP.md`); analyse when delivered. Fixed-gh=1 optimisation
-   still only proposed; literal NFW would require an approved alpha=1 experiment.
+2. Weak-cusp local search (tycho, 24 evaluations) done and analysed: no improvement, flat degenerate
+   plateau, cores better at every Q; no extension (private `localpca_…_20261106_094514/NOTES.md`).
+   Fixed-gh=1 optimisation still only proposed; literal NFW needs an approved alpha=1 experiment.
 3. Keep seed 42 for parameter work; later J-factor/mass comparison and other inclinations.
 
 ## Open questions
