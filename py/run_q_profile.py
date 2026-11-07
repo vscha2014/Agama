@@ -863,7 +863,9 @@ def save_library(mod, storage, capture, Q, params, penalty, shared_dir, save_bel
         return dict(skipped='Q=1 (untagged library name)')
     if capture.last is None or capture.last.get('ic') is None or capture.last.get('time') is None:
         return dict(skipped='no captured orbit library')
-    name, _ = mod.orblib_key(Q, params['gh'], params['rh'], params['rho0'])
+    alpha = params.get('alpha')
+    name, _ = (mod.orblib_key(Q, params['gh'], params['rh'], params['rho0']) if alpha is None
+               else mod.orblib_key(Q, params['gh'], params['rh'], params['rho0'], alpha=float(alpha)))
     path = os.path.join(shared_dir, name)
     if os.path.exists(path) or os.path.exists(path + '.building'):
         return dict(skipped='exists', name_existing=name)
@@ -876,6 +878,8 @@ def save_library(mod, storage, capture, Q, params, penalty, shared_dir, save_bel
                    numOrbits=len(ic), trajsize=mod.TRAJSIZE_STORED, intTime=defaults['intTime'].default,
                    gridv=mod.gridv, degree=mod.degree, ghorder=mod.ghorder, n_bin=mod.N_BIN,
                    double=int(mod.DOUBLE), ser_id=mod.SER_ID)
+    if alpha is not None:
+        scalars['alpha'] = float(alpha)
     expected = {k: v for k, v in scalars.items() if k not in ('gridv', 'trajsize')}
     expected.update(gridv_md5=hashlib.md5(numpy.asarray(mod.gridv).tobytes()).hexdigest(),
                     gridv_dtype=numpy.asarray(mod.gridv).dtype.str)

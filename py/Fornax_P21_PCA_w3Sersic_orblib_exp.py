@@ -153,7 +153,7 @@ if GH_ID != 0 or SER_ID != 0:
 if SAVE_ORBLIB or REUSE_ORBLIB:
     os.makedirs(ORBLIB_DIR, exist_ok=True)
 
-def orblib_key(Q, gh, rh, rho0):
+def orblib_key(Q, gh, rh, rho0, alpha=None):
     """Контент-ключ библиотеки орбит: имя .npz и путь в ORBLIB_DIR.
     ЕДИНАЯ точка для save и lookup. Ключ зависит от (Q, gh, rh, rho0,
     incl, DOUBLE, N_BIN, SER_ID, GEOM_HASH); НЕ зависит от gh_id (см.
@@ -161,8 +161,13 @@ def orblib_key(Q, gh, rh, rho0):
     GEOM_HASH (сетка gridx/gridy + апертуры sectAPP, см. ниже по коду)
     гарантирует, что любое изменение построения сетки/разбиения на апертуры
     даёт другое имя файла — коллизия со старыми несовместимыми шардами
-    исключена по построению, а не отлавливается постфактум при lookup."""
+    исключена по построению, а не отлавливается постфактум при lookup.
+    alpha задаётся только в экспериментальном режиме свободной alpha
+    (run_local_pca.py --fit-alpha): тогда она входит в хэш с маркером схемы,
+    и даже alpha=2 не совпадает с прежними ключами; без alpha ключ прежний."""
     _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
+    if alpha is not None:
+        _pkey += f"_alpha-v1_{float(alpha)!r}"
     _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
     _pot_tag = '' if abs(float(Q) - 1.0) <= 1e-12 else globals().get('POT_TAG', '')
     name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
@@ -1081,6 +1086,10 @@ datasets.append(agama.schwarzlib.KinemDatasetGH(
 
 alphah    = 2.0
 betah     = 3
+# Допустимый диапазон явной alpha в экспериментальном режиме свободной alpha
+# (run_local_pca.py --fit-alpha; Hayashi et al. 2020, 2023: 0.5 <= alpha <= 3).
+# Научное значение по умолчанию alphah = 2 не меняется.
+ALPHA_FIT_BOUNDS = (0.5, 3.0)
 
 numOrbits = 100000
 # Траектории не запрашиваются у agama.orbit (целевые матрицы накапливает
@@ -1485,9 +1494,17 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
     gh = params['gh']
     rh = params['rh']
     rho0 = params['rho0']
+    alpha_fit = params.get('alpha') if direct_params is not None else None
+    if alpha_fit is not None:
+        alpha_fit = float(alpha_fit)
+        if not (numpy.isfinite(alpha_fit) and ALPHA_FIT_BOUNDS[0] <= alpha_fit <= ALPHA_FIT_BOUNDS[1]):
+            raise ValueError(f'explicit alpha={alpha_fit!r} outside {ALPHA_FIT_BOUNDS}')
+        if alpha_fit != float(alphah):
+            raise ValueError(f'explicit alpha={alpha_fit!r} differs from the alphah argument {alphah!r}')
     
 #    print(f"PCA coords: {pc_coords}")
-    print(f"  → Q={Q:.4f}, gh={gh:.4f}, rh={rh:.4f}, rho0={rho0:.4f}")
+    print(f"  → Q={Q:.4f}, gh={gh:.4f}, rh={rh:.4f}, rho0={rho0:.4f}"
+          + ('' if alpha_fit is None else f", alpha={alpha_fit:.4f}"))
     _ol_build_fp = None
     _storage_claim = None
     store = globals().get('orblib_store')
@@ -1533,7 +1550,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         # --- Lookup сохранённой библиотеки орбит (--reuse-orblib) ---
         # ТОЛЬКО локальные файлы в ORBLIB_DIR (никакой сети в горячем цикле);
         # синхронизацию с Я.Диском делает оркестратор до/после запуска.
-        _ol_name, _ol_path = orblib_key(Q, gh, rh, rho0)
+        _ol_name, _ol_path = (orblib_key(Q, gh, rh, rho0) if alpha_fit is None
+                              else orblib_key(Q, gh, rh, rho0, alpha=alpha_fit))
         _archived = False
         if store is not None:
             try:
@@ -1546,6 +1564,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                  degree=degree, ghorder=ghorder,
                                  gridv_md5=hashlib.md5(gridv.tobytes()).hexdigest(),
                                  gridv_dtype=gridv.dtype.str)
+                if alpha_fit is not None:
+                    _expected['alpha'] = alpha_fit
                 _archived = store.archived(_ol_name, _expected)
                 _bytes = int(1.1 * 8 * numOrbits * (7 + sum(len(d.target) for d in datasets))) + 1048576
                 _storage_claim = store.claim(_ol_name, 0 if _archived or os.path.exists(_ol_path) else _bytes)
@@ -1571,6 +1591,9 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                     _meta_exp = dict(incl=float(incl), double=int(DOUBLE),
                                      n_bin=N_BIN, ser_id=SER_ID,
                                      numOrbits=int(numOrbits))
+                    if alpha_fit is not None:
+                        _meta['alpha'] = float(_npz['alpha']) if 'alpha' in _npz.files else None
+                        _meta_exp['alpha'] = alpha_fit
                     if _meta == _meta_exp:
                         matrices = [numpy.asarray(_npz['matrix_dens']),
                                     numpy.asarray(_npz['matrix_kinem'])]
@@ -1676,7 +1699,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                              numOrbits=numOrbits, trajsize=TRAJSIZE_STORED,
                                              intTime=intTime, gridv=gridv,
                                              degree=degree, ghorder=ghorder,
-                                             n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID))
+                                             n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID,
+                                             **({} if alpha_fit is None else dict(alpha=alpha_fit))))
                                     _fh.flush()
                                     os.fsync(_fh.fileno())
                                 break
@@ -1825,6 +1849,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         f.write(f"# Server: {hostname_proc}\n")
         f.write(f"{incl:0.3f} {Q:0.15f} {gh:0.15f} {rh:0.15f} {rho0:0.15f} "
                 f"{min_Ups:0.15f} {min_pen:0.15f} {datetime.datetime.now()}\n")
+        if alpha_fit is not None:
+            f.write(f"# halo alpha: alpha={alpha_fit!r}\n")
         pc_str = " ".join([f"{x:.6f}" for x in numpy.atleast_1d(pc_coords)])
         f.write(f"# PCA: {pc_str}\n")
         f.write("# Optimization history (Upsilon values -> function values):\n")

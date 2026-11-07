@@ -422,6 +422,7 @@ def test_dry_run_and_summarize_need_only_the_standard_library(tmp_path):
 
 def test_history_names_are_not_read_by_any_pool_glob():
     names = ['localpca_tycho_d1_nb250_gh0_l24n184_ser0_localpca20261103_120000.txt',
+             'localpca_alpha_tycho_d1_nb250_gh0_l24n184_ser0_localpca20261108_120000.txt',
              lp.STATE_NAME, lp.TABLE_NAME, lp.REPORT_NAME + '.json']
     tags = ['d1_nb250_gh0_l24n184_ser0', 'Q1d1_nb250_gh0_ser0', 'd1_nb250_gh0_ser0', 'Q1d1_nb250_gh0_l24n184_ser0']
     patterns = ([f'out_*_{t}{s}.txt' for t in tags for s in ('_*', '')]
@@ -746,3 +747,212 @@ def test_fixed_gh_dry_run_needs_only_stdlib(tmp_path):
     assert result.returncode == 0, result.stderr
     assert 'gh 1..1' in result.stdout and 'fixed gh=1' in result.stdout
     assert '6 initial + 6 Sobol + 28 TuRBO' in result.stdout
+
+
+# --------------------------------------------------------------------------
+# Free alpha (--fit-alpha): five physical parameters, PCA 5 -> 4
+# --------------------------------------------------------------------------
+ALPHA_BOX_SPEC = BOX_SPEC + ',alpha=0.5:3'
+ALPHA_BOX = dict(BOX, alpha=[0.5, 3.0])
+ALPHA_TARGET = dict(TARGET, gh=0.02, alpha=1.2)
+ALPHA_INITIAL_TEXT = '0.96 0 27 26 2\n0.96 0 27 26 0.5\n0.96 0 27 26 1\n0.96 0 27 26 3\n'
+ALPHA_OPTIONS = dict(lp.ALPHA_DEFAULTS, fit_alpha=True, pca_components=4)
+
+
+def alpha_config(tmp_path, text=ALPHA_INITIAL_TEXT, box=ALPHA_BOX_SPEC, extra=('--budget', '80', '--n-sobol', '16')):
+    path = tmp_path / 'alpha_initial.txt'
+    path.write_text(text)
+    args = lp.parse_args(['--dry-run', '--fit-alpha', '--box', box, '--initial-points', str(path), *extra])
+    return lp.build_config(args, BOUNDS)
+
+
+def alpha_objective(params):
+    lo, hi = lp.box_x(ALPHA_BOX)
+    return 1.2 + 4.0 * sum(((a - b) / (h - l)) ** 2
+                           for a, b, l, h in zip(lp.to_x(params), lp.to_x(ALPHA_TARGET), lo, hi))
+
+
+class AlphaRecorder(Recorder):
+    def __call__(self, Q, params, seed, meta):
+        if self.stop_at is not None and len(self.calls) == self.stop_at:
+            raise lp.StopRun('test stop')
+        assert set(params) == set(lp.NAMES) | {'alpha'}
+        self.calls.append(dict(meta, Q=Q, params=dict(params), seed=seed))
+        return dict(status='ok', penalty=alpha_objective(params), upsilon=0.7, wall_s=1.0, orbit_s=1.0)
+
+
+def _alpha_records(n=30, seed=2, alpha=None):
+    rng = random.Random(seed)
+    records = []
+    for i, r in enumerate(_records(n, seed)):
+        params = dict(r['params'], alpha=rng.uniform(0.5, 3.0) if alpha is None else alpha)
+        records.append(dict(id=i, params=params, status='ok', penalty=alpha_objective(params)))
+    return records
+
+
+def test_alpha_bounds_match_the_harness_and_hayashis_range():
+    tree = ast.parse(SCRIPT.read_text())
+    harness = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                   and any(getattr(t, 'id', None) == 'ALPHA_FIT_BOUNDS' for t in n.targets))
+    assert lp.ALPHA_BOUNDS == harness == (0.5, 3.0)
+    assert 'alpha' not in BOUNDS                      # bounds_original stays four-parameter
+
+
+def test_fit_alpha_box_options_and_refusals(tmp_path):
+    config = alpha_config(tmp_path)
+    assert config['box'] == ALPHA_BOX and config['bounds']['alpha'] == [0.5, 3.0]
+    assert config['fit_alpha'] and config['pca_components'] == 4 and config['priors'] == []
+    bounds = lp.search_bounds(BOUNDS, True)
+    for bad in (BOX_SPEC, BOX_SPEC + ',alpha=0.4:3', BOX_SPEC + ',alpha=0.5:3.1', BOX_SPEC + ',alpha=0:3',
+                BOX_SPEC + ',alpha=1:1', BOX_SPEC.replace('Q=0.90:1.05', 'Q=0.95:0.95') + ',alpha=0.5:3',
+                BOX_SPEC + ',alpha=nan:3'):
+        with pytest.raises(lp.ConfigError):
+            lp.parse_box(bad, bounds)
+    with pytest.raises(lp.ConfigError):
+        lp.parse_box(ALPHA_BOX_SPEC, BOUNDS)          # alpha only with --fit-alpha
+    for argv, message in ((['--fit-alpha', '--pca-components', '3'], 'must be 4'),
+                          (['--pca-components', '4'], 'needs --fit-alpha'),
+                          (['--fit-alpha', '--prior-states', str(tmp_path)], 'not imported')):
+        box = ALPHA_BOX_SPEC if '--fit-alpha' in argv else BOX_SPEC
+        with pytest.raises(lp.ConfigError, match=message):
+            lp.build_config(lp.parse_args(['--dry-run', '--box', box, *argv]), BOUNDS)
+    assert 'fit_alpha' not in lp.build_config(lp.parse_args(['--dry-run', '--box', BOX_SPEC]), BOUNDS)
+
+
+@pytest.mark.parametrize('text, message', [
+    ('0.96 0 27 26\n', 'five coordinates: Q gh rh rho0 alpha'),
+    ('0.96 0 27 26 3.5\n', 'alpha range'),
+    ('0.96 0 27 26 0.4\n', 'alpha range'),
+    ('0.96 0 27 26 nan\n', 'finite'),
+    ('0.96 0 27 26 2\n0.96 0 27 26 2.0\n', 'duplicate'),
+])
+def test_fit_alpha_initial_points_have_five_columns(tmp_path, text, message):
+    config = alpha_config(tmp_path)
+    assert [p['alpha'] for p in config['initial_points']] == [2.0, 0.5, 1.0, 3.0]
+    assert config['initial_points'][0] == dict(Q=0.96, gh=0.0, rh=27.0, rho0=26.0, alpha=2.0)
+    with pytest.raises(lp.ConfigError, match=message):
+        alpha_config(tmp_path, text=text)
+
+
+def test_reduced_basis_keeps_four_of_five_components_and_contains_the_best_point():
+    records = _alpha_records()
+    config = dict(lp.DEFAULTS, box=ALPHA_BOX, **ALPHA_OPTIONS)
+    basis = lp.fit_basis(records, config, 0)
+    C, D = numpy.array(basis['components']), numpy.array(basis['dropped'])
+    assert C.shape == (4, 5) and D.shape == (1, 5) and len(basis['zlo']) == 4
+    assert numpy.allclose(numpy.vstack([C, D]) @ numpy.vstack([C, D]).T, numpy.eye(5))
+    assert len(basis['explained']) == 5 and math.isclose(sum(basis['explained']), 1.0)
+    assert math.isclose(basis['dropped_explained'], basis['explained'][4])
+    assert basis['n_components'] == 4 and basis['alpha_loading'] > 0.05
+    best = min(records, key=lambda r: r['penalty'])
+    assert basis['anchor_id'] == best['id']
+    back = lp.from_x(lp.x_from_u(lp.to_u(best['params'], basis), basis))
+    assert all(math.isclose(back[k], best['params'][k], rel_tol=1e-9, abs_tol=1e-12) for k in ALPHA_BOX)
+    A, b = lp.box_constraints(basis, ALPHA_BOX)
+    assert len(A) == 10 and {len(row) for row in A} == {4}
+    mean, std, center = (numpy.array(basis[k]) for k in ('mean', 'std', 'center'))
+    rng = numpy.random.default_rng(3)
+    inside = outside = 0
+    for u in rng.random((4000, 4)):
+        x = numpy.array(lp.x_from_u(u, basis))
+        assert numpy.allclose(D @ ((x - mean) / std - center), basis['anchor'])     # on the pinned plane
+        params = lp.from_x(x)
+        margin = min(min(params[k] - lo, hi - params[k]) / (hi - lo) for k, (lo, hi) in ALPHA_BOX.items())
+        if abs(margin) < 1e-6:
+            continue
+        assert lp.feasible(u, A, b, [0] * 4, [1] * 4) == (margin > 0)
+        inside, outside = inside + (margin > 0), outside + (margin < 0)
+    assert inside > 20 and outside > 20
+
+
+def test_reduced_basis_stops_when_alpha_would_be_frozen_or_the_basis_is_degenerate():
+    config = dict(lp.DEFAULTS, box=ALPHA_BOX, **ALPHA_OPTIONS)
+    with pytest.raises(lp.RunFailed, match='alpha loading'):
+        lp.fit_basis(_alpha_records(alpha=2.0), config, 0)       # alpha=2 history: alpha only in the dropped PC
+    with pytest.raises(lp.RunFailed, match='degenerate'):
+        lp.fit_basis(_alpha_records(3), config, 0)
+    with pytest.raises(lp.RunFailed, match='fewer than two'):
+        lp.fit_basis(_alpha_records(1), config, 0)
+    legacy = lp.fit_basis(_records(), make_config(), 0)            # four-parameter search unchanged
+    assert 'dropped' not in legacy and numpy.array(legacy['components']).shape == (4, 4)
+
+
+def test_fit_alpha_runs_4_initial_16_sobol_60_turbo_in_four_pca_coordinates(tmp_path):
+    seen = []
+
+    def proposer(points, values, center, lo, hi, A, b, seed):
+        seen.append((len(points[0]), len(center), len(lo), len(A), len(A[0])))
+        return random_proposer(points, values, center, lo, hi, A, b, seed)
+
+    recorder = AlphaRecorder()
+    run = search(tmp_path, config=alpha_config(tmp_path), evaluator=recorder, proposer=proposer)
+    run.open(resume=False)
+    run.run()
+    new = run.new_records()
+    assert len(new) == 80 == len(recorder.calls) and run.state['status'] == 'done'
+    assert [r['kind'] for r in new] == ['initial'] * 4 + ['sobol'] * 16 + ['bo'] * 60
+    assert [c['params']['alpha'] for c in recorder.calls[:4]] == [2.0, 0.5, 1.0, 3.0]
+    assert {c['seed'] for c in recorder.calls} == {42} and {r['source'] for r in new} == {'localpca_alpha'}
+    assert all(lp.in_box(c['params'], ALPHA_BOX, tol=0) for c in recorder.calls)
+    assert set(seen) == {(4, 4, 4, 10, 4)} and len(seen) == 60
+    assert [b['at'] for b in run.state['bases']][:2] == [20, 26]
+    assert all(numpy.array(b['components']).shape == (4, 5) for b in run.state['bases'])
+    bo_alpha = [r['params']['alpha'] for r in new if r['kind'] == 'bo']
+    assert max(bo_alpha) - min(bo_alpha) > 0.1                   # alpha really varies in the 4D search
+    best = run.best()
+    assert best['penalty'] < min(r['penalty'] for r in new[:20])
+    header = (tmp_path / 'state' / lp.TABLE_NAME).read_text().splitlines()[0].split('\t')
+    assert header[header.index('rho0') + 1] == 'alpha'
+    summary = lp.summarize(json.loads((tmp_path / 'state' / lp.STATE_NAME).read_text()))
+    assert summary['alpha_explored']['n'] == 80 and summary['alpha_explored']['min'] == 0.5
+    assert summary['pca'] == '4 of 5 components' and 'alpha_loading' in summary['bases'][0]
+    text = lp.format_summary(summary)
+    assert 'free alpha (4 of 5 components)' in text and 'alpha loading' in text and 'alpha=' in text
+
+
+def test_fit_alpha_resume_reproduces_the_run_and_refuses_other_schemas(tmp_path):
+    config = alpha_config(tmp_path, extra=('--budget', '30', '--n-sobol', '8'))
+    full = search(tmp_path / 'full', config=config, evaluator=AlphaRecorder())
+    full.open(resume=False)
+    full.run()
+    first = search(tmp_path / 'b', config=config, evaluator=AlphaRecorder(stop_at=19))
+    first.open(resume=False)
+    with pytest.raises(lp.StopRun):
+        first.run()
+    second = search(tmp_path / 'b', config=config, evaluator=AlphaRecorder())
+    second.open(resume=True)
+    second.run()
+    assert [(r['kind'], r['params']) for r in second.new_records()] == [
+        (r['kind'], r['params']) for r in full.new_records()]
+    legacy = search(tmp_path / 'legacy', config=make_config(budget=2, n_sobol=2))
+    legacy.open(resume=False)
+    legacy.run()
+    with pytest.raises(lp.ConfigError, match='configuration differs'):
+        search(tmp_path / 'legacy', config=config, evaluator=AlphaRecorder()).open(resume=True)
+    with pytest.raises(lp.ConfigError, match='configuration differs'):
+        search(tmp_path / 'full', config=make_config(budget=40)).open(resume=True)
+
+
+def test_fit_alpha_self_test_and_dry_run(tmp_path):
+    seen = []
+
+    def proposer(points, values, center, lo, hi, A, b, seed):
+        seen.append((len(points[0]), len(center), len(lo), len(A[0])))
+        return feasible_proposer(points, values, center, lo, hi, A, b, seed)
+
+    ok, params = lp.self_test(ALPHA_BOX, proposer=proposer, options=ALPHA_OPTIONS)
+    assert ok and set(params) == set(ALPHA_BOX) and lp.in_box(params, ALPHA_BOX, tol=0)
+    assert seen == [(4, 4, 4, 4)]
+    path = tmp_path / 'alpha.txt'
+    path.write_text(ALPHA_INITIAL_TEXT)
+    env = dict(os.environ, PYTHONPATH='')
+    argv = [sys.executable, '-S', str(DRIVER), '--dry-run', '--fit-alpha', '--box', ALPHA_BOX_SPEC,
+            '--initial-points', str(path), '--n-sobol', '16', '--budget', '80']
+    result = subprocess.run(argv, capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert 'PCA: 4 components of (Q, gh, log10 rh, log10 rho0, alpha)' in result.stdout
+    assert 'free alpha in [0.5, 3]' in result.stdout and '4 initial + 16 Sobol + 60 TuRBO' in result.stdout
+    assert 'initial 1: Q=0.96 gh=0 rh=27 rho0=26 alpha=0.5' in result.stdout
+    for extra in (['--prior-states', str(tmp_path)], ['--pca-components', '5']):
+        bad = subprocess.run(argv + extra, capture_output=True, text=True, env=env)
+        assert bad.returncode == 2, bad.stdout

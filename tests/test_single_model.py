@@ -309,6 +309,94 @@ def test_protocols_on_one_integration_with_the_real_objective(tmp_path, monkeypa
 
 
 # --------------------------------------------------------------------------
+# Explicit alpha (run_local_pca.py --fit-alpha) through the real objective
+# --------------------------------------------------------------------------
+ALPHA_FIT_BOUNDS = next(ast.literal_eval(n.value) for n in TREE.body if isinstance(n, ast.Assign)
+                        and any(getattr(t, 'id', None) == 'ALPHA_FIT_BOUNDS' for t in n.targets))
+ALPHA_PARAMS = dict(Q=0.95, gh=0.0, rh=20.0, rho0=30.0)
+
+
+def alpha_module(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = storage.Store(str(tmp_path / 'orblib_single/T_r0'), 0, save_slots=2)
+    mod, calls = real_halo_module(tmp_path, store)
+    mod.ALPHA_FIT_BOUNDS = ALPHA_FIT_BOUNDS
+    calls.density = []
+    mod.agama.Density = lambda *a, **kw: calls.density.append(kw) if kw else None
+    files = dict(pool=str(tmp_path / mod.UpsFile), side=str(tmp_path / 'side.txt'))
+    return mod, calls, files
+
+
+def test_harness_alpha_bounds_are_hayashis_prior_range():
+    assert ALPHA_FIT_BOUNDS == (0.5, 3.0)
+    assert next(ast.literal_eval(n.value) for n in TREE.body if isinstance(n, ast.Assign)
+                and any(getattr(t, 'id', None) == 'alphah' for t in n.targets)) == 2.0
+
+
+@pytest.mark.parametrize('alpha', [0.5, 1.0, 2.0, 3.0])
+def test_explicit_alpha_reaches_the_halo_density_and_the_library(tmp_path, monkeypatch, alpha):
+    mod, calls, files = alpha_module(tmp_path, monkeypatch)
+    result = runner.run_protocol(mod, 'exp', dict(ALPHA_PARAMS, alpha=alpha), files, 1, numpy.random.default_rng,
+                                 ic_seed=None)
+    assert [kw['alpha'] for kw in calls.density] == [alpha] and calls.density[0]['beta'] == 3
+    assert mod.alphah == 2.0                                   # module default untouched
+    assert result['saved'] and result['penalty'] == pytest.approx(1.25, abs=1e-3)
+    assert f'# halo alpha: alpha={alpha!r}' in Path(files['pool']).read_text()
+    name, path = mod.orblib_key(*ALPHA_PARAMS.values(), alpha=alpha)
+    legacy, _ = mod.orblib_key(*ALPHA_PARAMS.values())
+    assert name != legacy and os.path.exists(path) and storage.NAME_RE.fullmatch(name)
+    meta = storage.metadata(path)
+    assert meta['alpha'] == alpha and meta['Q'] == 0.95
+    assert not storage.compatible_metadata(storage.metadata(path), dict(alpha=alpha + 0.5))
+
+
+def test_without_alpha_the_objective_and_key_are_unchanged(tmp_path, monkeypatch):
+    mod, calls, files = alpha_module(tmp_path, monkeypatch)
+    runner.run_protocol(mod, 'exp', dict(ALPHA_PARAMS), files, 1, numpy.random.default_rng)
+    assert [kw['alpha'] for kw in calls.density] == [2.0]
+    assert '# halo alpha:' not in Path(files['pool']).read_text()
+    name, path = mod.orblib_key(*ALPHA_PARAMS.values())
+    assert name == mod.orblib_key(*ALPHA_PARAMS.values(), alpha=None)[0] and os.path.exists(path)
+    assert 'alpha' not in storage.metadata(path)
+    # explicit alpha=2 is a namespace of its own; alpha enters at full precision
+    assert len({mod.orblib_key(*ALPHA_PARAMS.values(), alpha=a)[0] for a in (2.0, 2.0 + 1e-9, 1.0)} | {name}) == 4
+
+
+@pytest.mark.parametrize('alpha', [0.0, 0.49, 3.01, float('nan'), float('inf')])
+def test_invalid_explicit_alpha_fails_before_any_work(tmp_path, monkeypatch, alpha):
+    mod, calls, files = alpha_module(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match='explicit alpha'):
+        runner.run_protocol(mod, 'exp', dict(ALPHA_PARAMS, alpha=alpha), files, 1, numpy.random.default_rng)
+    assert calls.orbit == 0 and not calls.density and not os.path.exists(files['pool'])
+
+
+def test_explicit_alpha_must_match_the_alphah_argument(tmp_path, monkeypatch):
+    mod, calls, files = alpha_module(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match='differs from the alphah argument'):
+        mod.halo_IC_lib_weights_pca_fixed(None, None, mod.bounds_original, mod.densityStars, mod.datasets,
+                                          2.0, 3, direct_params=dict(ALPHA_PARAMS, alpha=1.0))
+    assert calls.orbit == 0
+
+
+def test_metadata_reads_optional_alpha_and_rejects_a_legacy_library_for_explicit_alpha(tmp_path):
+    def write(path, **extra):
+        with zipfile.ZipFile(path, 'w') as archive:
+            for name, value in dict(Q=1.0, gh=0.0, rh=2.0, rho0=50.0, incl=90.0, double=1, n_bin=250, ser_id=0,
+                                    numOrbits=2, trajsize=0, intTime=100.0, degree=2, ghorder=6, **extra).items():
+                with archive.open(name + '.npy', 'w') as member:
+                    numpy.lib.format.write_array(member, numpy.asarray(value))
+            for name in ('gridv', 'matrix_dens', 'matrix_kinem', 'ic', 'inttime'):
+                with archive.open(name + '.npy', 'w') as member:
+                    numpy.lib.format.write_array(member, numpy.zeros((2, 3)))
+    write(tmp_path / 'legacy.npz')
+    write(tmp_path / 'alpha.npz', alpha=1.25)
+    legacy, alpha = storage.metadata(tmp_path / 'legacy.npz'), storage.metadata(tmp_path / 'alpha.npz')
+    assert 'alpha' not in legacy and alpha['alpha'] == 1.25
+    assert storage.compatible_metadata(legacy, dict(Q=1.0)) and not storage.compatible_metadata(legacy, dict(alpha=2.0))
+    assert storage.compatible_metadata(alpha, dict(alpha=1.25)) and not storage.compatible_metadata(alpha, dict(alpha=2.0))
+
+
+# --------------------------------------------------------------------------
 # Driver failure paths (stub objective)
 # --------------------------------------------------------------------------
 def stub_module(tmp_path, behaviour):

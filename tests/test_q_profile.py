@@ -669,6 +669,25 @@ def test_save_library_writes_a_valid_standard_library_once(tmp_path):
     before = path.read_bytes()
     again = rqp.save_library(mod, storage, _capture(), 0.5, params, 1.9, str(shared), 3.5, 0)
     assert again['skipped'] == 'exists' and path.read_bytes() == before
+    assert 'alpha' not in meta
+
+
+def test_save_library_with_explicit_alpha_uses_its_own_name_and_metadata(tmp_path):
+    mod, shared = fake_module(tmp_path), tmp_path / 'orblib'
+    namespace = dict(hashlib=hashlib, os=os, incl=90.0, DOUBLE=True, N_BIN=250, SER_ID=0, GEOM_HASH='abcdef12',
+                     POT_TAG='_l24n184', ORBLIB_DIR=str(tmp_path / 'isolated'))
+    node = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'orblib_key')
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(SCRIPT), 'exec'), namespace)
+    mod.orblib_key = namespace['orblib_key']
+    params = dict(gh=0.0, rh=5.0, rho0=50.0)
+    legacy = rqp.save_library(mod, storage, _capture(), 0.5, params, 1.9, str(shared), 3.5, 0)
+    infos = {a: rqp.save_library(mod, storage, _capture(), 0.5, dict(params, alpha=a), 1.9, str(shared), 3.5, 0)
+             for a in (2.0, 0.75)}
+    names = {legacy['name']} | {info['name'] for info in infos.values()}
+    assert len(names) == 3
+    for a, info in infos.items():
+        assert info['name'] == mod.orblib_key(0.5, **params, alpha=a)[0]
+        assert storage.metadata(shared / info['name'])['alpha'] == a
 
 
 @pytest.mark.parametrize('case, expected', [

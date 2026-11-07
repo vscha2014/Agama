@@ -860,3 +860,58 @@ def test_initial_points_are_only_for_local_pca(tmp_path):
     result, events, _ = run(tmp_path, '--initial-points=initial.txt', setup=copy_local_pca)
     assert result.returncode == 2 and not events, output(result)
     assert 'только с --local-pca' in output(result)
+
+
+LP_ALPHA_BOX = '--box=Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60,alpha=0.5:3'
+LP_ALPHA_INITIAL = '0.96 0 27 26 2\n0.96 0 27 26 0.5\n0.96 0 27 26 1\n0.96 0 27 26 3\n'
+
+
+@pytest.mark.parametrize('pca', [[], ['--pca-components=4']])
+def test_local_pca_fit_alpha_forwards_flags_everywhere_and_imports_no_priors(tmp_path, pca):
+    state_text = qprofile_state(fake_harness_text(tmp_path))
+    _, results = results_repo(tmp_path, {f'logs/qprofile/{QSTATE}/profile_state.json': state_text,
+                                         'logs/localpca/alpha_initial.txt': LP_ALPHA_INITIAL})
+    result, events, work = run(tmp_path, '--threads=4', '--local-pca', '--fit-alpha', *pca, LP_ALPHA_BOX,
+                               '--initial-points=alpha_initial.txt', '--n-sobol=16', '--budget=80',
+                               setup=copy_local_pca)
+    assert result.returncode == 0, output(result)
+    (selftest,) = [e for e in events if e.startswith('selftest ')]
+    assert '--fit-alpha' in selftest and LP_ALPHA_BOX.replace('=', ' ', 1) in selftest
+    assert ('--pca-components 4' in selftest) == bool(pca)
+    (argv,) = pythons(events)
+    assert '--fit-alpha' in argv and '--prior-states' not in argv
+    assert ('--pca-components' in argv) == bool(pca)
+    name = 'localpca_alpha_d1_nb250_gh0_l24n184_ser0_i90.0_20261010_120000'
+    assert argv[argv.index('--state-dir') + 1] == str(results / 'logs/localpca' / name)
+    assert argv[argv.index('--orblib-dir') + 1] == str(work / 'orblib_localpca' / name)
+    assert argv[argv.index('--initial-points') + 1] == str(results / 'logs/localpca/alpha_initial.txt')
+    log = next(work.glob('launch_tycho_localpca_alpha_*.log')).read_text()
+    assert '4 initial + 16 Sobol + 60 TuRBO' in log and 'free alpha in [0.5, 3]' in log
+    assert 'priors in the box: 0' in log and 'alpha=0.5' in log
+
+
+@pytest.mark.parametrize('extra_args', [
+    ('--fit-alpha',),
+    ('--pca-components=4',),
+    ('--local-pca', LP_BOX, '--pca-components=4'),
+    ('--local-pca', '--fit-alpha', LP_BOX),
+    ('--local-pca', '--fit-alpha', LP_ALPHA_BOX, '--pca-components=3'),
+    ('--local-pca', '--fit-alpha', '--box=Q=0.90:1.05,gh=0:0.20,rh=10:30,rho0=15:60,alpha=0.2:3'),
+    ('--local-pca', LP_ALPHA_BOX),
+])
+def test_local_pca_fit_alpha_rejects_invalid_combinations(tmp_path, extra_args):
+    result, events, _ = run(tmp_path, '--threads=4', *extra_args, setup=copy_local_pca)
+    assert result.returncode == 2 and not events, output(result)
+
+
+def test_local_pca_fit_alpha_refuses_explicit_prior_states(tmp_path):
+    harness = fake_harness_text(tmp_path)
+
+    def setup(work):
+        copy_local_pca(work)
+        (work / 'states' / 'a').mkdir(parents=True)
+        (work / 'states' / 'a' / 'profile_state.json').write_text(qprofile_state(harness))
+
+    result, events, _ = run(tmp_path, '--threads=4', '--local-pca', '--fit-alpha', LP_ALPHA_BOX, '--offline',
+                            '--prior-states=states/a', setup=setup)
+    assert result.returncode == 2 and not events, output(result)

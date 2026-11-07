@@ -765,6 +765,56 @@ CONTRACT unchanged. Tests: `tests/test_local_pca.py`, `tests/test_launch_tycho.p
   not χ². An optimum on a box edge that is not a physical bound calls for a wider box (inside
   `bounds_original`); one on `rh = 30` / `gh = 0` is conditional on those bounds.
 
+## 3k. Local PCA search with free halo alpha (`--local-pca --fit-alpha`)
+
+Experimental exception (DECISIONS 2026-11-07, user): the Spheroid transition sharpness `alpha`
+(frozen `alphah = 2` everywhere else, CONTRACT unchanged) becomes a fifth searched coordinate.
+Tests: `test_local_pca.py` (`*alpha*`), `test_single_model.py` (`*alpha*`), `test_q_profile.py`
+(`save_library…alpha…`), `test_launch_tycho.py` (`*fit_alpha*`).
+
+- Literature: same convention as AGAMA (`[1 + (r/rh)^alpha]^{(gh-beta)/alpha}`, larger = sharper);
+  Hayashi, Chiba & Ishiyama 2020 (ApJ 904, 45) and Hayashi et al. 2023 (ApJ 953, 185) fit it
+  with a flat prior **0.5 ≤ alpha ≤ 3** (same range in Hayashi et al. 2026, PASJ 78, 745, SPARC).
+  Wardana, Chiba & Hayashi 2025 (ApJ 982, 167) call it `beta_trans` (0–3) and use `alpha` for the
+  outer slope (our `betah`). AGAMA needs alpha > 0. Our profile also has the fixed outer cutoff.
+- `bash launch_tycho.sh --local-pca --fit-alpha [--pca-components=4]
+  --box=Q=a:b,gh=a:b,rh=a:b,rho0=a:b,alpha=a:b [--initial-points=FILE] …`. The box needs all five
+  items, all free, alpha inside `ALPHA_FIT_BOUNDS = (0.5, 3.0)` (harness global, equal to
+  `run_local_pca.ALPHA_BOUNDS`; checked at start). `bounds_original` stays four-parameter.
+  `--pca-components` accepts only 4. Initial points: five columns `Q gh rh rho0 alpha`.
+- No prior states: Q-profile/localpca evaluations are four-parameter alpha=2 results of another
+  harness SHA; the launcher passes none by default and the driver refuses `--prior-states`.
+  Old states cannot be resumed as alpha searches (config keys `fit_alpha`, `pca_components`,
+  `min_alpha_loading`, `min_variance_frac` differ) and vice versa.
+- Evaluation: params carry `alpha`; `run_single_model.run_protocol` passes it as the objective's
+  `alphah` argument (module default untouched). `halo_IC_lib_weights_pca_fixed` refuses a non-finite
+  or out-of-range explicit alpha and one that differs from `alphah` (ValueError before any work ⇒
+  status `failed`), builds `agama.Density(alpha=…)`, writes `# halo alpha: alpha=<repr>` after the
+  data row (run_protocol checks it). Without explicit alpha nothing changes.
+- Libraries: `orblib_key(Q, gh, rh, rho0, alpha=None)` adds `_alpha-v1_<repr(alpha)>` to the hashed
+  parameter key when alpha is given ⇒ even alpha=2 gets a name of its own; without alpha the key is
+  unchanged. The name pattern (`NAME_RE`) is unchanged. `.npz` of the harness and of
+  `run_q_profile.save_library` carry an `alpha` scalar; `orblib_storage.metadata` reads it as
+  optional (`OPTIONAL_SCALARS`), and `compatible_metadata` with expected alpha rejects a file without it.
+- PCA 5 → 4: x = (Q, gh, log10 rh, log10 rho0, alpha), alpha linear. Same weighting/cutoff/std floor/SVD
+  as §3j over five columns; the first 4 components are searched, `explained` covers all five. The
+  dropped component is pinned at the coordinate of the best ok point at every refit (`anchor`,
+  `anchor_id`): the searched 4D affine plane contains it exactly (a boundary optimum at gh=0/rh=30
+  stays feasible). `zlo/zhi` = projection of the 32 box corners; the box = 10 linear constraints in
+  4 coordinates. Bases also store `dropped`, `dropped_explained`, `drop_residual_rms` (good points'
+  distance from the plane in standardised units) and `alpha_loading` (norm of alpha's loadings on the
+  kept components). The run stops (`RunFailed`, state kept, exit 1) with < 2 ok points, a zero 4th
+  component (`min_variance_frac`) or `alpha_loading < 0.05` — i.e. alpha would be silently frozen.
+- Schedule as §3j: starts, then Sobol in the 5D physical box, then TuRBO in the 4 PCA coordinates.
+  Records keep the real 5D parameters; the GP sees their projections (approximation).
+- Names: state dir `logs/localpca/localpca_alpha_<EXP_ID>_i<incl>_<ts>/`, history
+  `localpca_alpha_<hostname_proc>.txt`, record `source=localpca_alpha`, `search.tsv` with an `alpha`
+  column after `rho0`. No pool glob matches them. The report adds `alpha_explored`, `pca` and the
+  reduced-basis diagnostics.
+- Reading: minimum over the visited 4D planes, not a proven 5D minimum; the alpha starts are a slice,
+  not a profile; the result is conditional on the local box and on gh=0/rh=30. Penalty is not χ²;
+  Hayashi's range is a prior, not a confidence interval. Production J-factor code assumes alpha=2.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.

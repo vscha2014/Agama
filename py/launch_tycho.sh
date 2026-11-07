@@ -60,6 +60,8 @@ LP_NSOBOL=""
 LP_INITIAL=""
 LP_PRIORS=""
 LP_RESUME=""
+LP_FIT_ALPHA=0
+LP_PCA=""
 LP_OPTS_SET=0
 SAVE_BELOW_SET=0
 MEMORY_GB=""
@@ -105,6 +107,9 @@ for arg in "$@"; do
                 '    --prior-states=LIST  Каталоги Q-профилей через запятую (имена в results/logs/qprofile/ или' \
                 '                      пути; по умолчанию все qprofile_*; none — без них): seed-42 точки в боксе.' \
                 '    --resume-search=DIR  Продолжить поиск (имя каталога в results/logs/localpca/ или путь).' \
+                '    --fit-alpha       Свободная alpha гало в [0.5, 3] (Hayashi et al. 2020, 2023): --box с alpha=a:b,' \
+                '                      старты из 5 колонок Q gh rh rho0 alpha, без состояний Q-профилей (alpha=2),' \
+                '                      каталог localpca_alpha_*; PCA 5 -> 4 (--pca-components=4).' \
                 '  --save-below=P      Порог penalty для сохранения .npz (--q-profile, --local-pca; по умолчанию 3.5).' \
                 '  --memory-gb=N       Явный лимит MemoryMax в GiB (по умолчанию MemTotal/4' \
                 '                      для поиска и 8 GiB для --models=FILE, --q-profile и --local-pca).' \
@@ -156,6 +161,8 @@ for arg in "$@"; do
         --initial-points=*) LP_INITIAL="${arg#*=}"; LP_OPTS_SET=1 ;;
         --prior-states=*)  LP_PRIORS="${arg#*=}"; LP_OPTS_SET=1 ;;
         --resume-search=*) LP_RESUME="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --fit-alpha)       LP_FIT_ALPHA=1; LP_OPTS_SET=1 ;;
+        --pca-components=*) LP_PCA="${arg#*=}"; LP_OPTS_SET=1 ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)     GIT_RESULTS_MODE=1 ;;
@@ -315,7 +322,8 @@ if [ "$QPROFILE" -eq 0 ] && [ "$QP_OPTS_SET" -eq 1 ]; then
     exit 2
 fi
 if [ "$LOCALPCA" -eq 0 ] && [ "$LP_OPTS_SET" -eq 1 ]; then
-    echo "ОШИБКА: --box, --budget, --n-sobol, --initial-points, --prior-states и --resume-search — только с --local-pca" >&2
+    echo "ОШИБКА: --box, --budget, --n-sobol, --initial-points, --prior-states, --resume-search," \
+         "--fit-alpha и --pca-components — только с --local-pca" >&2
     exit 2
 fi
 if [ "$DRIVER" -eq 0 ] && [ "$SAVE_BELOW_SET" -eq 1 ]; then
@@ -350,6 +358,17 @@ if [ "$LOCALPCA" -eq 1 ]; then
         echo "ОШИБКА: --budget — целое >= 1, --n-sobol — целое >= 0 (получено: '${LP_BUDGET}', '${LP_NSOBOL}')" >&2
         exit 2
     fi
+    # Свободная alpha: флаги драйвера (dry-run, self-test, запуск, resume); состояния
+    # Q-профилей посчитаны при alpha=2 и по умолчанию не подбираются.
+    declare -a LP_ALPHA_ARGS=()
+    if [ "$LP_FIT_ALPHA" -eq 1 ]; then
+        LP_ALPHA_ARGS+=(--fit-alpha)
+        [ -n "$LP_PCA" ] && LP_ALPHA_ARGS+=(--pca-components "$LP_PCA")
+        [ -z "$LP_PRIORS" ] && LP_PRIORS="none"
+    elif [ -n "$LP_PCA" ]; then
+        echo "ОШИБКА: --pca-components — только с --fit-alpha" >&2
+        exit 2
+    fi
     # Состояния Q-профилей: имена в results/logs/qprofile/ или пути; по умолчанию все qprofile_*.
     declare -a LP_PRIOR_DIRS=()
     if [ "$LP_PRIORS" = "none" ]; then
@@ -376,7 +395,7 @@ if [ "$LOCALPCA" -eq 1 ]; then
             [ -f "$_cand" ] && LP_PRIOR_DIRS+=("$(dirname "$_cand")")
         done
     fi
-    declare -a QP_INPUT_ARGS=(--incl "$INCL" --box "$LP_BOX")
+    declare -a QP_INPUT_ARGS=(--incl "$INCL" --box "$LP_BOX" ${LP_ALPHA_ARGS[@]+"${LP_ALPHA_ARGS[@]}"})
     [ -n "$LP_BUDGET" ] && QP_INPUT_ARGS+=(--budget "$LP_BUDGET")
     [ -n "$LP_NSOBOL" ] && QP_INPUT_ARGS+=(--n-sobol "$LP_NSOBOL")
     if [ -n "$LP_INITIAL" ]; then
@@ -481,6 +500,7 @@ EXP_ID="d1_nb250_gh0${POT_TAG}_ser0"
 INCL_FMT="$(LC_ALL=C printf '%.1f' "$INCL")"
 if [ "$DRIVER" -eq 1 ]; then
     RUN_TAG="${DRV}_${EXP_ID}_i${INCL_FMT}"
+    [ "$LP_FIT_ALPHA" -eq 1 ] && RUN_TAG="localpca_alpha_${EXP_ID}_i${INCL_FMT}"
 elif [ -n "$MODELS_FILE" ]; then
     if [ "$SEED_MODE" -eq 1 ]; then
         RUN_TAG="seeds_multi_${EXP_ID}_n${NMODELS}"
@@ -603,7 +623,7 @@ preflight() {
     fi
     log "  ✓ Python: $(command -v "$PYTHON")"
     if [ "$LOCALPCA" -eq 1 ]; then
-        if ! "$PYTHON" "${WORK_DIR}/run_local_pca.py" --self-test --box "$LP_BOX" >>"$LOGFILE" 2>&1; then
+        if ! "$PYTHON" "${WORK_DIR}/run_local_pca.py" --self-test --box "$LP_BOX" ${LP_ALPHA_ARGS[@]+"${LP_ALPHA_ARGS[@]}"} >>"$LOGFILE" 2>&1; then
             die "самопроверка BoTorch-предложения с линейными ограничениями не прошла (см. ${LOGFILE})"
         fi
         log "  ✓ BoTorch: предложение qLogNEI с ограничениями бокса"

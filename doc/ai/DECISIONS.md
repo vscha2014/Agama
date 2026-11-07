@@ -669,3 +669,34 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   mocked harness tests 213 passed. Protocol, lock files and logs: `~/agama-install/` on the host.
 - **Open** | preflight and a seed-42 cross-host control are run by the user; no GitHub key for private
   `results/` on the host yet (deploy key or `--offline`).
+
+## 2026-11-07 — Free halo alpha in the near-spherical local search, PCA 5 → 4 (user)
+
+- **Parameter** | Our frozen `alphah = 2` is the Zhao/Spheroid transition sharpness — Hayashi's alpha
+  (Hayashi, Chiba & Ishiyama 2020, ApJ 904, 45; Hayashi et al. 2023, ApJ 953, 185; Hayashi et al. 2026,
+  PASJ 78, 745), `beta_trans` in Wardana, Chiba & Hayashi 2025 (ApJ 982, 167). User chose Hayashi's
+  flat-prior range **0.5 ≤ alpha ≤ 3** (not 0–3: AGAMA needs alpha > 0).
+- **Scope** | Experimental opt-in only (`run_local_pca.py --fit-alpha`, `launch_tycho.sh`), harness §3k.
+  CONTRACT, production, `alphah = 2` default and `bounds_original` unchanged; proposing alpha for
+  production would need the PI.
+- **Search** | Previous near-spherical box Q 0.90–1.05, gh 0–0.20, rh 10–30, rho0 15–60 plus alpha 0.5–3;
+  incl=90, L24, seed 42 per evaluation, internal Upsilon. PCA of five parameters cut to **four**
+  components (user's choice over 4 PCA + separate alpha); dropped component pinned at the best point
+  of each refit; stop if alpha's loading on the kept components < 0.05.
+- **Budget** | 80 new evaluations = 4 starts (best near-spherical point, alpha 2/0.5/1/3; alpha=2 is the
+  control) + 16 Sobol + 60 TuRBO. Old alpha=2 penalties are not imported. Private starts:
+  `results/logs/localpca/alpha_initial_points.txt`, hand-off `HANDOFF_LOCALPCA_ALPHA.md`.
+- **Libraries** | alpha enters the hashed key with a schema marker and the `.npz` metadata; legacy keys
+  and files unchanged. Mocked tests only; the run is started by the user after preflight.
+
+## 2026-11-07 — fornax-dwarf: project times in MSK, run limits (user)
+
+- **Time zone** | fornax-dwarf runs in system UTC (NTP-synced); other hosts use MSK. Git is unaffected
+  (commits store epoch + offset), but run-directory names (`date +%Y%m%d_%H%M%S`), log lines, history
+  `# Time:`/`# Start` headers and `datetime.now()` columns are zone-less local time. User chose
+  `export TZ=Europe/Moscow` for user `gala` only (`~/.bashrc`, `~/.profile`); system zone and other users
+  unchanged, no sudo. Convention: all project times are MSK.
+- **Limits** | the free-alpha run uses at most 8 of 12 physical cores and ≤ 48 GB RAM:
+  `taskset -c 0-7,12-19` (cores 0–7 with SMT siblings) + `--threads=16` (CPUQuota 1600 %) and
+  `--memory-gb=44` (44 GiB ≈ 47.2 GB, swap 0). conda is not on PATH there: activate via
+  `source ~/miniforge3/etc/profile.d/conda.sh && conda activate agamaBoTorch` before the launcher.

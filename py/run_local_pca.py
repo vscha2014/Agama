@@ -13,6 +13,14 @@ Every evaluation calls agama.setRandomSeed(42) first (DECISIONS 2026-10-28,
 2026-11-03), exactly as run_q_profile.py, so known seed-42 evaluations of Q-profile
 states (--prior-states) enter the GP and the PCA without recomputation.
 
+Free-alpha mode (--fit-alpha [--pca-components=4], DECISIONS 2026-11-07, diagnostic):
+the halo transition sharpness alpha (AGAMA Spheroid `alpha`, frozen 2 elsewhere) is a
+fifth physical coordinate in [0.5, 3] (Hayashi et al. 2020, 2023), x = (Q, gh, log10 rh,
+log10 rho0, alpha). The PCA of the five is cut to four components; the dropped one is
+pinned at the best point of every refit, so GP/TuRBO work in a 4D plane through it.
+No prior states (they are alpha=2 four-parameter evaluations); history localpca_alpha_*;
+orbit-library names and metadata carry alpha.
+
 Schedule: --n-sobol scrambled Sobol points in the box, then TuRBO steps until
 --budget new evaluations. Rows go to localpca_* history files that no pool glob
 reads; orbit libraries with penalty <= --save-below (Q != 1) are saved into the
@@ -55,35 +63,76 @@ TABLE_COLUMNS = ('id', 'kind', 'Q', 'gh', 'rh', 'rho0', 'seed', 'status', 'penal
 CONTEXT_KEYS = ('exp_id', 'geom_hash', 'evaluation_context', 'harness_sha256')
 
 
+def prefix_of(config):
+    return ALPHA_PREFIX if config.get('fit_alpha') else PREFIX
+
+
+def table_columns(config):
+    if not config.get('fit_alpha'):
+        return TABLE_COLUMNS
+    at = TABLE_COLUMNS.index('rho0') + 1
+    return TABLE_COLUMNS[:at] + ('alpha',) + TABLE_COLUMNS[at:]
+
+
+# Free-alpha mode (--fit-alpha, DECISIONS 2026-11-07): the halo transition sharpness
+# alpha becomes a fifth physical coordinate (linear) in the range of Hayashi et al.
+# 2020, 2023 (= ALPHA_FIT_BOUNDS of the harness); PCA keeps --pca-components of the
+# five directions and pins the dropped one at the best point of every refit.
+ALPHA = 'alpha'
+ALPHA_BOUNDS = (0.5, 3.0)
+ALPHA_PREFIX = 'localpca_alpha'
+ALPHA_COMPONENTS = 4
+ALPHA_DEFAULTS = dict(min_alpha_loading=0.05, min_variance_frac=1e-12)
+
+
 # --------------------------------------------------------------------------
 # Coordinates and the local box (standard library)
 # --------------------------------------------------------------------------
+def names_of(mapping):
+    """Parameter names of a box/bounds/params mapping: alpha only in the free-alpha mode."""
+    return NAMES + (ALPHA,) if ALPHA in mapping else NAMES
+
+
 def to_x(params):
-    return [float(params['Q']), float(params['gh']), math.log10(params['rh']), math.log10(params['rho0'])]
+    x = [float(params['Q']), float(params['gh']), math.log10(params['rh']), math.log10(params['rho0'])]
+    if ALPHA in params:
+        x.append(float(params[ALPHA]))
+    return x
 
 
 def from_x(x):
-    return dict(Q=float(x[0]), gh=float(x[1]), rh=10 ** float(x[2]), rho0=10 ** float(x[3]))
+    params = dict(Q=float(x[0]), gh=float(x[1]), rh=10 ** float(x[2]), rho0=10 ** float(x[3]))
+    if len(x) > len(NAMES):
+        params[ALPHA] = float(x[4])
+    return params
 
 
 def box_x(box):
-    return (to_x({k: box[k][0] for k in NAMES}), to_x({k: box[k][1] for k in NAMES}))
+    names = names_of(box)
+    return (to_x({k: box[k][0] for k in names}), to_x({k: box[k][1] for k in names}))
 
 
 def free_names(box):
-    return tuple(k for k in NAMES if box[k][1] > box[k][0])
+    return tuple(k for k in names_of(box) if box[k][1] > box[k][0])
 
 
 def free_index(box):
-    return [i for i, k in enumerate(NAMES) if box[k][1] > box[k][0]]
+    return [i for i, k in enumerate(names_of(box)) if box[k][1] > box[k][0]]
 
 
 def fixed_params(box):
-    return {k: box[k][0] for k in NAMES if box[k][1] == box[k][0]}
+    return {k: box[k][0] for k in names_of(box) if box[k][1] == box[k][0]}
+
+
+def search_bounds(bounds, fit_alpha):
+    """bounds_original, plus the alpha range in the free-alpha mode."""
+    return dict(bounds, **{ALPHA: ALPHA_BOUNDS}) if fit_alpha else bounds
 
 
 def parse_box(spec, bounds):
-    """'Q=a:b,gh=a:b,rh=a:b,rho0=a:b' inside bounds_original; a == b fixes that parameter."""
+    """'Q=a:b,gh=a:b,rh=a:b,rho0=a:b' inside bounds_original; a == b fixes that parameter.
+    With alpha in `bounds` (free-alpha mode) the box also needs alpha=a:b and all five free."""
+    names = names_of(bounds)
     box = {}
     for item in str(spec or '').split(','):
         item = item.strip()
@@ -92,39 +141,42 @@ def parse_box(spec, bounds):
         name, sep, span = item.partition('=')
         lo, sep2, hi = span.partition(':')
         name = name.strip()
-        if not sep or not sep2 or name not in NAMES:
-            raise ConfigError(f'bad --box item {item!r} (expected NAME=lo:hi, NAME in {", ".join(NAMES)})')
+        if not sep or not sep2 or name not in names:
+            raise ConfigError(f'bad --box item {item!r} (expected NAME=lo:hi, NAME in {", ".join(names)})')
         if name in box:
             raise ConfigError(f'--box: {name} given twice')
         try:
             box[name] = [float(lo), float(hi)]
         except ValueError:
             raise ConfigError(f'bad --box item {item!r}')
-    if set(box) != set(NAMES):
-        raise ConfigError(f'--box needs all of {", ".join(NAMES)}')
+    if set(box) != set(names):
+        raise ConfigError(f'--box needs all of {", ".join(names)}')
     for name, (lo, hi) in box.items():
         if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi):
             raise ConfigError(f'--box {name}: need finite lo <= hi (lo == hi fixes the parameter)')
         blo, bhi = bounds[name]
         if lo < blo or hi > bhi:
-            raise ConfigError(f'--box {name} [{lo:g}, {hi:g}] outside bounds_original [{blo:g}, {bhi:g}]')
-    box = {k: box[k] for k in NAMES}
+            source = 'the alpha range' if name == ALPHA else 'bounds_original'
+            raise ConfigError(f'--box {name} [{lo:g}, {hi:g}] outside {source} [{blo:g}, {bhi:g}]')
+    box = {k: box[k] for k in names}
     if len(free_names(box)) < 2:
         raise ConfigError('--box: at least two parameters must have lo < hi')
+    if ALPHA in box and len(free_names(box)) != len(names):
+        raise ConfigError('--fit-alpha: all five parameters must be free (lo < hi)')
     return box
 
 
 def in_box(params, box, tol=1e-9):
     return all(box[k][0] - tol * max(1.0, abs(box[k][0])) <= params[k] <= box[k][1] + tol * max(1.0, abs(box[k][1]))
-               for k in NAMES)
+               for k in names_of(box))
 
 
 def clip_to_box(params, box):
-    return {k: min(box[k][1], max(box[k][0], float(params[k]))) for k in NAMES}
+    return {k: min(box[k][1], max(box[k][0], float(params[k]))) for k in names_of(box)}
 
 
 def same_params(a, b):
-    return all(math.isclose(a[k], b[k], rel_tol=1e-12, abs_tol=1e-12) for k in NAMES)
+    return all(math.isclose(a[k], b[k], rel_tol=1e-12, abs_tol=1e-12) for k in names_of(a))
 
 
 def box_distance(a, b, box):
@@ -208,16 +260,19 @@ def read_initial_points(path, box, bounds, priors):
         if not tokens:
             continue
         where = f'{path}:{number}'
-        if len(tokens) != len(NAMES):
-            raise ConfigError(f'{where}: expected four coordinates: Q gh rh rho0')
+        names = names_of(box)
+        if len(tokens) != len(names):
+            raise ConfigError(f'{where}: expected {"four" if len(names) == 4 else "five"} coordinates: '
+                              + ' '.join(names))
         try:
-            params = dict(zip(NAMES, map(float, tokens)))
+            params = dict(zip(names, map(float, tokens)))
         except ValueError:
             raise ConfigError(f'{where}: initial coordinates must be numeric')
         if not all(math.isfinite(v) for v in params.values()):
             raise ConfigError(f'{where}: initial coordinates must be finite')
         if not in_box(params, bounds, tol=0):
-            raise ConfigError(f'{where}: initial point outside bounds_original')
+            raise ConfigError(f'{where}: initial point outside bounds_original'
+                              + (' or the alpha range' if ALPHA in names else ''))
         if not in_box(params, box, tol=0):
             raise ConfigError(f'{where}: initial point outside --box')
         if any(same_params(params, p) for p in points):
@@ -230,7 +285,27 @@ def read_initial_points(path, box, bounds, priors):
     return points, dict(name=os.path.basename(path), file=os.path.abspath(path), sha256=hashlib.sha256(raw).hexdigest())
 
 
+def alpha_options(args):
+    """Config entries of the free-alpha mode ({} otherwise, so old states stay resumable)."""
+    fit_alpha = getattr(args, 'fit_alpha', False)
+    components = getattr(args, 'pca_components', None)
+    if not fit_alpha:
+        if components is not None:
+            raise ConfigError('--pca-components needs --fit-alpha')
+        return {}
+    if components is None:
+        components = ALPHA_COMPONENTS
+    if components != ALPHA_COMPONENTS:
+        raise ConfigError(f'--fit-alpha: --pca-components must be {ALPHA_COMPONENTS} (five parameters -> four)')
+    return dict(ALPHA_DEFAULTS, fit_alpha=True, pca_components=components)
+
+
 def build_config(args, bounds):
+    options = alpha_options(args)
+    if options and args.prior_states:
+        raise ConfigError('--fit-alpha: prior states hold four-parameter alpha=2 evaluations; '
+                          'they are not imported (use --prior-states none)')
+    bounds = search_bounds(bounds, bool(options))
     box = parse_box(args.box, bounds)
     budget = DEFAULTS['budget'] if args.budget is None else args.budget
     if budget < 1:
@@ -244,7 +319,7 @@ def build_config(args, bounds):
     return dict(DEFAULTS, incl=float(args.incl), pot='l24', box=box, bounds={k: list(v) for k, v in bounds.items()},
                 budget=budget, n_sobol=args.n_sobol, sobol_seed=args.sobol_seed, subsample_seed=args.subsample_seed,
                 priors=priors, prior_skipped=skipped, prior_outside=outside, prior_context=context,
-                prior_sources=sources, initial_points=initial, initial_source=initial_source)
+                prior_sources=sources, initial_points=initial, initial_source=initial_source, **options)
 
 
 def check_prior_context(config, live):
@@ -283,7 +358,11 @@ def adaptive_cutoff(penalties, target_fraction, min_points, cutoff_start):
 
 
 def fit_basis(records, config, at):
-    """Full-rank weighted PCA of the ok points over the free parameters, as in the harness."""
+    """Full-rank weighted PCA of the ok points over the free parameters, as in the harness.
+    With config['pca_components'] = k < d (free-alpha mode) only the first k components
+    are searched; the dropped ones are pinned at the coordinates of the best ok point
+    (`anchor`), so the searched k-dimensional affine plane always contains it. A
+    degenerate basis or alpha (almost) only in the dropped direction stops the run."""
     import numpy
     free = free_index(config['box'])
     x_fixed = box_x(config['box'])[0]
@@ -313,21 +392,46 @@ def fit_basis(records, config, at):
     rows = numpy.arange(d)
     sign = numpy.sign(components[rows, numpy.argmax(numpy.abs(components), axis=1)])
     components = components * numpy.where(sign == 0, 1.0, sign)[:, None]
+    explained = variance / variance.sum() if variance.sum() > 0 else numpy.full(d, 1.0 / d)
+    k = config.get('pca_components', d)
+    reduced = {}
+    if k < d:
+        if len(ok) < 2:
+            raise RunFailed(f'PCA {d}->{k}: fewer than two successful evaluations to build the basis')
+        if not variance[k - 1] > config['min_variance_frac'] * variance.sum():
+            raise RunFailed(f'PCA {d}->{k}: degenerate basis (component {k} carries no variance; '
+                            f'{n_good} good points); state kept, run stopped')
+        best = min(ok, key=lambda r: r['penalty'])
+        dropped = components[k:]
+        anchor = dropped @ ((numpy.array(to_x(best['params']))[free] - mean) / std - center)
+        residual = (scaled - center) @ dropped.T - anchor
+        reduced = dict(n_components=k, dropped=dropped.tolist(), anchor=anchor.tolist(), anchor_id=best.get('id'),
+                       dropped_explained=float(explained[k:].sum()),
+                       drop_residual_rms=float(numpy.sqrt(numpy.mean(residual ** 2))))
+        if ALPHA in config['box']:
+            loading = float(numpy.linalg.norm(components[:k, free.index(len(NAMES))]))
+            reduced['alpha_loading'] = loading
+            if loading < config['min_alpha_loading']:
+                raise RunFailed(f'PCA {d}->{k}: alpha loading on the kept components {loading:.3g} < '
+                                f"{config['min_alpha_loading']} (alpha would stay fixed); state kept, run stopped")
+        components = components[:k]
     corners = numpy.array(list(itertools.product(*zip(lo, hi))))
     Z = ((corners - mean) / std - center) @ components.T
-    explained = variance / variance.sum() if variance.sum() > 0 else numpy.full(d, 1.0 / d)
     return dict(at=at, n_points=len(ok), n_good=n_good, cutoff=None if cutoff is None else float(cutoff),
                 mean=mean.tolist(), std=std.tolist(), center=center.tolist(), components=components.tolist(),
                 explained=explained.tolist(), zlo=Z.min(axis=0).tolist(), zhi=Z.max(axis=0).tolist(),
-                free=free, x_fixed=x_fixed)
+                free=free, x_fixed=x_fixed, **reduced)
 
 
 def _arrays(basis):
-    """Stored bases of all-free searches (before fixed parameters) have no free/x_fixed keys."""
+    """Stored bases of all-free searches (before fixed parameters) have no free/x_fixed keys;
+    reduced bases (free-alpha mode) shift the plane by the pinned dropped components."""
     import numpy
     a = {k: numpy.array(basis[k]) for k in ('mean', 'std', 'center', 'components', 'zlo', 'zhi')}
     a['free'] = basis.get('free', list(range(len(NAMES))))
     a['x_fixed'] = numpy.array(basis.get('x_fixed', [0.0] * len(NAMES)), dtype=float)
+    a['shift'] = (a['center'] + numpy.array(basis['anchor']) @ numpy.array(basis['dropped'])
+                  if basis.get('dropped') else a['center'])
     return a
 
 
@@ -345,7 +449,7 @@ def x_from_u(u, basis):
     a = _arrays(basis)
     z = a['zlo'] + numpy.asarray(u, dtype=float) * (a['zhi'] - a['zlo'])
     x = a['x_fixed'].copy()
-    x[a['free']] = a['mean'] + a['std'] * (z @ a['components'] + a['center'])
+    x[a['free']] = a['mean'] + a['std'] * (z @ a['components'] + a['shift'])
     return x.tolist()
 
 
@@ -355,7 +459,7 @@ def box_constraints(basis, box):
     a = _arrays(basis)
     lo, hi = (numpy.array(v)[a['free']] for v in box_x(box))
     M = ((a['zhi'] - a['zlo'])[:, None] * a['components']) * a['std'][None, :]
-    offset = a['mean'] + a['std'] * (a['zlo'] @ a['components'] + a['center'])
+    offset = a['mean'] + a['std'] * (a['zlo'] @ a['components'] + a['shift'])
     return numpy.vstack([M.T, -M.T]).tolist(), numpy.concatenate([lo - offset, offset - hi]).tolist()
 
 
@@ -431,9 +535,10 @@ def propose_bo(points, values, center, lo, hi, A, b, seed):
         return None
 
 
-def self_test(box, proposer=propose_bo, n=30, seed=1):
+def self_test(box, proposer=propose_bo, n=30, seed=1, options=None):
     """Constrained proposal on a synthetic objective (no AGAMA): the run host's BoTorch must
-    return a feasible acquisition point, otherwise the search would degrade to random points."""
+    return a feasible acquisition point, otherwise the search would degrade to random points.
+    `options` = alpha_options(args) checks the reduced 5->4 basis of the free-alpha mode."""
     import random
     rng = random.Random(seed)
     lo, hi = box_x(box)
@@ -443,7 +548,7 @@ def self_test(box, proposer=propose_bo, n=30, seed=1):
         x = [rng.uniform(a, c) for a, c in zip(lo, hi)]
         penalty = 1.5 + sum(((v - t) / (c - a)) ** 2 for v, t, a, c in zip(x, target, lo, hi) if c > a)
         records.append(dict(params=from_x(x), status='ok', penalty=penalty))
-    config = dict(DEFAULTS, box=box)
+    config = dict(DEFAULTS, box=box, **(options or {}))
     basis = fit_basis(records, config, 0)
     A, b = box_constraints(basis, box)
     best = min(records, key=lambda r: r['penalty'])
@@ -516,12 +621,13 @@ class Search:
         record['id'] = len(self.state['evaluations'])
         self.state['evaluations'].append(record)
         new = not os.path.exists(self.table)
+        columns = table_columns(self.cfg)
         with open(self.table, 'a') as stream:
             if new:
-                stream.write('\t'.join(TABLE_COLUMNS) + '\n')
+                stream.write('\t'.join(columns) + '\n')
             flat = dict(record, **record['params'])
             flat['library'] = (record.get('library') or {}).get('name') or (record.get('library') or {}).get('skipped')
-            stream.write('\t'.join('' if flat.get(k) is None else str(flat.get(k)) for k in TABLE_COLUMNS) + '\n')
+            stream.write('\t'.join('' if flat.get(k) is None else str(flat.get(k)) for k in columns) + '\n')
         return record
 
     # ---- queries ---------------------------------------------------------
@@ -538,12 +644,13 @@ class Search:
     # ---- evaluation ------------------------------------------------------
     def evaluate(self, params, kind, extra=None):
         meta = dict(id=len(self.state['evaluations']), branch=None, kind=kind)
-        self.log(f'[localpca] eval {meta["id"]}: {kind} ' + ' '.join(f'{k}={params[k]:.6g}' for k in NAMES))
+        self.log(f'[localpca] eval {meta["id"]}: {kind} '
+                 + ' '.join(f'{k}={params[k]:.6g}' for k in names_of(params)))
         result = self.evaluator(params['Q'], dict(params), self.cfg['opt_seed'], meta)
         record = dict(params=dict(params), kind=kind, seed=self.cfg['opt_seed'],
                       status=result.get('status', 'failed'), penalty=result.get('penalty'),
                       upsilon=result.get('upsilon'), wall_s=result.get('wall_s'), orbit_s=result.get('orbit_s'),
-                      library=result.get('library'), error=result.get('error'), source=PREFIX,
+                      library=result.get('library'), error=result.get('error'), source=prefix_of(self.cfg),
                       finished=rqp.now(), **(extra or {}))
         if record['status'] == 'ok' and not (record['penalty'] and record['penalty'] > 0):
             record['status'] = 'failed'
@@ -606,7 +713,8 @@ class Search:
             self.save()
             self.log(f"[localpca] PCA basis {len(self.state['bases']) - 1} at {n_new} new evaluations: "
                      f"{current['n_good']} good points, explained "
-                     + ', '.join(f'{v:.3f}' for v in current['explained']))
+                     + ', '.join(f'{v:.3f}' for v in current['explained'])
+                     + _fmt_reduced(current))
         return current
 
     def step(self):
@@ -660,9 +768,25 @@ class Search:
 # --------------------------------------------------------------------------
 # Summary (standard library only)
 # --------------------------------------------------------------------------
+REDUCED_KEYS = ('n_components', 'anchor_id', 'dropped_explained', 'drop_residual_rms', 'alpha_loading')
+
+
+def _fmt_reduced(basis):
+    if 'n_components' not in basis:
+        return ''
+    text = (f"; kept {basis['n_components']} of {len(basis['explained'])} components, dropped explained "
+            f"{basis['dropped_explained']:.3f} pinned at id {basis['anchor_id']}, residual rms "
+            f"{basis['drop_residual_rms']:.3g}")
+    if 'alpha_loading' in basis:
+        text += f", alpha loading {basis['alpha_loading']:.3f}"
+    return text
+
+
 def _edges(params, limits, rel=1e-3):
     hits = []
-    for k in NAMES:
+    for k in names_of(params):
+        if k not in limits:
+            continue
         lo, hi = limits[k]
         if hi <= lo:
             continue
@@ -703,6 +827,11 @@ def summarize(state):
             for edge in _edges(r['params'], cfg['box']):
                 counts[edge] = counts.get(edge, 0) + 1
         near[str(delta)] = dict(n=len(rows), box_edges=counts)
+    extra = {}
+    if cfg.get('fit_alpha'):
+        alphas = [r['params'][ALPHA] for r in new if r['status'] == 'ok']
+        extra['alpha_explored'] = dict(n=len(alphas), min=min(alphas, default=None), max=max(alphas, default=None))
+        extra['pca'] = f"{cfg['pca_components']} of {len(free_names(cfg['box']))} components"
     return dict(status=state.get('status'), updated=state.get('updated'), opt_seed=cfg['opt_seed'], box=cfg['box'],
                 fixed=fixed_params(cfg['box']), budget=cfg['budget'], n_new=len(new), n_priors=len(evaluations) - len(new),
                 evaluation_kinds={k: sum(r['kind'] == k for r in new) for k in ('initial', 'sobol', 'bo')},
@@ -716,9 +845,13 @@ def summarize(state):
                 improvement=(best_prior['penalty'] - best_new['penalty']) if best_prior and best_new else None,
                 near_best=near, top=[_point(r, cfg) for r in ok[:10]],
                 bases=[dict(at=b['at'], n_good=b['n_good'], cutoff=b['cutoff'], explained=b['explained'],
-                            components=b['components']) for b in state.get('bases', [])],
+                            components=b['components'], **{k: b[k] for k in REDUCED_KEYS + ('dropped',) if k in b})
+                       for b in state.get('bases', [])],
                 note='one IC realisation (seed %d); penalty is not chi^2; differences between distant '
-                     'parameters carry the realisation scatter of two independent evaluations' % cfg['opt_seed'])
+                     'parameters carry the realisation scatter of two independent evaluations' % cfg['opt_seed']
+                     + ('; free alpha: the search covers the visited %s-dimensional planes of the PCA, '
+                        'not a proven five-dimensional minimum' % cfg['pca_components'] if cfg.get('fit_alpha') else ''),
+                **extra)
 
 
 def _fmt_point(label, point):
@@ -727,7 +860,8 @@ def _fmt_point(label, point):
     p = point['params']
     return [f"  {label}: P={point['penalty']:.6f} ({point['kind']}, id {point['id']}, {point['source']}) "
             f"Q={p['Q']:.6g} gh={p['gh']:.6g} rh={p['rh']:.6g} rho0={p['rho0']:.6g} "
-            f"Upsilon={point['upsilon']} rho0*Ups={point['rho0_upsilon']}",
+            + (f"alpha={p[ALPHA]:.6g} " if ALPHA in p else '')
+            + f"Upsilon={point['upsilon']} rho0*Ups={point['rho0_upsilon']}",
             f"    box edges: {','.join(point['box_edges']) or '-'}; bounds_original edges: "
             f"{','.join(point['bounds_edges']) or '-'}"]
 
@@ -758,7 +892,11 @@ def format_summary(summary):
         lines.append(f"  within +{delta}: {row['n']} points; box edges {row['box_edges'] or '-'}")
     for b in summary['bases']:
         lines.append(f"  PCA basis at {b['at']}: n_good={b['n_good']} explained="
-                     + ', '.join(f'{v:.3f}' for v in b['explained']))
+                     + ', '.join(f'{v:.3f}' for v in b['explained']) + _fmt_reduced(b))
+    if 'alpha_explored' in summary:
+        a = summary['alpha_explored']
+        lines.append(f"  free alpha ({summary['pca']}): ok new evaluations {a['n']}, alpha range "
+                     f"{a['min']}..{a['max']}")
     lines.append('  top: ' + '; '.join(f"{t['penalty']:.4f}@Q={t['params']['Q']:.4g}" for t in summary['top']))
     lines.append(f"  note: {summary['note']}")
     return '\n'.join(lines) + '\n'
@@ -780,9 +918,13 @@ def format_dry_run(config):
              f"(agama.setRandomSeed before every evaluation)",
              '  box: ' + ', '.join(f'{k} {lo:g}..{hi:g}' for k, (lo, hi) in config['box'].items())
              + ' (Upsilon searched internally)',
-             f"  PCA: {len(free_names(config['box']))} components of ("
+             f"  PCA: {config.get('pca_components', len(free_names(config['box'])))} components of ("
              + ', '.join(k if k not in LOG_NAMES else f'log10 {k}' for k in free_names(config['box']))
              + f"){_fmt_fixed(config['box'])}, refit every {config['refit_every']} evaluations"]
+    if config.get('fit_alpha'):
+        lines.append(f"  free alpha in [{ALPHA_BOUNDS[0]:g}, {ALPHA_BOUNDS[1]:g}] (Hayashi et al. 2020, 2023): "
+                     f"{len(free_names(config['box'])) - config['pca_components']} dropped component pinned at the "
+                     f"best point of every refit; alpha=2 priors not imported; history {ALPHA_PREFIX}_*")
     lines.append(f"  prior states: {len(config['prior_sources'])} "
                  f"({', '.join(s['name'] for s in config['prior_sources']) or '-'})")
     if priors:
@@ -802,7 +944,7 @@ def format_dry_run(config):
         source = config['initial_source']
         lines.append(f"  initial points: {len(initial)} ({source['file']}, sha256 {source['sha256'][:12]})")
         for j, params in enumerate(initial):
-            lines.append(f'    initial {j}: ' + ' '.join(f'{k}={params[k]:.12g}' for k in NAMES))
+            lines.append(f'    initial {j}: ' + ' '.join(f'{k}={params[k]:.12g}' for k in names_of(params)))
     n_bo = config['budget'] - len(initial) - config['n_sobol']
     start = f'{len(initial)} initial + ' if initial else ''
     lines.append(f"  evaluations: {config['budget']} ({start}{config['n_sobol']} Sobol + {n_bo} TuRBO), "
@@ -825,6 +967,11 @@ def parse_args(argv=None):
                         help='File of Q gh rh rho0 rows to evaluate before Sobol (counts towards --budget)')
     parser.add_argument('--prior-states', nargs='*', default=[],
                         help='Q-profile state directories (or profile_state.json) whose seed-42 points enter the GP')
+    parser.add_argument('--fit-alpha', action='store_true',
+                        help=f'Free halo alpha in [{ALPHA_BOUNDS[0]:g}, {ALPHA_BOUNDS[1]:g}]: --box needs alpha=lo:hi, '
+                             'initial points five columns Q gh rh rho0 alpha; no prior states')
+    parser.add_argument('--pca-components', type=int, default=None,
+                        help=f'PCA components with --fit-alpha (only {ALPHA_COMPONENTS}: five parameters -> four)')
     parser.add_argument('--state-dir', default=None)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--suffix', default=None)
@@ -857,11 +1004,12 @@ def main(argv=None):
         return 0
     if args.self_test:
         try:
-            box = parse_box(args.box, rsm.script_bounds())
+            options = alpha_options(args)
+            box = parse_box(args.box, search_bounds(rsm.script_bounds(), bool(options)))
         except ConfigError as error:
             print(f'ERROR: {error}', file=sys.stderr)
             return 2
-        ok, params = self_test(box)
+        ok, params = self_test(box, options=options)
         print(f"[localpca] self-test of the constrained proposal: {'ok' if ok else 'FAILED'} {params}")
         return 0 if ok else 1
     harness_sha256 = rqp.sha256_file(rsm.EXP_SCRIPT)
@@ -882,10 +1030,12 @@ def main(argv=None):
     stop_marker = os.path.join(args.orblib_dir, '.storage', 'STOP')
     if os.path.exists(stop_marker):
         os.remove(stop_marker)
-    evaluate, mod, _ = rqp.build_evaluator(args, args.state_dir, prefix=PREFIX)
+    evaluate, mod, _ = rqp.build_evaluator(args, args.state_dir, prefix=prefix_of(config))
     live = dict(exp_id=mod.EXP_ID, geom_hash=mod.GEOM_HASH, evaluation_context=mod.EVALUATION_CONTEXT,
                 harness_sha256=harness_sha256)
     try:
+        if config.get('fit_alpha') and tuple(getattr(mod, 'ALPHA_FIT_BOUNDS', ())) != ALPHA_BOUNDS:
+            raise ConfigError(f"harness ALPHA_FIT_BOUNDS {getattr(mod, 'ALPHA_FIT_BOUNDS', None)} != {ALPHA_BOUNDS}")
         check_prior_context(config, live)
     except ConfigError as error:
         print(f'ERROR: {error}', file=sys.stderr)

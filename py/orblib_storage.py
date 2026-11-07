@@ -22,6 +22,7 @@ import zipfile
 NAME_RE = re.compile(r'orblib_i[-+0-9.]+_d[01]_nb[0-9]+_ser[0-9]+(?:_l[0-9]+n[0-9]+)?_geom[0-9a-fA-F]+_[0-9a-fA-F]{10}\.npz')
 SCALARS = ('Q', 'gh', 'rh', 'rho0', 'incl', 'double', 'n_bin', 'ser_id',
            'numOrbits', 'trajsize', 'intTime', 'degree', 'ghorder')
+OPTIONAL_SCALARS = ('alpha',)
 
 
 class StorageStop(SystemExit):
@@ -87,7 +88,10 @@ def npy_header(stream):
 def metadata(path, deep=True):
     with zipfile.ZipFile(path) as archive:
         result = {}
-        for name in SCALARS:
+        # alpha: only libraries of the free-alpha local search (run_local_pca.py
+        # --fit-alpha) carry it; legacy libraries (alpha = 2) have no member.
+        optional = tuple(name for name in OPTIONAL_SCALARS if name + '.npy' in archive.namelist())
+        for name in SCALARS + optional:
             with archive.open(name + '.npy') as stream:
                 header = npy_header(stream)
                 dtype = header['descr']

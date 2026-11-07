@@ -245,7 +245,7 @@ def read_models(path, bounds=None):
 # --------------------------------------------------------------------------
 _COMMENT_KEYS = (('orbitlib times', 'orbitlib'), ('orblib saved:', 'saved'),
                  ('orblib reused:', 'reused'), ('solveOpt summary:', 'solveopt'),
-                 ('orblib archive-first-wins:', 'archived_rebuild'))
+                 ('orblib archive-first-wins:', 'archived_rebuild'), ('halo alpha:', 'halo_alpha'))
 
 
 def _key_values(text):
@@ -371,9 +371,12 @@ def run_protocol(mod, name, params, files, seed, rng_factory, ic_seed=None):
             # the seed only (not on order or on earlier evaluations).
             mod.agama.setRandomSeed(int(ic_seed))
         start = time.perf_counter()
+        # Explicit alpha (run_local_pca.py --fit-alpha) goes to the objective's
+        # alphah argument; the module default stays untouched.
+        alphah = mod.alphah if params.get('alpha') is None else float(params['alpha'])
         value = mod.halo_IC_lib_weights_pca_fixed(
             pc, None, mod.bounds_original, mod.densityStars, mod.datasets,
-            mod.alphah, mod.betah, direct_params=dict(params))
+            alphah, mod.betah, direct_params=dict(params))
         wall = time.perf_counter() - start
     finally:
         for key, value_saved in saved.items():
@@ -383,6 +386,8 @@ def run_protocol(mod, name, params, files, seed, rng_factory, ic_seed=None):
     if not math.isfinite(penalty) or penalty >= FAILED_PENALTY or block is None:
         raise ProtocolError(f'{name}: evaluation failed (penalty={penalty})',
                             penalty=penalty if block is not None else None)
+    if params.get('alpha') is not None and block.get('halo_alpha', {}).get('alpha') != float(params['alpha']):
+        raise ProtocolError(f"{name}: history block does not record alpha={params['alpha']!r}")
     orbitlib = block.get('orbitlib', {})
     result = dict(
         penalty=penalty, upsilon=block['row'][5], probes=mod.number_of_find_w_U - probes,
