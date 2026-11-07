@@ -623,6 +623,16 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   disjoint timestamped directories. Hand-off with commands and checks (private):
   `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md`. The run is started by the user.
 
+## 2026-11-07 — gray launch without a delegated `cpu` controller (user; run completed)
+
+- gray delegates only `memory pids` to the user manager and its systemd rejects `OOMPolicy` for
+  scopes. Instead of an admin change, the seed scan ran inside an outer `systemd-run --user --scope`
+  with MemoryMax / MemoryHigh / MemorySwapMax=0 and `taskset` to four distinct physical cores, with
+  `launch_tycho.sh --no-scope --threads=4 --git-results`. Memory limit and swap ban were verified in the
+  scope (`memory.oom.group=0`); CPU stays ≤ 1/3 by affinity. No code change.
+- Seed-42 control failed the bit-level criterion (different build, different `GEOM_HASH`), but the IC
+  stream is the same; gray results combine with tycho at the 0.01 level only. Numbers: private run NOTES.
+
 ## 2026-11-06 — Fixed-gh=1 (r^-1 inner cusp) search at seed 42 (user)
 
 - **Why** | the cusp audit found no optimised gh≈1 model (only Sobol probes), so an exclusion

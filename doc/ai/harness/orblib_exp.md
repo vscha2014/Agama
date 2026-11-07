@@ -580,6 +580,12 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
   which may exceed the host RAM. Pass `--git-results` (exit 2 if `../results/.git` is missing
   instead of falling back to rclone) and `git -C ../results pull --ff-only` **before** launching:
   `--models=FILE` is resolved before the launcher's own pull. Keep `results/` clean (`add -A`).
+  Without a delegated `cpu` controller (preflight dies): wrap the launcher in
+  `systemd-run --user --scope -p MemoryMax=… -p MemoryHigh=… -p MemorySwapMax=0 taskset -c <cores> …`
+  and pass `--no-scope` (drop `OOMPolicy` if systemd rejects it; check `memory.oom.group=0`). The
+  launcher then prints "limits NOT applied" and an unused MemoryMax; the real limits appear in its
+  `memory.max=` log lines. Different hosts/builds give different `GEOM_HASH` (bit-level inputs) and
+  slightly different penalties at the same AGAMA seed.
 
 ## 3h. Git-backed `results/` synchronization (without `rclone` / Yandex.Disk)
 

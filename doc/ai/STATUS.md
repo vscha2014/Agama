@@ -1,13 +1,12 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-06: gray seed scan and fixed-gh=1
-tycho search prepared. Numerical results private; no calculations executed by the agent.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-07: gray seed scan of both seed-42
+optima analysed. Numerical results private; no calculations executed by the agent.
 
 ## Where the science stands
 
 - Completed free-Q L24 and spherical Q1 searches at incl=90 provide two finalists; their
   historical minima do not calibrate IC uncertainty. Numerical results remain in results/.
-- Upsilon control (2026-10-25): small protocol effect on the finalists' gap (private `multi_…_225604/`).
 - Paired seed scan favours the old free-Q finalist over the strict-spherical finalist.
   It measures IC-noise robustness of two fixed points, not observational significance.
   Details: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
@@ -20,6 +19,10 @@ tycho search prepared. Numerical results private; no calculations executed by th
 - Both local seed-42 searches are done (private NOTES in `results/logs/localpca/localpca_…_20261104_134856/`
   and `…_20261105_094229/`). Compact minimum is closed except gh=0, lower Q is worse; the near-spherical
   one ranks clearly better at seed 42 but sits on gh=0/rh=30 and seed 42 is known to favour that side.
+- Paired 20-seed scan of these two optima (gray): the near-spherical point stays better at every seed;
+  the seed-42 selection bias is small for both. Fixed points only; gray differs from tycho at the
+  bit level (other build, other `GEOM_HASH`) but shares the IC stream. Private
+  `results/logs/seed/seeds_multi_…_20261106_132732/NOTES.md`.
 - Cusp audit: no fixed-gh=1 optimisation; modern steep-cusp trials are only Sobol probes.
   Weak cusps: free-Q local search confirms a shallow plateau worse than the cores (not a proven barrier).
   The frozen alpha=2 family differs from literal NFW. See `results/logs/CUSP_ASSESSMENT_20261105.md`.
@@ -42,14 +45,12 @@ tycho search prepared. Numerical results private; no calculations executed by th
 
 ## Next steps (started by the user)
 
-1. Paired IC-seed scan of both seed-42 optima on **gray** (DECISIONS 2026-11-06): seeds 42 (cross-host
-   control first) + 1–20, `--threads=4`, `TYCHO_MEM_MAX` 3.5 GiB, no code change. Models file, commands
-   and checks: private `results/logs/seed/HANDOFF_SEED_NEARSPH_COMPACT_GRAY.md` (not launched).
-2. Weak-cusp local search (tycho, 24 evaluations) done and analysed: no improvement, flat degenerate
-   plateau, cores better at every Q; no extension (private `localpca_…_20261106_094514/NOTES.md`).
-3. Fixed-gh=1 search on tycho (40 evaluations, Q 0.05–1.3, needs the new commit; private
-   `results/logs/localpca/HANDOFF_LOCALPCA_GH1.md`, not launched). Literal NFW needs approved alpha=1.
-4. Keep seed 42 for parameter work; later J-factor/mass comparison and other inclinations.
+1. Gray seed scan done (DECISIONS 2026-11-06/07; outer memory scope + `taskset`, `cpu` not delegated).
+   Optional follow-up: Q-valley transect across seeds around the near-spherical optimum.
+2. Weak-cusp local search (tycho) analysed: no improvement, cores better at every Q (`…_094514/NOTES.md`).
+3. Fixed-gh=1 search on tycho delivered (results `641fb93`, `localpca_…_20261106_170728`), not analysed
+   yet. Literal NFW needs an approved alpha=1 experiment.
+4. J-factor/mass comparison of the near-spherical vs compact families; rh=30/gh=0 bound question; other incl.
 
 ## Open questions
 
