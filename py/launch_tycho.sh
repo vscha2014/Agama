@@ -126,7 +126,8 @@ for arg in "$@"; do
                 'Env: CONDA_ENV=agamaBoTorch ("" — не активировать), PYTHON=python,' \
                 '  TYCHO_MEM_MAX (байт, по умолчанию MemTotal/4 или 8 GiB с --models), TYCHO_MIN_FREE_GB=40,' \
                 '  TYCHO_STOP_GRACE=1800, TYCHO_MONITOR_INTERVAL=60.' \
-                'Остановка: Ctrl-C или systemctl --user kill --signal=TERM <unit> (см. лог).'
+                'Остановка: systemctl --user kill --signal=TERM <unit>.scope (команда в логе) — штатно, код 75.' \
+                '  Ctrl-C во время agama.orbit прерывает оценку сразу (код 130): checkpoint цел, но без отчёта.'
             exit 0
             ;;
         --incl=*)          INCL="${arg#*=}" ;;

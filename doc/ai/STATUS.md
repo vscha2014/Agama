@@ -1,7 +1,7 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-07: gray seed scan of both seed-42
-optima analysed. Numerical results private; no calculations executed by the agent.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-07: fixed-gh=1 search analysed
+(AGAMA on fornax-dwarf installed). Numerical results private; no calculations executed by the agent.
 
 ## Where the science stands
 
@@ -23,7 +23,7 @@ optima analysed. Numerical results private; no calculations executed by the agen
   the seed-42 selection bias is small for both. Fixed points only; gray differs from tycho at the
   bit level (other build, other `GEOM_HASH`) but shares the IC stream. Private
   `results/logs/seed/seeds_multi_…_20261106_132732/NOTES.md`.
-- Cusp audit: no fixed-gh=1 optimisation; modern steep-cusp trials are only Sobol probes.
+- Cusp audit: optimised fixed-gh=1 search done (seed 42) — strongly disfavoured, rho0 bound-conditional.
   Weak cusps: free-Q local search confirms a shallow plateau worse than the cores (not a proven barrier).
   The frozen alpha=2 family differs from literal NFW. See `results/logs/CUSP_ASSESSMENT_20261105.md`.
 
@@ -45,16 +45,16 @@ optima analysed. Numerical results private; no calculations executed by the agen
 
 ## Next steps (started by the user)
 
-1. Gray seed scan done (DECISIONS 2026-11-06/07; outer memory scope + `taskset`, `cpu` not delegated).
-   Optional follow-up: Q-valley transect across seeds around the near-spherical optimum.
-2. Weak-cusp local search (tycho) analysed: no improvement, cores better at every Q (`…_094514/NOTES.md`).
-3. Fixed-gh=1 search on tycho delivered (results `641fb93`, `localpca_…_20261106_170728`), not analysed
-   yet. Literal NFW needs an approved alpha=1 experiment.
-4. J-factor/mass comparison of the near-spherical vs compact families; rh=30/gh=0 bound question; other incl.
+1. Gray seed scan done (DECISIONS 2026-11-06/07). Optional: Q-valley transect across seeds.
+2. Cusps (tycho, seed 42) analysed: weak cusp worse than cores at every Q (`…_094514/NOTES.md`); optimised
+   gh=1 far worse still, only at extreme flattening and rho0=10 (`…_20261106_170728/NOTES.md`). Stop runs
+   with `systemctl … kill --signal=TERM`: Ctrl-C inside `agama.orbit` exits 130 (state intact).
+3. J-factor/mass comparison of the near-spherical vs compact families; rh=30/gh=0 bound question; other incl.
+4. New host fornax-dwarf (Ryzen 7900X): native AGAMA in `~gala` (env `agamaBoTorch`), all checks passed
+   (DECISIONS 2026-11-07, §3g). User: `launch_tycho.sh --preflight`, seed-42 control, GitHub key for `results/`.
 
 ## Open questions
 
-Q15 (Upsilon Brent into production), Q16 (J weighting / sampling density), Q17–Q19
-(shard consolidation, `ic`/`inttime`, shard naming), Q20 (production `pipefail`), Q23
-(OpenMP wrap in production) — see `questions_for_pi.md`.
+Q15 (Upsilon Brent → production), Q16 (J weighting), Q17–Q19 (shards, `ic`/`inttime`, naming),
+Q20 (production `pipefail`), Q23 (OpenMP wrap in production) — see `questions_for_pi.md`.
 Decided (`DECISIONS.md`): Q21, Q22, Q28–Q30, TR bound, PCA std floor, git-results sync, Q profile, local PCA, gray seed scan.

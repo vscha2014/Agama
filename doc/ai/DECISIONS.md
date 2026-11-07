@@ -646,3 +646,26 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   28 TuRBO; no prior lies on gh=1 (both Q-profile states pinned for the context check). Private
   hand-off and starts: `results/logs/localpca/HANDOFF_LOCALPCA_GH1.md`, `gh1_initial_points.txt`.
   Started by the user on tycho after preflight; extension or a second-basin run decided afterwards.
+
+## 2026-11-07 — AGAMA on fornax-dwarf: native install in ~gala, no Docker (user)
+
+- **Host** | fornax-dwarf: Debian 13, AMD Ryzen 9 7900X (Zen 4, AVX-512), 24 threads, 61 GiB, NVMe RAID1;
+  sudo needs a password, user manager delegates `cpu memory pids`, linger enabled without sudo.
+- **Why no Docker** | `agama_ready.tar.gz` is a `docker save` of `agama:latest` (Ubuntu 24.04, Python 3.12,
+  upstream master, `-march=native` on an unknown Intel CPU). Bit-level parity with the VM is not required
+  (0.01 level suffices, as gray vs tycho); a fresh `-march=native` build on Zen 4 is safer and faster; the VM
+  launchers end with `sudo shutdown` and rely on the dead rclone path. Native `launch_tycho.sh` covers the host.
+- **Why not system Python** | Debian 3.13 lacks pip/ensurepip/`Python.h` without sudo; user chose Miniforge
+  `~/miniforge3`, env `agamaBoTorch`, Python 3.12 (as VM/tycho). Only python+pip from conda, the rest via pip.
+- **Order** | Python stack first so numpy is final (torch 2.12.0+cpu, botorch 0.18.1, gpytorch 1.15.2,
+  linear_operator 0.6.1, scikit-learn 1.9.0, numpy 2.5.4) → cvxopt 1.3.2 wheel + `cvxopt.h`/`blas_redefines.h`
+  from the 1.3.2 sdist → GSL 2.7, GLPK 5.0 static `-fPIC` → Eigen 3.4.0 headers → UNSIO fork (`-fPIC`), all in
+  `~/Agama/extras` → `pip install --no-build-isolation --build-option=--yes .`; setup.py generated
+  `Makefile.local` with `-march=native -fopenmp` and HAVE_PYTHON/EIGEN/CVXOPT/GLPK/UNSIO. AGAMA 1.0.159.
+  Four transitive deps released < 7 days ago were pinned back (astropy-iers-data, python-dateutil 2.9.0.post0,
+  threadpoolctl 3.7.0, mypy_extensions 1.1.0); full pins in `~/agama-install/requirements.lock`.
+- **Checks** | `ldd` clean (static GSL/GLPK/UNSIO), `check_agama.py`/`check_imports.py` OK (run from outside
+  the repo root, else the bare `./agama.so` shadows the package), `py/alltest` 31 OK / 1 SKIPPED (amuse),
+  mocked harness tests 213 passed. Protocol, lock files and logs: `~/agama-install/` on the host.
+- **Open** | preflight and a seed-42 cross-host control are run by the user; no GitHub key for private
+  `results/` on the host yet (deploy key or `--offline`).

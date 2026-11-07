@@ -562,7 +562,13 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
   any subprocess call and `finalize` skip the sync step and its alarm; ntfy
   completion/error messages stay. `--offline --stream-orblib` is rejected.
   Inputs from other hosts are copied by hand and are read-only.
-- Stop: Ctrl-C or `systemctl --user kill --signal=TERM <unit>.scope`; the
+- Stop: `systemctl --user kill --signal=TERM <unit>.scope` (printed at start). Avoid Ctrl-C:
+  AGAMA's `orbit()` catches SIGINT itself and raises `KeyboardInterrupt` mid-integration, so the
+  driver exits 130 at once (Q-profile/local-PCA state from the last finished evaluation is intact
+  and resumes; status stays `running`, no report; the evaluation in progress is recomputed). TERM
+  is handled only after the running C call returns: a strongly flattened model (Q≈0.05–0.07) spends
+  ~35 min in one `orbit()`, longer than the default grace — set `TYCHO_STOP_GRACE` higher at launch
+  or accept the KILL (137, same intact state). The
   launcher re-sends TERM to workers alive after 5 s and KILLs them after
   `TYCHO_STOP_GRACE=1800` s. `tee` ignores INT/TERM so the checkpoint write
   cannot hit a broken pipe. Exit 75 = checkpoint written, 137 = OOM/KILL (no
@@ -586,6 +592,11 @@ Tests: `tests/test_launch_tycho.py` (PATH stubs, no systemd/AGAMA/rclone).
   launcher then prints "limits NOT applied" and an unused MemoryMax; the real limits appear in its
   `memory.max=` log lines. Different hosts/builds give different `GEOM_HASH` (bit-level inputs) and
   slightly different penalties at the same AGAMA seed.
+- fornax-dwarf (Ryzen 9 7900X, 12 cores / 24 threads, 61 GiB, Debian 13): native install in `~gala`,
+  conda env `agamaBoTorch` (Miniforge, Python 3.12) — the launcher's default `CONDA_ENV` works as is.
+  `cpu memory pids` are delegated and linger is on, so the scope applies its limits fully; set
+  `--threads` (≤ 12 physical cores) and `TYCHO_MEM_MAX` explicitly. No Docker, so the VM launchers
+  do not run there. Build and checks: DECISIONS 2026-11-07, `~/agama-install/ENVIRONMENT.txt` on the host.
 
 ## 3h. Git-backed `results/` synchronization (without `rclone` / Yandex.Disk)
 
