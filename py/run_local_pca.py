@@ -64,14 +64,15 @@ CONTEXT_KEYS = ('exp_id', 'geom_hash', 'evaluation_context', 'harness_sha256')
 
 
 def prefix_of(config):
+    if 'fixed_beta' in config:
+        return 'rhprofile'
     return ALPHA_PREFIX if config.get('fit_alpha') else PREFIX
 
 
 def table_columns(config):
-    if not config.get('fit_alpha'):
-        return TABLE_COLUMNS
+    shape = (('alpha',) if config.get('fit_alpha') else ()) + (('beta',) if 'fixed_beta' in config else ())
     at = TABLE_COLUMNS.index('rho0') + 1
-    return TABLE_COLUMNS[:at] + ('alpha',) + TABLE_COLUMNS[at:]
+    return TABLE_COLUMNS[:at] + shape + TABLE_COLUMNS[at:]
 
 
 # Free-alpha mode (--fit-alpha, DECISIONS 2026-11-07): the halo transition sharpness

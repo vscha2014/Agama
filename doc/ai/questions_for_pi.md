@@ -107,3 +107,24 @@ integration. The harness fix was applied on 2026-10-03 (user request, see
 `DECISIONS.md`) and verified on the VM: bit-identical library (same MD5),
 penalty equal to round-off, orbit integration ≈20× faster on 32 vCPU.
 **Question:** port the same wrap to `_yaVM.py`?
+
+## Q32. Radial support for J and outer tracers  [affects: CONTRACT / apertures / J]
+
+Q31's beta/rh diagnostic preparation was selected by the user on 2026-11-08
+(see DECISIONS); its other proposed steps remain open. The literature and
+read-only catalogue audit are private:
+`results/logs/BETA_RH_J_LITERATURE_20261108.md`.
+An inner Zhao profile mainly constrains `(beta-gh)/rh**alpha`; a cored J
+can depend on unobserved halo extent and the assumed 55 kpc cutoff.
+
+Options: (A) separately decompose J by radius using actual alpha/beta, preserving
+the full J convention and showing an inner contribution plus outer extrapolation;
+(B) prepare an experiment using outer tracers currently excluded by max_r,
+with membership/bootstrap validation and new apertures/constraints; old/new
+raw penalties would not be directly comparable; (C) introduce an explicitly
+justified tidal/cosmological prior, or report a separately defined restricted J.
+The last option adds assumptions or changes the quantity being reported.
+
+Recommendation: inspect the prepared beta/rh profiles, then A and B before
+tightening outer-halo priors. **Question:** which of these follow-ups should be
+implemented? Apertures, outer cutoff, J definitions and production remain frozen.

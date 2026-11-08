@@ -63,6 +63,15 @@ LP_RESUME=""
 LP_FIT_ALPHA=0
 LP_PCA=""
 LP_OPTS_SET=0
+RHPROFILE=0
+RP_GRID=""
+RP_BETAS=""
+RP_BOX=""
+RP_STARTS=""
+RP_BUDGET=""
+RP_SOBOL=""
+RP_RESUME=""
+RP_OPTS_SET=0
 SAVE_BELOW_SET=0
 MEMORY_GB=""
 RESULTS_DIR="${RESULTS_DIR:-}"
@@ -110,7 +119,13 @@ for arg in "$@"; do
                 '    --fit-alpha       Свободная alpha гало в [0.5, 3] (Hayashi et al. 2020, 2023): --box с alpha=a:b,' \
                 '                      старты из 5 колонок Q gh rh rho0 alpha, без состояний Q-профилей (alpha=2),' \
                 '                      каталог localpca_alpha_*; PCA 5 -> 4 (--pca-components=4).' \
-                '  --save-below=P      Порог penalty для сохранения .npz (--q-profile, --local-pca; по умолчанию 3.5).' \
+                '  --rh-profile        Профили по rh при beta=3,4,7,10; Q/gh/rho0/alpha свободны, полный PCA 4D.' \
+                '  --rh-grid=LIST      Радиусы (кпк), по умолчанию 0.5,1,2,5,10,20,30; --beta-grid=LIST — подмножество 3,4,7,10.' \
+                '  --profile-starts=F  Координаты стартов Q gh rh rho0 alpha; rh проецируется на сетку, penalties не импортируются.' \
+                '  --profile-box=BOX   Необязательный пяти-параметрический бокс; по умолчанию полный физический диапазон.' \
+                '  --cell-budget=N     До N оценок на (beta,rh), по умолчанию 24; --cell-sobol=N — Sobol из них (8).' \
+                '  --resume-rh-profile=DIR  Продолжить профиль по rh; больший --cell-budget расширяет все точки.' \
+                '  --save-below=P      Порог penalty для сохранения .npz (диагностические драйверы; по умолчанию 3.5).' \
                 '  --memory-gb=N       Явный лимит MemoryMax в GiB (по умолчанию MemTotal/4' \
                 '                      для поиска и 8 GiB для --models=FILE, --q-profile и --local-pca).' \
                 '  --results-dir=D     Путь к git-репозиторию results (по умолчанию ../results, если есть .git).' \
@@ -163,6 +178,15 @@ for arg in "$@"; do
         --resume-search=*) LP_RESUME="${arg#*=}"; LP_OPTS_SET=1 ;;
         --fit-alpha)       LP_FIT_ALPHA=1; LP_OPTS_SET=1 ;;
         --pca-components=*) LP_PCA="${arg#*=}"; LP_OPTS_SET=1 ;;
+        --rh-profile)      RHPROFILE=1 ;;
+        --rh-grid=*)       RP_GRID="${arg#*=}"; RP_OPTS_SET=1 ;;
+        --beta-grid=*)     RP_BETAS="${arg#*=}"; RP_OPTS_SET=1 ;;
+        --profile-box=*)   RP_BOX="${arg#*=}"; RP_OPTS_SET=1 ;;
+        --profile-starts=) echo "ОШИБКА: --profile-starts требует путь к файлу" >&2; exit 2 ;;
+        --profile-starts=*) RP_STARTS="${arg#*=}"; RP_OPTS_SET=1 ;;
+        --cell-budget=*)   RP_BUDGET="${arg#*=}"; RP_OPTS_SET=1 ;;
+        --cell-sobol=*)    RP_SOBOL="${arg#*=}"; RP_OPTS_SET=1 ;;
+        --resume-rh-profile=*) RP_RESUME="${arg#*=}"; RP_OPTS_SET=1 ;;
         --memory-gb=*)     MEMORY_GB="${arg#*=}" ;;
         --results-dir=*)   RESULTS_DIR="${arg#*=}"; GIT_RESULTS_MODE=1 ;;
         --git-results)     GIT_RESULTS_MODE=1 ;;
@@ -228,8 +252,8 @@ DRV_FLAG=""
 DRV_RESUME=""
 DRV_RESUME_FLAG=""
 DRV_STATE=""
-if [ "$QPROFILE" -eq 1 ] && [ "$LOCALPCA" -eq 1 ]; then
-    echo "ОШИБКА: --q-profile и --local-pca взаимоисключающие" >&2
+if [ $(( QPROFILE + LOCALPCA + RHPROFILE )) -gt 1 ]; then
+    echo "ОШИБКА: --q-profile, --local-pca и --rh-profile взаимоисключающие" >&2
     exit 2
 fi
 if [ "$QPROFILE" -eq 1 ]; then
@@ -238,6 +262,9 @@ if [ "$QPROFILE" -eq 1 ]; then
 elif [ "$LOCALPCA" -eq 1 ]; then
     DRIVER=1; DRV="localpca"; DRV_SCRIPT="run_local_pca.py"; DRV_FLAG="--local-pca"
     DRV_RESUME="$LP_RESUME"; DRV_RESUME_FLAG="--resume-search"; DRV_STATE="search_state.json"
+elif [ "$RHPROFILE" -eq 1 ]; then
+    DRIVER=1; DRV="rhprofile"; DRV_SCRIPT="run_rh_profile.py"; DRV_FLAG="--rh-profile"
+    DRV_RESUME="$RP_RESUME"; DRV_RESUME_FLAG="--resume-rh-profile"; DRV_STATE="rh_profile_state.json"
 fi
 if [ "$DRIVER" -eq 1 ]; then
     if { [ "$POT_LMAX" -ne 4 ] || [ "$POT_NGRID" -ne 23 ]; } && { [ "$POT_LMAX" -ne 24 ] || [ "$POT_NGRID" -ne 184 ]; }; then
@@ -302,6 +329,7 @@ resolve_input() {
     for cand in "${WORK_DIR}/${name}" "${RESULTS_DIR}/${name}" "${RESULTS_DIR}/logs/${name}" \
                 "${RESULTS_DIR}/logs/qprofile/${name}" "${RESULTS_DIR}/logs/seed/${name}" \
                 "${RESULTS_DIR}/logs/localpca/${name}" \
+                "${RESULTS_DIR}/logs/rhprofile/${name}" \
                 "${RESULTS_DIR}/logs/Q1d1_rh_bounds/${name}" "${RESULTS_DIR}/Q1d1_rh_bounds/${name}"; do
         if [ -f "$cand" ]; then
             printf '%s/%s' "$(cd "$(dirname "$cand")" && pwd)" "$(basename "$cand")"
@@ -326,8 +354,13 @@ if [ "$LOCALPCA" -eq 0 ] && [ "$LP_OPTS_SET" -eq 1 ]; then
          "--fit-alpha и --pca-components — только с --local-pca" >&2
     exit 2
 fi
+if [ "$RHPROFILE" -eq 0 ] && [ "$RP_OPTS_SET" -eq 1 ]; then
+    echo "ОШИБКА: --rh-grid, --beta-grid, --profile-box, --profile-starts, --cell-budget," \
+         "--cell-sobol и --resume-rh-profile — только с --rh-profile" >&2
+    exit 2
+fi
 if [ "$DRIVER" -eq 0 ] && [ "$SAVE_BELOW_SET" -eq 1 ]; then
-    echo "ОШИБКА: --save-below — только с --q-profile или --local-pca" >&2
+    echo "ОШИБКА: --save-below — только с --q-profile, --local-pca или --rh-profile" >&2
     exit 2
 fi
 if [ "$DRIVER" -eq 1 ]; then
@@ -341,7 +374,9 @@ if [ "$DRIVER" -eq 1 ]; then
         exit 2
     fi
     [ "$SAVE_ORBLIB" -eq 0 ] && QP_SAVE_BELOW="-1"
-    for f in "$DRV_SCRIPT" run_q_profile.py run_single_model.py; do
+    declare -a DRIVER_FILES=("$DRV_SCRIPT" run_q_profile.py run_single_model.py)
+    [ "$RHPROFILE" -eq 1 ] && DRIVER_FILES+=(run_local_pca.py)
+    for f in "${DRIVER_FILES[@]}"; do
         if [ ! -f "${WORK_DIR}/${f}" ]; then
             echo "ОШИБКА: нужны ${WORK_DIR}/${DRV_SCRIPT}, run_q_profile.py и run_single_model.py" >&2
             exit 2
@@ -444,6 +479,26 @@ if [ "$QPROFILE" -eq 1 ]; then
     fi
 fi
 
+if [ "$RHPROFILE" -eq 1 ]; then
+    declare -a QP_INPUT_ARGS=(--incl "$INCL")
+    [ -n "$RP_GRID" ] && QP_INPUT_ARGS+=(--rh-grid "$RP_GRID")
+    [ -n "$RP_BETAS" ] && QP_INPUT_ARGS+=(--beta-grid "$RP_BETAS")
+    [ -n "$RP_BOX" ] && QP_INPUT_ARGS+=(--profile-box "$RP_BOX")
+    [ -n "$RP_BUDGET" ] && QP_INPUT_ARGS+=(--cell-budget "$RP_BUDGET")
+    [ -n "$RP_SOBOL" ] && QP_INPUT_ARGS+=(--cell-sobol "$RP_SOBOL")
+    if [ -n "$RP_STARTS" ]; then
+        if ! RP_STARTS="$(resolve_input "$RP_STARTS")"; then
+            echo "ОШИБКА: не найден файл --profile-starts" >&2
+            exit 2
+        fi
+        QP_INPUT_ARGS+=(--profile-starts "$RP_STARTS")
+    fi
+    if ! QP_PLAN="$(python3 "${WORK_DIR}/run_rh_profile.py" --dry-run "${QP_INPUT_ARGS[@]}")"; then
+        echo "ОШИБКА: run_rh_profile.py --dry-run отверг входные данные" >&2
+        exit 2
+    fi
+fi
+
 declare -a MODEL_ROWS=() M_INCL=() M_Q=() M_GH=() M_RH=() M_RHO0=() M_PEN=() M_UPS=() M_SRC=() M_SUFFIXES=() M_REPORTS=()
 NMODELS=0
 if [ -n "$MODELS_FILE" ]; then
@@ -534,6 +589,13 @@ if [ "$DRIVER" -eq 1 ]; then
     fi
     PROFILE_NAME="$(basename "$PROFILE_DIR")"
     QP_STORE="${WORK_DIR}/orblib_${DRV}/${PROFILE_NAME}"
+    if [ "$RHPROFILE" -eq 1 ] && [ "$QP_IS_RESUME" -eq 1 ]; then
+        if ! QP_PLAN="$(python3 "${WORK_DIR}/run_rh_profile.py" --dry-run --resume \
+                --state-dir "$PROFILE_DIR" "${QP_INPUT_ARGS[@]}")"; then
+            echo "ОШИБКА: профиль rh несовместим с --resume-rh-profile" >&2
+            exit 2
+        fi
+    fi
 fi
 UNIT="agama-tycho-${RUN_TAG//./p}-${TIMESTAMP}"
 LOGFILE="${WORK_DIR}/launch_tycho_${RUN_TAG}_${TIMESTAMP}.log"
@@ -609,6 +671,8 @@ preflight() {
             "общие .npz → ${ORBLIB_DIR} при penalty <= ${QP_SAVE_BELOW}"
         if [ "$QPROFILE" -eq 1 ]; then
             log "    finalists: ${QP_ENDPOINTS}; priors: ${QP_PRIORS:-нет}"
+        elif [ "$RHPROFILE" -eq 1 ]; then
+            log "    initial coordinates: ${RP_STARTS:-generic}; no imported penalties"
         else
             log "    box: ${LP_BOX}; prior states: ${LP_PRIOR_DIRS[*]:-нет}"
             log "    initial points: ${LP_INITIAL:-нет}"
@@ -627,6 +691,12 @@ preflight() {
             die "самопроверка BoTorch-предложения с линейными ограничениями не прошла (см. ${LOGFILE})"
         fi
         log "  ✓ BoTorch: предложение qLogNEI с ограничениями бокса"
+    fi
+    if [ "$RHPROFILE" -eq 1 ]; then
+        if ! "$PYTHON" "${WORK_DIR}/run_rh_profile.py" --self-test "${QP_INPUT_ARGS[@]}" >>"$LOGFILE" 2>&1; then
+            die "самопроверка BoTorch-предложения при фиксированном rh не прошла (см. ${LOGFILE})"
+        fi
+        log "  ✓ BoTorch: полный 4D-базис с фиксированным rh"
     fi
 
     if [ "$USE_SCOPE" -eq 1 ]; then
@@ -931,6 +1001,8 @@ if [ "$DRIVER" -eq 1 ]; then
     QP_LOG="${WORK_DIR}/runlog_${DRV}_${RUN_TAG}_${TIMESTAMP}.log"
     if [ "$QPROFILE" -eq 1 ]; then
         log "Профиль по Q: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
+    elif [ "$RHPROFILE" -eq 1 ]; then
+        log "Профили по rh: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
     else
         log "Локальный PCA-поиск: ${PROFILE_DIR} (resume=${QP_IS_RESUME}, ${THREADS_PER_PROC} потоков, save-below=${QP_SAVE_BELOW})"
     fi
@@ -967,7 +1039,15 @@ if [ "$DRIVER" -eq 1 ]; then
     LOG_REMOTE="${REMOTE_DIR}/${DRV}/${PROFILE_NAME}"
     declare -a QP_FILES=("$MONITOR_LOG" "$QP_LOG" "${WORK_DIR}/log_${HOSTNAME_ENV}_${EXP_ID}_${DRV}${TIMESTAMP}.txt")
     if [ "$GIT_RESULTS" -eq 0 ]; then
-        for f in "$PROFILE_DIR"/*; do QP_FILES+=("$f"); done
+        if [ "$RHPROFILE" -eq 1 ]; then
+            # Cell checkpoint basenames repeat; preserve the cell directories.
+            while IFS= read -r -d '' f; do
+                relative="${f#"${PROFILE_DIR}/"}"
+                upload "$f" "${LOG_REMOTE}/$(dirname "$relative")"
+            done < <(find "$PROFILE_DIR" -type f ! -name '*.tmp' -print0)
+        else
+            for f in "$PROFILE_DIR"/*; do QP_FILES+=("$f"); done
+        fi
     fi
     for f in "${QP_FILES[@]}"; do
         upload "$f" "$LOG_REMOTE"

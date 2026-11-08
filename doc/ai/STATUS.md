@@ -1,7 +1,7 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-07: free-alpha local search prepared
-(not run). Numerical results private; no calculations executed by the agent.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-08: diagnostic rh/beta profiles
+prepared (Q31), synthetic BoTorch preflight passed. No new AGAMA model calculations.
 
 ## Where the science stands
 
@@ -26,36 +26,35 @@ Rewritten at the end of every task; ≤60 lines. Update 2026-11-07: free-alpha l
 - Cusp audit: optimised fixed-gh=1 search done (seed 42) — strongly disfavoured, rho0 bound-conditional.
   Weak cusps: free-Q local search confirms a shallow plateau worse than the cores (not a proven barrier).
   The frozen alpha=2 family differs from literal NFW. See `results/logs/CUSP_ASSESSMENT_20261105.md`.
+- Free-alpha search completed: modest gain vs same-host alpha=2 control; high-alpha plateau reaches
+  the prior edge, gh/rh boundaries persist. PCA retains alpha, drops mostly gh. Private
+  `results/logs/localpca/localpca_alpha_…_20261107_232859/NOTES.md`; no precise alpha determination.
 
 ## Code state
 
-- Production and CONTRACT unchanged. Runner library check, `--require-library`,
-  `--ic-seeds` paired batches, git-backed `results/` (`harness/orblib_exp.md` §3d, §3g–§3h) as before.
+- Production and CONTRACT unchanged; library/seed/git-results protocols remain as in §3d, §3g–§3h.
 - Q profile (§3i, DECISIONS 2026-10-28): seed-42 CRN, trust-region BO per Q in the full box, continuation
   + Sobol/global starts, optional priors, isolated `qprofile_*` rows, `.npz` ≤ 3.5 (Q≠1), resume; `195cba8`.
 - Local PCA search (DECISIONS 2026-11-03, §3j): `run_local_pca.py` + `launch_tycho.sh --local-pca` —
-  TuRBO in a full 4D PCA basis inside a local box, seed 42 before every evaluation, Q-profile
-  seed-42 points as priors (context-checked), BoTorch self-test in preflight.
-- Explicit starts (DECISIONS 2026-11-04): `--initial-points=FILE` before Sobol, within the budget, resumable.
-- Fixed box parameters (DECISIONS 2026-11-06): `--box NAME=v:v` → k-dim PCA/GP/TuRBO over the free
-  ones (gh=1:1 search); all-free boxes bit-identical.
+  full 4D TuRBO, local box, seed 42, context-checked Q-profile priors, BoTorch self-test in preflight.
+- Explicit starts before Sobol (2026-11-04), fixed box parameters via NAME=v:v (2026-11-06), resumable.
 - Free alpha (DECISIONS 2026-11-07, §3k): `--local-pca --fit-alpha`, alpha ∈ [0.5, 3] (Hayashi), PCA 5→4
-  with the dropped PC pinned at the best point; alpha in library keys/metadata; legacy unchanged. 437 tests pass.
+  with the dropped PC pinned at the best point; alpha in library keys/metadata; legacy unchanged.
+- rh profiles (§3l, Q31): beta=3/4/7/10, 7 radii in existing bounds, full 4D nuisance PCA, no old penalties.
+  Beta in keys/metadata/history; per-cell resume, budget extension; prepared only, no dynamical run.
 
 ## Next steps (started by the user)
 
-1. Gray seed scan done (DECISIONS 2026-11-06/07). Optional: Q-valley transect across seeds.
-2. Cusps (tycho, seed 42) analysed: weak cusp worse than cores at every Q (`…_094514/NOTES.md`); optimised
-   gh=1 far worse still, only at extreme flattening and rho0=10 (`…_20261106_170728/NOTES.md`). Stop runs
-   with `systemctl … kill --signal=TERM`: Ctrl-C inside `agama.orbit` exits 130 (state intact).
-3. J-factor/mass comparison of the near-spherical vs compact families; rh=30/gh=0 bound question; other incl.
-   Free-alpha run (80 evals) ready: private `results/logs/localpca/HANDOFF_LOCALPCA_ALPHA.md`; user preflight.
-4. New host fornax-dwarf (Ryzen 7900X): native AGAMA in `~gala` (env `agamaBoTorch`), all checks passed
-   (DECISIONS 2026-11-07, §3g); repos cloned with write access; `TZ=Europe/Moscow` for `gala` (system UTC);
-   free-alpha run there with ≤ 8 cores / 44 GiB. User: preflight, seed-42 control.
+1. Deliver prepared rh/beta code/starts, then run after preflight when requested; up to 672 evaluations.
+   Private `results/logs/rhprofile/HANDOFF_RH_BETA.md`. Radial J/outer-tracer follow-ups: Q32.
+2. J-factor/mass comparison of near-spherical vs compact families; rh=30/gh=0 bounds; other incl.
+   A variable-alpha J calculation needs separate treatment; production remains frozen.
+3. fornax-dwarf native AGAMA (`~gala`, `agamaBoTorch`) has completed its first search and seed-42 control.
+   Repos have write access; `TZ=Europe/Moscow` for gala (system UTC); taskset ≤8 cores / scope ≤44 GiB.
+   Stop via `systemctl … kill --signal=TERM`: Ctrl-C inside `agama.orbit` exits 130 (state intact).
 
 ## Open questions
 
 Q15 (Upsilon Brent → production), Q16 (J weighting), Q17–Q19 (shards, `ic`/`inttime`, naming),
-Q20 (production `pipefail`), Q23 (OpenMP wrap in production) — see `questions_for_pi.md`.
-Decided (`DECISIONS.md`): Q21, Q22, Q28–Q30, TR bound, PCA std floor, git-results sync, Q profile, local PCA, gray seed scan, free alpha.
+Q20 (production `pipefail`), Q23 (OpenMP wrap), Q32 (radial J/outer tracers) — see `questions_for_pi.md`.
+Decided (`DECISIONS.md`): Q21, Q22, Q28–Q31, TR bound, PCA std floor, git sync, Q profile, local PCA, gray seeds, free alpha.

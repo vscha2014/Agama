@@ -245,7 +245,8 @@ def read_models(path, bounds=None):
 # --------------------------------------------------------------------------
 _COMMENT_KEYS = (('orbitlib times', 'orbitlib'), ('orblib saved:', 'saved'),
                  ('orblib reused:', 'reused'), ('solveOpt summary:', 'solveopt'),
-                 ('orblib archive-first-wins:', 'archived_rebuild'), ('halo alpha:', 'halo_alpha'))
+                 ('orblib archive-first-wins:', 'archived_rebuild'), ('halo alpha:', 'halo_alpha'),
+                 ('halo beta:', 'halo_beta'))
 
 
 def _key_values(text):
@@ -371,12 +372,13 @@ def run_protocol(mod, name, params, files, seed, rng_factory, ic_seed=None):
             # the seed only (not on order or on earlier evaluations).
             mod.agama.setRandomSeed(int(ic_seed))
         start = time.perf_counter()
-        # Explicit alpha (run_local_pca.py --fit-alpha) goes to the objective's
-        # alphah argument; the module default stays untouched.
+        # Explicit diagnostic shape parameters go to the objective arguments;
+        # module defaults stay untouched.
         alphah = mod.alphah if params.get('alpha') is None else float(params['alpha'])
+        betah = mod.betah if params.get('beta') is None else float(params['beta'])
         value = mod.halo_IC_lib_weights_pca_fixed(
             pc, None, mod.bounds_original, mod.densityStars, mod.datasets,
-            alphah, mod.betah, direct_params=dict(params))
+            alphah, betah, direct_params=dict(params))
         wall = time.perf_counter() - start
     finally:
         for key, value_saved in saved.items():
@@ -388,6 +390,8 @@ def run_protocol(mod, name, params, files, seed, rng_factory, ic_seed=None):
                             penalty=penalty if block is not None else None)
     if params.get('alpha') is not None and block.get('halo_alpha', {}).get('alpha') != float(params['alpha']):
         raise ProtocolError(f"{name}: history block does not record alpha={params['alpha']!r}")
+    if params.get('beta') is not None and block.get('halo_beta', {}).get('beta') != float(params['beta']):
+        raise ProtocolError(f"{name}: history block does not record beta={params['beta']!r}")
     orbitlib = block.get('orbitlib', {})
     result = dict(
         penalty=penalty, upsilon=block['row'][5], probes=mod.number_of_find_w_U - probes,

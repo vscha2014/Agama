@@ -815,6 +815,67 @@ Tests: `test_local_pca.py` (`*alpha*`), `test_single_model.py` (`*alpha*`), `tes
   not a profile; the result is conditional on the local box and on gh=0/rh=30. Penalty is not χ²;
   Hayashi's range is a prior, not a confidence interval. Production J-factor code assumes alpha=2.
 
+## 3l. rh profiles with fixed beta (`run_rh_profile.py`, `launch_tycho.sh --rh-profile`)
+
+Prepared at the user's request (2026-11-08, Q31); this is an opt-in diagnostic.
+Production, CONTRACT, default `alphah=2`, `betah=3`, apertures and physical bounds
+remain unchanged. No previous alpha/beta penalty is imported.
+
+- Default grid: beta=3,4,7,10; rh=0.5,1,2,5,10,20,30 kpc. `--beta-grid` accepts
+  increasing subsets of those four values; `--rh-grid` must increase within
+  the current physical rh interval. At every grid point, Q/gh/rho0 span the full
+  `bounds_original` ranges and alpha spans [0.5,3]. `--profile-box` may restrict
+  the five-coordinate domain within these ranges; all spans must be free
+  before rh is fixed at each grid point.
+- `--profile-starts=FILE`: coordinates `Q gh rh rho0 alpha` (no penalties).
+  rh is projected to each grid value. Without a file, a generic central-box
+  core start is used. The private run handoff supplies representative finalists.
+- Evaluator/protocol: same `run_q_profile.build_evaluator` (one import, L24/N184),
+  seed 42 before every evaluation, `exp` Upsilon protocol with its final full
+  solve. `run_single_model.run_protocol` passes explicit beta to the objective
+  and verifies its history comment. The objective validates beta in [3,10]
+  against its `betah` argument before any density/orbit work.
+- Search: one `run_local_pca.Search` per `(beta,rh)`. Fixed rh leaves four free
+  coordinates `(Q, gh, log10 rho0, alpha)`; PCA retains **all four** components.
+  The reduced 5→4 alpha-search approximation is not used here.
+  Beta branches increase; within each branch rh decreases. Up to one extra
+  starting point comes from the nearest larger rh, or from the previous beta
+  at maximum rh when beginning a new beta branch. Duplicate start coordinates
+  are evaluated once per cell; existing result rows are never removed.
+- Default budget: at most 24 evaluations per cell, 8 of them Sobol, then TuRBO
+  after the starts; 28 cells, at most 672 new evaluations. Every cell uses the
+  same Sobol sequence in nuisance coordinates. `--cell-budget` and
+  `--cell-sobol` control these counts. No successful start/Sobol evaluation ⇒
+  `no_valid_model`, no reported minimum for that cell. Repeated actual failures
+  stop the entire run; rejected cusp evaluations are counted separately.
+- Histories `rhprofile_*` are isolated from ordinary pools. Explicit beta enters
+  `orblib_key` via `_beta-v1_<repr>` and `.npz` metadata alongside alpha, including
+  beta=3. Missing/mismatched beta cannot satisfy the expected metadata.
+  Names without beta and default alpha-only behaviour are unchanged.
+  Libraries are published after evaluation under the usual penalty/disk/Q≠1
+  policy; `--no-save-orblib` disables publishing.
+- Output: `logs/rhprofile/<run>/rh_profile_state.json`, per-cell
+  `beta_<repr>_rh_<repr>/search_state.json` (atomic after every evaluation) and
+  `search.tsv` with alpha/beta, plus shared `rhprofile_<hostname_proc>.txt`.
+  `rh_profile.tsv` / `report_rhprofile.json/.txt` contain minima, nuisance
+  parameters, Upsilon, rho0×Upsilon, failure/rejection counts and boundary flags.
+  `--summarize DIR` regenerates derived summaries from checkpoints using stdlib.
+- Resume: `--resume-rh-profile=DIR`; same grids/box/starts/seeds required.
+  Omitted `--cell-budget` inherits the stored value; larger extends all cells,
+  smaller is refused. Each cell's continuation coordinates are pinned when
+  first created, including on budget extension. The manifest checks
+  EXP_ID/GEOM_HASH/evaluation context and hashes of the harness and driver
+  dependencies; changed code/context requires a separate run.
+- Launcher: one worker in the existing CPU/memory scope; preflight runs a
+  synthetic constrained full-4D BoTorch self-test, without AGAMA evaluation.
+  Git delivery and offline bundles preserve cell subdirectories; rclone
+  delivery also preserves them, avoiding collisions between `search_state.json`
+  basenames. Usual exit statuses: 75 stopped with checkpoint, 1 failure.
+- Interpretation: budget-limited upper estimates of minima, not calibrated
+  confidence curves. Report grid edges and nuisance boundaries; beta=3 at the
+  top rh edge does not demonstrate a data-constrained upper J. No J calculation
+  or change to the frozen J definitions is part of this driver.
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -826,9 +887,9 @@ Tests: `test_local_pca.py` (`*alpha*`), `test_single_model.py` (`*alpha*`), `tes
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
     test_orblib_storage.py test_single_model.py test_launch_tycho.py test_q_profile.py \
-    test_local_pca.py --rootdir=. --import-mode=importlib -p no:cacheprovider
+    test_local_pca.py test_rh_profile.py --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
-    py/orblib_storage.py py/run_single_model.py py/run_q_profile.py py/run_local_pca.py \
+    py/orblib_storage.py py/run_single_model.py py/run_q_profile.py py/run_local_pca.py py/run_rh_profile.py \
     tests/test_orblib_q1.py
 bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
     && bash -n py/launch_multi_model.sh && bash -n py/launch_tycho.sh && git diff --check

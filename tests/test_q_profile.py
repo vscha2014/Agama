@@ -688,6 +688,13 @@ def test_save_library_with_explicit_alpha_uses_its_own_name_and_metadata(tmp_pat
     for a, info in infos.items():
         assert info['name'] == mod.orblib_key(0.5, **params, alpha=a)[0]
         assert storage.metadata(shared / info['name'])['alpha'] == a
+    beta_names = set()
+    for beta in (3.0, 4.0, 7.0, 10.0):
+        info = rqp.save_library(mod, storage, _capture(), 0.5, dict(params, alpha=2., beta=beta),
+                                1.9, str(shared), 3.5, 0)
+        assert storage.metadata(shared / info['name'])['beta'] == beta
+        beta_names.add(info['name'])
+    assert len(beta_names | names) == 7
 
 
 @pytest.mark.parametrize('case, expected', [

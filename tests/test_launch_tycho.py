@@ -35,12 +35,18 @@ case " $* " in
 esac
 echo "python $* OMP=$OMP_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS" >> "$HOME/events"
 case " $* " in
-    *run_q_profile.py*|*run_local_pca.py*)
+    *run_q_profile.py*|*run_local_pca.py*|*run_rh_profile.py*)
         state=""; prev=""
         for a in "$@"; do [ "$prev" = "--state-dir" ] && state="$a"; prev="$a"; done
         mkdir -p "$state"
         case " $* " in
             *run_q_profile.py*) echo '{"status": "done"}' > "$state/profile_state.json" ;;
+            *run_rh_profile.py*)
+                echo '{"status": "done"}' > "$state/rh_profile_state.json"
+                for cell in beta_3.0_rh_30.0 beta_4.0_rh_30.0; do
+                    mkdir -p "$state/$cell"
+                    echo '{"status": "done"}' > "$state/$cell/search_state.json"
+                done ;;
             *) echo '{"status": "done"}' > "$state/search_state.json" ;;
         esac
         echo "driver done"
@@ -915,3 +921,103 @@ def test_local_pca_fit_alpha_refuses_explicit_prior_states(tmp_path):
     result, events, _ = run(tmp_path, '--threads=4', '--local-pca', '--fit-alpha', LP_ALPHA_BOX, '--offline',
                             '--prior-states=states/a', setup=setup)
     assert result.returncode == 2 and not events, output(result)
+
+
+def copy_rh_profile(work):
+    copy_local_pca(work)
+    (work / 'run_rh_profile.py').write_text((ROOT / 'py/run_rh_profile.py').read_text())
+
+
+def test_rh_profile_passes_limits_inputs_and_delivers_nested_checkpoints_to_git(tmp_path):
+    remote, results = results_repo(tmp_path, {'logs/rhprofile/starts.txt': LP_ALPHA_INITIAL})
+
+    def setup(work):
+        copy_rh_profile(work)
+        (tmp_path / 'meminfo').write_text('MemTotal:       64000000 kB\nMemAvailable:   62000000 kB\n')
+        (tmp_path / 'cgfs/user.slice/agama-test.scope/cpu.max').write_text('1600000 100000\n')
+
+    result, events, work = run(tmp_path, '--rh-profile', '--profile-starts=starts.txt',
+                               '--threads=16', '--memory-gb=44', '--cell-budget=24',
+                               '--rh-grid=0.5,1,2,5,10,20,30', '--beta-grid=3,4,7,10',
+                               setup=setup, memory_max='47244640256')
+    assert result.returncode == 0, output(result)
+    scope = next(e for e in events if e.startswith('systemd-run') and '--unit=' in e)
+    assert 'MemoryMax=47244640256' in scope.split() and 'CPUQuota=1600%' in scope.split()
+    assert 'MemorySwapMax=0' in scope
+    (argv,) = pythons(events)
+    name = 'rhprofile_d1_nb250_gh0_l24n184_ser0_i90.0_20261010_120000'
+    assert argv[2] == str(work / 'run_rh_profile.py')
+    assert argv[argv.index('--state-dir') + 1] == str(results / 'logs/rhprofile' / name)
+    assert argv[argv.index('--orblib-dir') + 1] == str(work / 'orblib_rhprofile' / name)
+    assert argv[argv.index('--profile-starts') + 1] == str(results / 'logs/rhprofile/starts.txt')
+    assert argv[argv.index('--cell-budget') + 1] == '24' and 'OMP=16' in argv
+    assert any(e.startswith('selftest ') and 'run_rh_profile.py' in e for e in events)
+    assert '--fit-alpha' not in argv and '--prior-states' not in argv
+    assert not list(work.glob('out_*'))
+    verify = tmp_path / 'verify'
+    subprocess.run(['git', 'clone', str(remote), str(verify)], check=True, capture_output=True)
+    delivered = verify / 'logs/rhprofile' / name
+    assert (delivered / 'rh_profile_state.json').exists()
+    assert len(list(delivered.glob('beta_*/search_state.json'))) == 2
+
+
+def test_rh_profile_resume_uses_stored_budget_and_offline_bundle_keeps_cells(tmp_path):
+    import importlib.util
+    import json
+    name = 'rhprofile_old'
+
+    def setup(work):
+        copy_rh_profile(work)
+        spec = importlib.util.spec_from_file_location('rh_launch_fixture', ROOT / 'py/run_rh_profile.py')
+        driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(driver)
+        config = driver.build_config(driver.parse_args(['--cell-budget', '32']), driver.rsm.script_bounds())
+        directory = work / 'rhprofile' / name
+        directory.mkdir(parents=True)
+        (directory / 'rh_profile_state.json').write_text(json.dumps(dict(config=config, context={})))
+
+    result, events, work = run(tmp_path, '--rh-profile', '--threads=4', '--offline',
+                               f'--resume-rh-profile={name}', '--no-save-orblib', setup=setup)
+    assert result.returncode == 0, output(result)
+    (argv,) = pythons(events)
+    assert '--resume' in argv and '--cell-budget' not in argv
+    assert argv[argv.index('--save-below') + 1] == '-1'
+    assert '<= 896 new evaluations' in next(work.glob('launch_tycho_rhprofile_*.log')).read_text()
+    assert not any(e.startswith('rclone ') for e in events)
+    bundle = next(work.glob('tycho_results_rhprofile_*.tar.gz'))
+    listing = subprocess.run(['tar', '-tzf', str(bundle)], capture_output=True, text=True, check=True).stdout
+    assert f'rhprofile/{name}/beta_3.0_rh_30.0/search_state.json' in listing
+    assert f'rhprofile/{name}/beta_4.0_rh_30.0/search_state.json' in listing
+
+
+def test_rh_profile_rclone_delivery_keeps_repeated_checkpoint_names_distinct(tmp_path):
+    result, events, _ = run(tmp_path, '--rh-profile', '--threads=4', '--no-git-results', setup=copy_rh_profile)
+    assert result.returncode == 0, output(result)
+    uploads = [e for e in events if e.startswith('rclone copyto ') and '/search_state.json' in e]
+    assert len(uploads) == 2
+    assert all('/beta_' in line.split()[3] for line in uploads)
+    assert len({line.split()[3] for line in uploads}) == 2
+
+
+@pytest.mark.parametrize('args', [
+    ('--rh-grid=1,30',),
+    ('--rh-profile', '--q-profile'),
+    ('--rh-profile', '--local-pca', LP_BOX),
+    ('--rh-profile', '--fit-alpha'),
+    ('--rh-profile', '--Q1'),
+    ('--rh-profile', '--beta-grid=3,5,10'),
+    ('--rh-profile', '--rh-grid=1,31'),
+    ('--rh-profile', '--cell-budget=4'),
+    ('--rh-profile', '--profile-starts=missing.txt'),
+    ('--rh-profile', '--profile-starts='),
+])
+def test_rh_profile_rejects_invalid_modes_and_plans_before_preflight(tmp_path, args):
+    result, events, _ = run(tmp_path, '--threads=4', *args, setup=copy_rh_profile)
+    assert result.returncode == 2 and not events, output(result)
+
+
+def test_rh_profile_preflight_refuses_a_failed_botorch_check_without_running_worker(tmp_path):
+    result, events, _ = run(tmp_path, '--rh-profile', '--threads=4', '--preflight',
+                            setup=copy_rh_profile, PY_SELFTEST='1')
+    assert result.returncode != 0 and not pythons(events)
+    assert any(e.startswith('selftest ') for e in events)

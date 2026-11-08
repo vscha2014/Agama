@@ -700,3 +700,28 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   `taskset -c 0-7,12-19` (cores 0–7 with SMT siblings) + `--threads=16` (CPUQuota 1600 %) and
   `--memory-gb=44` (44 GiB ≈ 47.2 GB, swap 0). conda is not on PATH there: activate via
   `source ~/miniforge3/etc/profile.d/conda.sh && conda activate agamaBoTorch` before the launcher.
+
+## 2026-11-08 — Q31: prepare diagnostic rh profiles at beta=3,4,7,10 (user)
+
+- **Request** | "Подготовь диагностические профили по rh для β=3,4,7,10".
+  Authorises experimental beta support and preparation, not a long AGAMA run,
+  a production change, an aperture change or a new J-factor definition.
+- **Implementation** | `run_rh_profile.py`, `launch_tycho.sh --rh-profile`;
+  harness §3l. Explicit beta in density evaluation, library key/metadata and
+  history. Even beta=3 is isolated from legacy libraries; defaults stay frozen.
+- **Initial diagnostic plan** | rh=0.5,1,2,5,10,20,30 within existing bounds;
+  nuisance Q/gh/rho0 use the full physical box and alpha [0.5,3].
+  Four free dimensions per fixed (beta,rh), full PCA 4→4; one TuRBO/GP per cell.
+  Incl=90, L24, seed-42 CRN and the existing Upsilon protocol.
+- **Budget/continuation** | Up to 24 evaluations per cell including 8 Sobol,
+  supplied initial coordinates and one neighbour continuation; max 672.
+  Starts supply coordinates only. Per-cell checkpoints; increasing the budget
+  extends every cell without replacing its original continuation coordinates.
+  Finite-budget minima remain upper estimates; boundary hits are explicit.
+- **Delivery** | Private starts and instructions in
+  `results/logs/rhprofile/{rh_beta_initial_points.txt,HANDOFF_RH_BETA.md}`.
+  Existing fornax-dwarf limits: 8 physical cores/16 SMT threads, 44 GiB, swap 0.
+  A synthetic full-4D BoTorch self-test passed on that host from a temporary
+  code copy, without importing/evaluating AGAMA; host repository untouched.
+- **Remaining** | Radial J decomposition and inclusion of outer tracers were
+  not requested in this preparation task; tracked separately in Q32.

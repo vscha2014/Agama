@@ -153,7 +153,7 @@ if GH_ID != 0 or SER_ID != 0:
 if SAVE_ORBLIB or REUSE_ORBLIB:
     os.makedirs(ORBLIB_DIR, exist_ok=True)
 
-def orblib_key(Q, gh, rh, rho0, alpha=None):
+def orblib_key(Q, gh, rh, rho0, alpha=None, beta=None):
     """Контент-ключ библиотеки орбит: имя .npz и путь в ORBLIB_DIR.
     ЕДИНАЯ точка для save и lookup. Ключ зависит от (Q, gh, rh, rho0,
     incl, DOUBLE, N_BIN, SER_ID, GEOM_HASH); НЕ зависит от gh_id (см.
@@ -164,10 +164,13 @@ def orblib_key(Q, gh, rh, rho0, alpha=None):
     исключена по построению, а не отлавливается постфактум при lookup.
     alpha задаётся только в экспериментальном режиме свободной alpha
     (run_local_pca.py --fit-alpha): тогда она входит в хэш с маркером схемы,
-    и даже alpha=2 не совпадает с прежними ключами; без alpha ключ прежний."""
+    и даже alpha=2 не совпадает с прежними ключами. Явная beta профиля по rh
+    имеет отдельный маркер; без явных alpha/beta ключ прежний."""
     _pkey  = f"{Q:.6g}_{gh:.6g}_{rh:.6g}_{rho0:.6g}"
     if alpha is not None:
         _pkey += f"_alpha-v1_{float(alpha)!r}"
+    if beta is not None:
+        _pkey += f"_beta-v1_{float(beta)!r}"
     _phash = hashlib.md5(_pkey.encode()).hexdigest()[:10]
     _pot_tag = '' if abs(float(Q) - 1.0) <= 1e-12 else globals().get('POT_TAG', '')
     name = (f"orblib_i{incl:.1f}_d{int(DOUBLE)}_nb{N_BIN}"
@@ -1090,6 +1093,8 @@ betah     = 3
 # (run_local_pca.py --fit-alpha; Hayashi et al. 2020, 2023: 0.5 <= alpha <= 3).
 # Научное значение по умолчанию alphah = 2 не меняется.
 ALPHA_FIT_BOUNDS = (0.5, 3.0)
+# Explicit beta in the diagnostic rh profiles; the default betah stays frozen.
+BETA_PROFILE_BOUNDS = (3.0, 10.0)
 
 numOrbits = 100000
 # Траектории не запрашиваются у agama.orbit (целевые матрицы накапливает
@@ -1501,10 +1506,23 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
             raise ValueError(f'explicit alpha={alpha_fit!r} outside {ALPHA_FIT_BOUNDS}')
         if alpha_fit != float(alphah):
             raise ValueError(f'explicit alpha={alpha_fit!r} differs from the alphah argument {alphah!r}')
+    beta_fit = params.get('beta') if direct_params is not None else None
+    if beta_fit is not None:
+        beta_fit = float(beta_fit)
+        if not (numpy.isfinite(beta_fit) and BETA_PROFILE_BOUNDS[0] <= beta_fit <= BETA_PROFILE_BOUNDS[1]):
+            raise ValueError(f'explicit beta={beta_fit!r} outside {BETA_PROFILE_BOUNDS}')
+        if beta_fit != float(betah):
+            raise ValueError(f'explicit beta={beta_fit!r} differs from the betah argument {betah!r}')
+    halo_shape = {}
+    if alpha_fit is not None:
+        halo_shape['alpha'] = alpha_fit
+    if beta_fit is not None:
+        halo_shape['beta'] = beta_fit
     
 #    print(f"PCA coords: {pc_coords}")
     print(f"  → Q={Q:.4f}, gh={gh:.4f}, rh={rh:.4f}, rho0={rho0:.4f}"
-          + ('' if alpha_fit is None else f", alpha={alpha_fit:.4f}"))
+          + ('' if alpha_fit is None else f", alpha={alpha_fit:.4f}")
+          + ('' if beta_fit is None else f", beta={beta_fit:.4f}"))
     _ol_build_fp = None
     _storage_claim = None
     store = globals().get('orblib_store')
@@ -1550,8 +1568,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
         # --- Lookup сохранённой библиотеки орбит (--reuse-orblib) ---
         # ТОЛЬКО локальные файлы в ORBLIB_DIR (никакой сети в горячем цикле);
         # синхронизацию с Я.Диском делает оркестратор до/после запуска.
-        _ol_name, _ol_path = (orblib_key(Q, gh, rh, rho0) if alpha_fit is None
-                              else orblib_key(Q, gh, rh, rho0, alpha=alpha_fit))
+        _ol_name, _ol_path = orblib_key(Q, gh, rh, rho0, **halo_shape)
         _archived = False
         if store is not None:
             try:
@@ -1564,8 +1581,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                  degree=degree, ghorder=ghorder,
                                  gridv_md5=hashlib.md5(gridv.tobytes()).hexdigest(),
                                  gridv_dtype=gridv.dtype.str)
-                if alpha_fit is not None:
-                    _expected['alpha'] = alpha_fit
+                _expected.update(halo_shape)
                 _archived = store.archived(_ol_name, _expected)
                 _bytes = int(1.1 * 8 * numOrbits * (7 + sum(len(d.target) for d in datasets))) + 1048576
                 _storage_claim = store.claim(_ol_name, 0 if _archived or os.path.exists(_ol_path) else _bytes)
@@ -1591,9 +1607,9 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                     _meta_exp = dict(incl=float(incl), double=int(DOUBLE),
                                      n_bin=N_BIN, ser_id=SER_ID,
                                      numOrbits=int(numOrbits))
-                    if alpha_fit is not None:
-                        _meta['alpha'] = float(_npz['alpha']) if 'alpha' in _npz.files else None
-                        _meta_exp['alpha'] = alpha_fit
+                    for _shape_key, _shape_value in halo_shape.items():
+                        _meta[_shape_key] = float(_npz[_shape_key]) if _shape_key in _npz.files else None
+                        _meta_exp[_shape_key] = _shape_value
                     if _meta == _meta_exp:
                         matrices = [numpy.asarray(_npz['matrix_dens']),
                                     numpy.asarray(_npz['matrix_kinem'])]
@@ -1700,7 +1716,7 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                                              intTime=intTime, gridv=gridv,
                                              degree=degree, ghorder=ghorder,
                                              n_bin=N_BIN, double=int(DOUBLE), ser_id=SER_ID,
-                                             **({} if alpha_fit is None else dict(alpha=alpha_fit))))
+                                             **halo_shape))
                                     _fh.flush()
                                     os.fsync(_fh.fileno())
                                 break
@@ -1851,6 +1867,8 @@ def halo_IC_lib_weights_pca_fixed(pc_coords, model_data, bounds_original,
                 f"{min_Ups:0.15f} {min_pen:0.15f} {datetime.datetime.now()}\n")
         if alpha_fit is not None:
             f.write(f"# halo alpha: alpha={alpha_fit!r}\n")
+        if beta_fit is not None:
+            f.write(f"# halo beta: beta={beta_fit!r}\n")
         pc_str = " ".join([f"{x:.6f}" for x in numpy.atleast_1d(pc_coords)])
         f.write(f"# PCA: {pc_str}\n")
         f.write("# Optimization history (Upsilon values -> function values):\n")

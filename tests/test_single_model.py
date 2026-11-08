@@ -313,6 +313,8 @@ def test_protocols_on_one_integration_with_the_real_objective(tmp_path, monkeypa
 # --------------------------------------------------------------------------
 ALPHA_FIT_BOUNDS = next(ast.literal_eval(n.value) for n in TREE.body if isinstance(n, ast.Assign)
                         and any(getattr(t, 'id', None) == 'ALPHA_FIT_BOUNDS' for t in n.targets))
+BETA_PROFILE_BOUNDS = next(ast.literal_eval(n.value) for n in TREE.body if isinstance(n, ast.Assign)
+                           and any(getattr(t, 'id', None) == 'BETA_PROFILE_BOUNDS' for t in n.targets))
 ALPHA_PARAMS = dict(Q=0.95, gh=0.0, rh=20.0, rho0=30.0)
 
 
@@ -321,6 +323,7 @@ def alpha_module(tmp_path, monkeypatch):
     store = storage.Store(str(tmp_path / 'orblib_single/T_r0'), 0, save_slots=2)
     mod, calls = real_halo_module(tmp_path, store)
     mod.ALPHA_FIT_BOUNDS = ALPHA_FIT_BOUNDS
+    mod.BETA_PROFILE_BOUNDS = BETA_PROFILE_BOUNDS
     calls.density = []
     mod.agama.Density = lambda *a, **kw: calls.density.append(kw) if kw else None
     files = dict(pool=str(tmp_path / mod.UpsFile), side=str(tmp_path / 'side.txt'))
@@ -378,6 +381,58 @@ def test_explicit_alpha_must_match_the_alphah_argument(tmp_path, monkeypatch):
     assert calls.orbit == 0
 
 
+@pytest.mark.parametrize('beta', [3.0, 4.0, 7.0, 10.0])
+def test_profile_beta_reaches_density_history_and_library(tmp_path, monkeypatch, beta):
+    mod, calls, files = alpha_module(tmp_path, monkeypatch)
+    result = runner.run_protocol(mod, 'exp', dict(ALPHA_PARAMS, alpha=2.75, beta=beta),
+                                 files, 1, numpy.random.default_rng)
+    assert result['saved'] and calls.density[0]['beta'] == beta
+    assert calls.density[0]['alpha'] == 2.75 and mod.betah == 3 and mod.alphah == 2.0
+    assert f'# halo beta: beta={beta!r}' in Path(files['pool']).read_text()
+    name, path = mod.orblib_key(*ALPHA_PARAMS.values(), alpha=2.75, beta=beta)
+    assert name != mod.orblib_key(*ALPHA_PARAMS.values(), alpha=2.75)[0]
+    assert storage.metadata(path)['beta'] == beta
+    assert storage.compatible_metadata(storage.metadata(path), dict(alpha=2.75, beta=beta))
+    assert not storage.compatible_metadata(storage.metadata(path), dict(beta=beta + 0.1))
+    assert len({mod.orblib_key(*ALPHA_PARAMS.values(), alpha=2.75, beta=b)[0]
+                for b in (3.0, 4.0, 7.0, 10.0)}) == 4
+
+
+@pytest.mark.parametrize('beta', [2.9, 10.1, float('nan'), float('inf')])
+def test_invalid_profile_beta_fails_before_density_or_orbits(tmp_path, monkeypatch, beta):
+    mod, calls, files = alpha_module(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match='explicit beta'):
+        runner.run_protocol(mod, 'exp', dict(ALPHA_PARAMS, beta=beta), files, 1, numpy.random.default_rng)
+    assert calls.orbit == 0 and not calls.density and not os.path.exists(files['pool'])
+
+
+def test_explicit_beta_must_match_argument_and_default_stays_frozen(tmp_path, monkeypatch):
+    mod, calls, _ = alpha_module(tmp_path, monkeypatch)
+    assert BETA_PROFILE_BOUNDS == (3.0, 10.0)
+    assert next(ast.literal_eval(n.value) for n in TREE.body if isinstance(n, ast.Assign)
+                and any(getattr(t, 'id', None) == 'betah' for t in n.targets)) == 3
+    with pytest.raises(ValueError, match='differs from the betah argument'):
+        mod.halo_IC_lib_weights_pca_fixed(None, None, mod.bounds_original, mod.densityStars, mod.datasets,
+                                          2.0, 3, direct_params=dict(ALPHA_PARAMS, beta=4.0))
+    assert calls.orbit == 0
+
+
+@pytest.mark.parametrize('recorded', [None, 3.0])
+def test_profile_protocol_refuses_missing_or_wrong_beta_provenance(tmp_path, monkeypatch, recorded):
+    mod, _, files = alpha_module(tmp_path, monkeypatch)
+    parse = runner.parse_last_block
+
+    def stale_history(*args):
+        block = parse(*args)
+        block['halo_beta'] = {} if recorded is None else dict(beta=recorded)
+        return block
+
+    monkeypatch.setattr(runner, 'parse_last_block', stale_history)
+    with pytest.raises(runner.ProtocolError, match='history block does not record beta'):
+        runner.run_protocol(mod, 'exp', dict(ALPHA_PARAMS, alpha=2., beta=7.),
+                            files, 1, numpy.random.default_rng)
+
+
 def test_metadata_reads_optional_alpha_and_rejects_a_legacy_library_for_explicit_alpha(tmp_path):
     def write(path, **extra):
         with zipfile.ZipFile(path, 'w') as archive:
@@ -390,10 +445,14 @@ def test_metadata_reads_optional_alpha_and_rejects_a_legacy_library_for_explicit
                     numpy.lib.format.write_array(member, numpy.zeros((2, 3)))
     write(tmp_path / 'legacy.npz')
     write(tmp_path / 'alpha.npz', alpha=1.25)
+    write(tmp_path / 'beta.npz', alpha=1.25, beta=7.0)
     legacy, alpha = storage.metadata(tmp_path / 'legacy.npz'), storage.metadata(tmp_path / 'alpha.npz')
     assert 'alpha' not in legacy and alpha['alpha'] == 1.25
     assert storage.compatible_metadata(legacy, dict(Q=1.0)) and not storage.compatible_metadata(legacy, dict(alpha=2.0))
     assert storage.compatible_metadata(alpha, dict(alpha=1.25)) and not storage.compatible_metadata(alpha, dict(alpha=2.0))
+    assert 'beta' not in legacy and not storage.compatible_metadata(legacy, dict(beta=3.0))
+    assert not storage.compatible_metadata(alpha, dict(beta=3.0))
+    assert storage.compatible_metadata(storage.metadata(tmp_path / 'beta.npz'), dict(alpha=1.25, beta=7.0))
 
 
 # --------------------------------------------------------------------------
