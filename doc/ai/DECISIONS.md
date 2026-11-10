@@ -741,3 +741,27 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Deferred** | Stage B (compact family at rh=2,5); beta=4,7 only if beta=3 and 10 disagree;
   paired IC-seed check of refined optima if the profile is flat at the 0.001–0.01 level.
 - **Delivery** | Private `results/logs/rhprofile/{rh_local_extended_starts.txt,HANDOFF_RH_LOCAL_A.md}`.
+
+## 2026-11-10 — Inclination fan: shared orbit basis, scope and driver (user)
+
+- **Question asked** | Can the same orbit libraries be reused for other inclinations if the
+  change of the stellar shape turns out to be unimportant?
+- **Finding (code, not opinion)** | Stored `.npz` cannot be reused at another inclination at
+  all: `TargetLOSVD::addPoint` applies the `(alpha,beta,gamma)` rotation during integration
+  and `finalizeDatacube` folds the cube into apertures, so the projection lives inside
+  `matrix_kinem`, and trajectories are not recorded. Reuse can only mean sharing everything
+  before the projection (potential, ICs, integration: `orbit_s ≈ 400 s` vs `solveOpt ≈ 11 s`),
+  i.e. one `agama.orbit` call with one LOSVD target per inclination.
+- **Refinement of the premise** | The shape question is narrower than it looked: the
+  observations do not depend on `incl` (doc 07 §2), and the aperture masses and
+  `DensityDataset` constraints are rebuilt from the exact `axRZst(i)` of each member for
+  free. Only E1 (stellar quadrupole in the potential) and E2 (IC sampling density, a basis
+  choice) stay approximate; the reference member remains exact.
+- **User answers** | Range 70–90° only; the purpose is numbers for the article; nothing is to
+  be run yet beyond the free diagnostics; the code goes into a new driver `py/run_incl_fan.py`.
+- **Delivered** | `py/run_incl_fan.py` (`--dry-run`/`--summarize` stdlib-only, `--diagnose`
+  without orbits, `--benchmark`, `--fan`) and `tests/test_incl_fan.py` (22 tests, no AGAMA).
+  Production, `CONTRACT` and the harness script are untouched; fan rows go to
+  `incl_fan_*.txt`, matched by no pool glob. Harness runbook §3m.
+- **Blocked** | Any fan run meant to produce article numbers waits for Q33 (A: screening only,
+  final numbers recomputed exactly; B: published with a measured E1+E2 systematic; C: no fan).

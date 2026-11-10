@@ -876,6 +876,36 @@ remain unchanged. No previous alpha/beta penalty is imported.
   top rh edge does not demonstrate a data-constrained upper J. No J calculation
   or change to the frozen J definitions is part of this driver.
 
+## 3m. Inclination fan (`run_incl_fan.py`, diagnostic, nothing run yet)
+
+- Why a stored library cannot be reused at another inclination: `TargetLOSVD::addPoint`
+  applies the `(alpha,beta,gamma)` rotation during integration and `finalizeDatacube`
+  folds the cube into apertures, so the projection is inside `matrix_kinem`; trajectories
+  are not recorded (`TRAJSIZE_STORED=0`). Shared instead: potential, ICs and the
+  integration — `orbit_s ≈ 400 s` against `solveOpt total ≈ 11 s` per model.
+- Scheme: one `agama.orbit` with `[DensitySphHarm] + [LOSVD(beta_i) for i in grid]`, then one
+  Upsilon search per member on the shared density matrix and that member's kinematic matrix.
+  Per-inclination datasets are built with the **exact** `axRZst(i)`, so aperture masses and
+  `DensityDataset.cons_val` are exact; the observations do not depend on `incl` at all.
+  Remaining approximations: E1 stellar quadrupole in the potential, E2 IC sampling density
+  (a basis choice). The reference member is an exact model; the others are not (Q33).
+- Modes: `--dry-run`/`--summarize` (stdlib only, run on the host), `--diagnose` (checks
+  D0 shape table, D1 aperture masses — exact-vs-exact is a pipeline control that must be
+  zero because `q_proj = q_ap` for every `incl`, D2 intrinsic constraints, D4 observational
+  invariance, and the E1 force/v_circ bound; **no orbits**), `--benchmark` (marginal time,
+  dtype and memory of an extra LOSVD target at small `--num-orbits`, plus bit-identity of
+  the first target), `--fan` (one integration per model row).
+- Isolation: the harness is imported through the existing `diagnostic=` hook contract only
+  for its static state; storage must be disabled (`--save-orblib`/`--reuse-orblib` are never
+  passed and an enabled store is refused). Rows go to `incl_fan_<host_proc>_i<ref>.txt`,
+  matched by no pool glob, with `exact=yes|no` per member and a "not for pooling" header.
+  `--incl-grid` is restricted to 70–90 deg (user decision 2026-11-10).
+- Cost model: `fan_s = orbit_s*(1+(K-1)*f) + K*solve_s`; `f` is unknown until `--benchmark`
+  and `--dry-run` refuses to quote a speedup without it. Memory: +0.52 GB per extra target
+  (float32, 100k orbits, 25 apertures x 52 b-splines), so large K trades workers for members.
+- Not done yet: the paired exact-vs-fan pilot that would turn E1+E2 into a number
+  (≥ 10 IC seeds per configuration against the IC scatter sd 0.019–0.044).
+
 ## 4. Editing rules
 
 - `bounds_original` is defined **twice** in the script — change both or neither.
@@ -887,10 +917,11 @@ remain unchanged. No previous alpha/beta penalty is imported.
 ```bash
 cd tests && ../.venv-ai/bin/python -m pytest -q test_orblib_q1.py \
     test_orblib_storage.py test_single_model.py test_launch_tycho.py test_q_profile.py \
-    test_local_pca.py test_rh_profile.py --rootdir=. --import-mode=importlib -p no:cacheprovider
+    test_local_pca.py test_rh_profile.py test_incl_fan.py \
+    --rootdir=. --import-mode=importlib -p no:cacheprovider
 cd .. && python3 -m py_compile py/Fornax_P21_PCA_w3Sersic_orblib_exp.py \
     py/orblib_storage.py py/run_single_model.py py/run_q_profile.py py/run_local_pca.py py/run_rh_profile.py \
-    tests/test_orblib_q1.py
+    py/run_incl_fan.py tests/test_orblib_q1.py
 bash -n py/launch_orblib_exp.sh && bash -n py/launch_single_model.sh \
     && bash -n py/launch_multi_model.sh && bash -n py/launch_tycho.sh && git diff --check
 ```

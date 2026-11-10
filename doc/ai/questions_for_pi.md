@@ -128,3 +128,33 @@ The last option adds assumptions or changes the quantity being reported.
 Recommendation: inspect the prepared beta/rh profiles, then A and B before
 tightening outer-halo priors. **Question:** which of these follow-ups should be
 implemented? Apertures, outer cutoff, J definitions and production remain frozen.
+
+## Q33. Shared orbit basis across inclinations (incl fan)  [affects: CONTRACT §Stellar component / paper numbers]
+
+A stored `.npz` cannot be reused at another inclination: `TargetLOSVD::addPoint`
+applies the `(alpha,beta,gamma)` rotation during integration, so the projection is
+baked into `matrix_kinem` and no trajectories are kept. What can be shared is the
+part before the projection — potential, orbit ICs and the integration itself,
+~97 % of a model (`orbit_s ≈ 400 s` vs `solveOpt ≈ 11 s`). `py/run_incl_fan.py`
+(diagnostic, production untouched) integrates once and passes one LOSVD target per
+inclination. The observational side is unaffected by `incl` (doc 07 §2, re-checked
+numerically), and the aperture masses and `DensityDataset` constraints are rebuilt
+from the **exact** `axRZst(i)` of each member, so only two approximations remain:
+E1 the stellar quadrupole in `Multipole(rho_star+rho_halo)` is that of the reference
+inclination (stars ≈ 10 % of the enclosed mass, only their flattening changes);
+E2 the ICs are sampled from the reference stellar density — a basis choice, not a
+constraint, since the weights are free. The reference member stays exact.
+For 70–90° with reference 80° the frozen shape mis-projects the isophotes by
+≤ 4.8 % in `q` (axRZst 0.638…0.690). Nothing has been run yet.
+
+Options: (A) fan only as a screening accelerator for `penalty(incl)` / the shift of
+the DM optimum, with the final published numbers recomputed exactly per inclination;
+(B) fan numbers published directly, with E1+E2 measured once (paired exact-vs-fan
+pilot, ≥ 10 IC seeds against the IC scatter sd ≈ 0.019–0.044) and quoted as a
+systematic; (C) no fan at all — every inclination keeps its own full integration.
+
+Recommendation: A, and run the stage-0 diagnostics (`--diagnose`, minutes of CPU,
+no orbits) plus the `--benchmark` before committing to anything; B only if the
+pilot shows the systematic to be below the IC scatter. **Question:** is a shared
+orbit basis acceptable for the article at all, and under which of A/B? Blocked
+until answered: any fan run intended to produce numbers for the paper.
