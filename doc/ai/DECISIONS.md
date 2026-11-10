@@ -725,3 +725,19 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   code copy, without importing/evaluating AGAMA; host repository untouched.
 - **Remaining** | Radial J decomposition and inclusion of outer tracers were
   not requested in this preparation task; tracked separately in Q32.
+
+## 2026-11-10 — Local refinement of the extended family at fixed rh, stage A (user)
+
+- **Request** | "создай файл стартов и инструкцию … Этап B пока не надо" after the completed
+  Q31 rh/beta profiles left most large-rh cell winners at their inherited starts.
+- **Design** | Existing `run_rh_profile.py` / `launch_tycho.sh --rh-profile`, no code change.
+  beta=3,10; rh=30,20,10,5 (continuation from larger rh); local search box
+  Q 0.93–1.05, gh 0–0.05, rho0 25–70, alpha 1.5–3 (optimisation aid, physical bounds unchanged).
+  20 evaluations/cell: 2 starts + ≤1 continuation + 4 Sobol + TuRBO; ≤160 total; `.npz` only
+  at penalty ≤ 1.25. Seed-42 CRN, L24, incl=90, apertures and Upsilon protocol unchanged.
+- **rh stays fixed per cell** | A free local rh drifts to the upper edge of its window
+  (the free-rh [10,30] alpha search ended at 29.93), and PCA 5→4 would pin a data-dependent
+  direction at the anchor. Full 4D PCA per fixed (beta, rh) keeps the profile well defined.
+- **Deferred** | Stage B (compact family at rh=2,5); beta=4,7 only if beta=3 and 10 disagree;
+  paired IC-seed check of refined optima if the profile is flat at the 0.001–0.01 level.
+- **Delivery** | Private `results/logs/rhprofile/{rh_local_extended_starts.txt,HANDOFF_RH_LOCAL_A.md}`.

@@ -1,19 +1,18 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-08: diagnostic rh/beta profiles
-prepared (Q31), synthetic BoTorch preflight passed. No new AGAMA model calculations.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-10: completed rh/beta profiles
+downloaded and analysed; upper-radius direction remains open. No new calculations in this analysis.
 
 ## Where the science stands
 
 - Completed free-Q L24 and spherical Q1 searches at incl=90 provide two finalists; their
   historical minima do not calibrate IC uncertainty. Numerical results remain in results/.
-- Paired seed scan favours the old free-Q finalist over the strict-spherical finalist.
-  It measures IC-noise robustness of two fixed points, not observational significance.
+- Paired seed scan favours the old free-Q finalist over the strict-spherical finalist;
+  fixed-point IC robustness only, not observational significance.
   Details: private `results/logs/seed/seeds_multi_…_20261026_081001/NOTES.md`.
-- Q profiles use seed-42 CRN, re-optimise (gh, rh, rho0) at fixed Q in the full physical box,
-  and keep their rows separate from ordinary search pools. Both runs are analysed:
-  private `results/logs/qprofile/qprofile_…_20261029_111955/NOTES.md` and
-  `results/logs/qprofile/qprofile_…_20261102_145506/NOTES.md`.
+- Q profiles use seed-42 CRN and optimise (gh,rh,rho0) in the full box; isolated from search pools.
+  Both analysed: private `results/logs/qprofile/qprofile_…_20261029_111955/NOTES.md`
+  and `results/logs/qprofile/qprofile_…_20261102_145506/NOTES.md`.
 - Budget-limited profile searches give upper bounds on the true minima, not a proven barrier;
   sparse Q samples do not establish lost CRN correlation or a numerical error.
 - Both local seed-42 searches are done (private NOTES in `results/logs/localpca/localpca_…_20261104_134856/`
@@ -29,28 +28,29 @@ prepared (Q31), synthetic BoTorch preflight passed. No new AGAMA model calculati
 - Free-alpha search completed: modest gain vs same-host alpha=2 control; high-alpha plateau reaches
   the prior edge, gh/rh boundaries persist. PCA retains alpha, drops mostly gh. Private
   `results/logs/localpca/localpca_alpha_…_20261107_232859/NOTES.md`; no precise alpha determination.
+- rh/beta profiles completed: every beta branch still favours the upper radius edge; extended-cell
+  winners remain inherited starts. Full-box budget did not establish nuisance convergence.
+  CPU parallelism works, saving/solving cost time; SMT/process scaling unmeasured. Private
+  `results/logs/rhprofile/rhprofile_…_20261108_122200/NOTES.md`.
 
 ## Code state
 
 - Production and CONTRACT unchanged; library/seed/git-results protocols remain as in §3d, §3g–§3h.
 - Q profile (§3i, DECISIONS 2026-10-28): seed-42 CRN, trust-region BO per Q in the full box, continuation
   + Sobol/global starts, optional priors, isolated `qprofile_*` rows, `.npz` ≤ 3.5 (Q≠1), resume; `195cba8`.
-- Local PCA search (DECISIONS 2026-11-03, §3j): `run_local_pca.py` + `launch_tycho.sh --local-pca` —
-  full 4D TuRBO, local box, seed 42, context-checked Q-profile priors, BoTorch self-test in preflight.
-- Explicit starts before Sobol (2026-11-04), fixed box parameters via NAME=v:v (2026-11-06), resumable.
-- Free alpha (DECISIONS 2026-11-07, §3k): `--local-pca --fit-alpha`, alpha ∈ [0.5, 3] (Hayashi), PCA 5→4
-  with the dropped PC pinned at the best point; alpha in library keys/metadata; legacy unchanged.
+- Local PCA (§3j): full 4D TuRBO, local box, seed 42, checked priors, BoTorch preflight; resumable.
+  Explicit starts before Sobol, fixed parameters via NAME=v:v; `launch_tycho.sh --local-pca`.
+- Free alpha (§3k): `--local-pca --fit-alpha`, alpha ∈ [0.5, 3], PCA 5→4; alpha in keys/metadata.
 - rh profiles (§3l, Q31): beta=3/4/7/10, 7 radii in existing bounds, full 4D nuisance PCA, no old penalties.
-  Beta in keys/metadata/history; per-cell resume, budget extension; prepared only, no dynamical run.
+  Beta in keys/metadata/history; per-cell resume, budget extension; delivered as `5408074`.
 
 ## Next steps (started by the user)
 
-1. Deliver prepared rh/beta code/starts, then run after preflight when requested; up to 672 evaluations.
-   Private `results/logs/rhprofile/HANDOFF_RH_BETA.md`. Radial J/outer-tracer follow-ups: Q32.
+1. Stage A local refinement prepared (DECISIONS 2026-11-10): beta=3,10 × rh=30,20,10,5, fixed rh,
+   local box, ≤160 evals; private `results/logs/rhprofile/HANDOFF_RH_LOCAL_A.md`. Stage B deferred; Q32.
 2. J-factor/mass comparison of near-spherical vs compact families; rh=30/gh=0 bounds; other incl.
    A variable-alpha J calculation needs separate treatment; production remains frozen.
-3. fornax-dwarf native AGAMA (`~gala`, `agamaBoTorch`) has completed its first search and seed-42 control.
-   Repos have write access; `TZ=Europe/Moscow` for gala (system UTC); taskset ≤8 cores / scope ≤44 GiB.
+3. fornax-dwarf (`~gala`, `agamaBoTorch`): `TZ=Europe/Moscow`; taskset ≤8 cores / scope ≤44 GiB.
    Stop via `systemctl … kill --signal=TERM`: Ctrl-C inside `agama.orbit` exits 130 (state intact).
 
 ## Open questions
