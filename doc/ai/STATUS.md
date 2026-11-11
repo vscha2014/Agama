@@ -1,16 +1,14 @@
 # Project status
 
 Rewritten at the end of every task; ≤60 lines. Update 2026-11-11: Devin work moves to fornax-dwarf
-(history migrated, see Next steps 3); inclination-fan driver is code only; rh/beta upper radius open.
+(history migrated, see Next steps 3); inclination-fan driver is code only; stage-A rh refinement analysed.
 
 ## Where the science stands
 
-- Completed free-Q L24 and spherical Q1 searches at incl=90 provide two finalists (numbers in
-  results/); their historical minima do not calibrate IC uncertainty, and the paired seed scan
-  favours the free-Q one — fixed-point robustness only (`results/logs/seed/…_20261026_081001/`).
-- Q profiles use seed-42 CRN and optimise (gh,rh,rho0) in the full box; isolated from search pools.
-  Both analysed (`results/logs/qprofile/qprofile_…_{20261029_111955,20261102_145506}/NOTES.md`);
-  budget-limited profiles give upper bounds on the true minima, not a proven barrier.
+- Free-Q L24 and spherical Q1 finalists at incl=90 (numbers in results/): historical minima do not
+  calibrate IC noise; paired seeds favour free-Q, fixed points only (`results/logs/seed/…_20261026_081001/`).
+- Q profiles (seed-42 CRN, gh/rh/rho0 in the full box) analysed (`results/logs/qprofile/…_{20261029_111955,
+  20261102_145506}/`); budget-limited profiles give upper bounds on the minima, not a proven barrier.
 - Both local seed-42 searches are done (`results/logs/localpca/localpca_…_{20261104_134856,20261105_094229}/`):
   the compact minimum is closed except gh=0 and lower Q is worse, while the near-spherical one ranks
   clearly better at seed 42 but sits on gh=0/rh=30, a side seed 42 is known to favour.
@@ -22,9 +20,9 @@ Rewritten at the end of every task; ≤60 lines. Update 2026-11-11: Devin work m
 - Free-alpha search completed: modest gain vs same-host alpha=2 control; high-alpha plateau reaches
   the prior edge, gh/rh boundaries persist, no precise alpha determination; PCA retains alpha and
   drops mostly gh (`results/logs/localpca/localpca_alpha_…_20261107_232859/NOTES.md`).
-- rh/beta profiles completed: every beta branch still favours the upper radius edge, extended-cell
-  winners remain inherited starts, the full-box budget did not establish nuisance convergence
-  (`results/logs/rhprofile/rhprofile_…_20261108_122200/NOTES.md`).
+- rh/beta profiles (full box, then stage-A local box): every beta branch still falls to the rh=30 edge;
+  stage A reproduces shared points bit-for-bit and does not beat the transplanted finalist at rh≥10
+  (`results/logs/rhprofile/rhprofile_…_{20261108_122200,20261110_131919}/NOTES.md`).
 
 ## Code state
 
@@ -44,19 +42,19 @@ Rewritten at the end of every task; ≤60 lines. Update 2026-11-11: Devin work m
 
 ## Next steps (started by the user)
 
-1. Stage A local refinement prepared (DECISIONS 2026-11-10): beta=3,10 × rh=30,20,10,5, fixed rh,
-   local box, ≤160 evals; private `results/logs/rhprofile/HANDOFF_RH_LOCAL_A.md`. Stage B deferred; Q32.
+1. Stage A done, stage B deferred. Next: Q32-A (J along the flat rh profile), optional paired seeds
+   at rh=10/20/30 and a seeded Q scan near the Q≈0.99 cliff; Q32-B outer tracers.
 2. J-factor/mass comparison of near-spherical vs compact families; rh=30/gh=0 bounds; variable-alpha
    J needs separate treatment; production frozen. Other incl: `run_incl_fan.py --diagnose` and
    `--benchmark` on an AGAMA host (none locally), then Q33 before any `--fan` run for the paper.
 3. fornax-dwarf (`~gala`, `agamaBoTorch`): `TZ=Europe/Moscow`; taskset ≤8 cores / scope ≤44 GiB.
    Stop via `systemctl … kill --signal=TERM`: Ctrl-C inside `agama.orbit` exits 130 (state intact).
-   Devin there (DECISIONS 2026-11-11): the dialogue history lives in `~gala/.local/share/devin/cli/sessions.db`;
-   the local copy is an archive only; session plans/summaries index: private `results/doc/SESSIONS.md`.
+   Devin there (DECISIONS 2026-11-11): history in `~gala/.local/share/devin/cli/sessions.db` (local copy
+   archive only); plans/summaries index: private `results/doc/SESSIONS.md`.
 
 ## Open questions
 
 Q15 (Upsilon Brent → production), Q16 (J weighting), Q17–Q19 (shards, `ic`/`inttime`, naming),
-Q20 (production `pipefail`), Q23 (OpenMP wrap), Q32 (radial J/outer tracers), Q33 (shared orbit
-basis across inclinations) — see `questions_for_pi.md`. Decided (`DECISIONS.md`): Q21, Q22, Q28–Q31,
-TR bound, PCA std floor, git sync, Q profile, local PCA, gray seeds, free alpha, incl fan scope.
+Q20 (`pipefail`), Q23 (OpenMP wrap), Q32 (radial J/outer tracers), Q33 (orbit basis across incl) —
+see `questions_for_pi.md`. Decided (`DECISIONS.md`): Q21, Q22, Q28–Q31, TR bound, PCA std floor,
+git sync, Q profile, local PCA, gray seeds, free alpha, stage-A rh refinement, incl fan scope.

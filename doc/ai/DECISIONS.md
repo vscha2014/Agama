@@ -781,3 +781,12 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
 - **Rule** | One authoritative host per dialogue: from now on fornax-dwarf. The local DB is an
   archive; two copies diverge and cannot be merged. The copy also contains the user's personal
   sessions (dir mode 700 on a shared host); delete them with `/rm-session` if undesired.
+
+## 2026-11-11 — Stage-A rh refinement analysed (user)
+
+- **Outcome** | Run `rhprofile_…_20261110_131919` (fornax-dwarf, 160 evaluations, exit 0): shared
+  coordinates reproduce penalty/Upsilon bit-for-bit; the transplanted free-alpha finalist stays best at
+  rh≥10 for beta=3 and 10; both branches still decrease to the rh=30 edge. Only beta=10, rh=5 moved
+  (alpha at its upper bound, not converged). No bound, aperture or production change follows.
+- **Next** | Stage B stays deferred. Recommended follow-ups are recorded in STATUS (Q32-A J along the
+  profile; optional paired seeds and a Q scan near Q≈0.99); none is started without a user request.
