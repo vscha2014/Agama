@@ -765,3 +765,19 @@ Details and the per-item behaviour: `harness/orblib_exp.md` §3a.
   `incl_fan_*.txt`, matched by no pool glob. Harness runbook §3m.
 - **Blocked** | Any fan run meant to produce article numbers waits for Q33 (A: screening only,
   final numbers recomputed exactly; B: published with a measured E1+E2 systematic; C: no fan).
+
+## 2026-11-11 — Devin sessions continue on fornax-dwarf; plans and summaries in results/doc (user)
+
+- **Request** | Move the non-git Devin hand-off artefacts into the private `results` repo
+  (new folder `doc`) and continue the same dialogues on fornax-dwarf.
+- **In git (private results/doc)** | `plans/` (project plans from `~/.devin/plans`), `summaries/` and
+  `summaries_compaction/` (from `~/.local/share/devin/{,cli/}summaries`), `SESSIONS.md` index and the
+  read-only generator `export_sessions.py`. Moved, not copied: originals removed after a byte comparison.
+  Personal sessions (non-project working directory or an explicit id list) are excluded.
+- **Not in git** | `sessions.db` (2.5 GB): consistent `sqlite3` backup, `working_directory`
+  `/home/wind/Agama` → `/home/gala/Agama` in the copy only, zstd (154 MB) + sha256-checked transfer to
+  `~gala/.local/share/devin/cli/` (mode 600, dirs 700). Integrity and row counts equal to the source.
+  Server permissions `config.json` with `/home/wind` → `/home/gala`. Devin versions equal (3.12.43).
+- **Rule** | One authoritative host per dialogue: from now on fornax-dwarf. The local DB is an
+  archive; two copies diverge and cannot be merged. The copy also contains the user's personal
+  sessions (dir mode 700 on a shared host); delete them with `/rm-session` if undesired.

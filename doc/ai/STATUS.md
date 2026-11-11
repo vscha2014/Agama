@@ -1,7 +1,7 @@
 # Project status
 
-Rewritten at the end of every task; ≤60 lines. Update 2026-11-10: inclination-fan driver written
-(code only, nothing run); the rh/beta upper-radius direction remains open.
+Rewritten at the end of every task; ≤60 lines. Update 2026-11-11: Devin work moves to fornax-dwarf
+(history migrated, see Next steps 3); inclination-fan driver is code only; rh/beta upper radius open.
 
 ## Where the science stands
 
@@ -51,6 +51,8 @@ Rewritten at the end of every task; ≤60 lines. Update 2026-11-10: inclination-
    `--benchmark` on an AGAMA host (none locally), then Q33 before any `--fan` run for the paper.
 3. fornax-dwarf (`~gala`, `agamaBoTorch`): `TZ=Europe/Moscow`; taskset ≤8 cores / scope ≤44 GiB.
    Stop via `systemctl … kill --signal=TERM`: Ctrl-C inside `agama.orbit` exits 130 (state intact).
+   Devin there (DECISIONS 2026-11-11): the dialogue history lives in `~gala/.local/share/devin/cli/sessions.db`;
+   the local copy is an archive only; session plans/summaries index: private `results/doc/SESSIONS.md`.
 
 ## Open questions
 
